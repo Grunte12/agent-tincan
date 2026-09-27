@@ -507,13 +507,24 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 // them delivered under a lease. A request delivered but never claimed returns
 // to the queue when the lease runs out, so a crash after polling strands
 // nothing.
+// maxDeliverBytes bounds the request text one poll delivers, so a batch of
+// large or resumed requests (which carry their clarification exchanges) stays
+// well inside a client's response limit. The oldest request always goes out,
+// whatever its size; the rest wait for the next poll.
+const maxDeliverBytes = 1 << 20
+
 func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time.Duration) ([]envelope.Request, error) {
 	now := s.now()
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
-		WHERE id IN (SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at LIMIT ?)
+		WHERE id IN (SELECT id FROM (
+			SELECT id, SUM(length(body) + length(exchanges)) OVER (ORDER BY created_at, rowid) AS running,
+				ROW_NUMBER() OVER (ORDER BY created_at, rowid) AS n
+			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?
+			ORDER BY created_at, rowid LIMIT ?
+		) WHERE n = 1 OR running <= ?)
 		RETURNING `+requestCols,
 		string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
-		agent, string(envelope.StatusQueued), now.UnixMilli(), limit)
+		agent, string(envelope.StatusQueued), now.UnixMilli(), limit, maxDeliverBytes)
 	if err != nil {
 		return nil, err
 	}

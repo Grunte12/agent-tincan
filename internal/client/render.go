@@ -104,7 +104,7 @@ func FormatAttachments(atts []envelope.Attachment) string {
 
 // parentOpen reports whether a parent request still expects a reply.
 func parentOpen(s envelope.Status) bool {
-	return s == envelope.StatusQueued || s == envelope.StatusDelivered || s == envelope.StatusClaimed || s == envelope.StatusNeedsInput
+	return s == envelope.StatusQueued || s == envelope.StatusDelivered || s == envelope.StatusClaimed
 }
 
 // Claimer claims a delivered request for this agent.
@@ -167,7 +167,9 @@ func formatParent(p *envelope.Parent) string {
 	var b strings.Builder
 	if p != nil {
 		fmt.Fprintf(&b, "This answers the question you asked while handling request %s from %s: %s.", p.ID, p.From, truncate(p.Body, 300))
-		if parentOpen(p.Status) {
+		if p.Status == envelope.StatusNeedsInput {
+			fmt.Fprintf(&b, " That request is waiting for its sender to answer your clarifying question, so it cannot take a reply yet. Carry on once the answer arrives and the request comes back to you.\n")
+		} else if parentOpen(p.Status) {
 			fmt.Fprintf(&b, " That request is still open (status %s). When you have what you need, reply to it with `tincan reply %s \"...\"` (or the reply tool).\n", p.Status, p.ID)
 		} else {
 			fmt.Fprintf(&b, " That request is already closed (status %s), so there is nothing left to reply to.\n", p.Status)

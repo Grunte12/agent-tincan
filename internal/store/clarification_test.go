@@ -280,3 +280,42 @@ func TestReplyGenerationAcknowledgements(t *testing.T) {
 		})
 	}
 }
+
+// A poll delivers at most maxDeliverBytes of request text (bodies plus
+// clarification exchanges), always at least the oldest request, so resumed
+// requests cannot push one poll past a client's response limit.
+func TestDeliverBoundsBatchBytes(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	big := strings.Repeat("x", 400<<10)
+	var ids []string
+	for range 4 {
+		req := ask(t, s, "grokbot", "muse", "short")
+		if _, err := s.db.Exec(`UPDATE requests SET body = ?, exchanges = ? WHERE id = ?`, big, `[{"question":"`+strings.Repeat("q", 200<<10)+`"}]`, req.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, req.ID)
+	}
+	first, err := s.Deliver(t.Context(), "muse", 20, time.Minute)
+	if err != nil || len(first) != 1 || first[0].ID != ids[0] {
+		t.Fatalf("first poll = %d requests, %v", len(first), err)
+	}
+	var rest []string
+	for range 4 {
+		got, err := s.Deliver(t.Context(), "muse", 20, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range got {
+			rest = append(rest, r.ID)
+		}
+	}
+	if len(rest) != 3 {
+		t.Fatalf("later polls delivered %d of the remaining 3", len(rest))
+	}
+	small := ask(t, s, "grokbot", "muse", "a")
+	also := ask(t, s, "grokbot", "muse", "b")
+	got, err := s.Deliver(t.Context(), "muse", 20, time.Minute)
+	if err != nil || len(got) != 2 || got[0].ID != small.ID || got[1].ID != also.ID {
+		t.Fatalf("small requests = %+v, %v", got, err)
+	}
+}

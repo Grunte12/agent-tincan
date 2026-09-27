@@ -119,3 +119,15 @@ func TestClarificationReplyIncludesParent(t *testing.T) {
 		}
 	}
 }
+
+func TestReplyToWaitingParentSaysWait(t *testing.T) {
+	out := client.FormatReply(client.Result{
+		Request: envelope.Request{ID: "child", To: "muse"},
+		Status:  envelope.StatusAnswered,
+		Reply:   &envelope.Reply{Body: "found it", Status: envelope.StatusAnswered},
+		Parent:  &envelope.Parent{ID: "parent", From: "grokbot", Body: "book dinner", Status: envelope.StatusNeedsInput},
+	})
+	if strings.Contains(out, "tincan reply parent") || !strings.Contains(out, "waiting for its sender to answer") {
+		t.Fatalf("waiting parent rendered as replyable: %q", out)
+	}
+}
