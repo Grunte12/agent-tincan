@@ -5,7 +5,7 @@ The `history` agent answers teammates' questions about what the owner (you) aske
 It is a Go service, `tincan history serve`, that runs on your Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
 1. Checks access. By default any agent joined to your relay may ask. If you wrote an allowlist file, every agent in the request's chain, as the relay recorded it, must be on it; otherwise it declines and names the agent.
-2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text.
+2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text. A request that is already a structured query (see [Structured queries](#structured-queries)) skips this step and never reaches a model.
 3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in your logged-in Chrome.
 4. Fills in a fixed reply template and attaches the images.
 
@@ -47,6 +47,29 @@ With no file, the service uses the default window. A file that is present but ca
 On the command line, `tincan history <source>` takes the same bounds as flags: `--days N` (applies to `--list` too) and `--max N`.
 
 When the window cut an answer short, the answer says so. A search that found fewer matches than it wanted, or a latest lookup that could not be sure it saw the newest prompt, gets one extra line in the reply, such as "Only ChatGPT conversations from the last 30 days were searched, so older ones may be missing." (or "Only the last 50 ... conversations were searched" when the count ran out). On the command line the same note goes to stderr, in text and `--json` modes; `--json` output stays a bare array. A complete answer has no note.
+
+## Structured queries
+
+A caller that already knows its query can send it directly and skip the `codex exec` step. Put `query:` alone on the first line and one JSON object after it:
+
+```
+query:
+{"source": "chatgpt", "mode": "search", "terms": ["sourdough"], "count": 3}
+```
+
+The JSON may also start on the marker line: `query: {"source": "codex", "mode": "latest"}`. The marker is matched in any case, but the first line must be exactly `query:`, or `query:` followed only by spaces or tabs and a JSON object starting with `{`. Any other first line, such as `Query: what did I ask ChatGPT`, is a normal question and goes through the query step as before.
+
+The object takes only these fields, the same schema the query step produces:
+
+- `source`: `chatgpt`, `claude-ai`, `codex` or `claude-code` (required).
+- `mode`: `latest`, `search` or `conversation` (required).
+- `terms`: the words to search for, up to 8 of up to 100 bytes each, none blank (only with `search`).
+- `conversation_id`: the conversation to read (only with `conversation`).
+- `count`: 0 to 20; 0 means the default.
+- `want_images`: attach the images from the answer.
+- `with_images`: pick the most recent turn that had images (implies `want_images`).
+
+Structured queries never reach a model. The allowlist check still runs first, exactly as for a question, and the JSON is then checked in Go: the request must be at most 4000 bytes and be one bare JSON object with nothing but whitespace after it (no code fence, no trailing text), have no other fields (so it cannot carry a window) and stay in bounds. Fields are checked as sent, never trimmed or dropped: `terms` or `conversation_id` on a mode that does not use them is refused, and so is a field named twice or set to `null` (leave a field out to use its default). A query that fails any check gets the failed reply "The structured query was not valid" (or "The structured query is too long") with the list of accepted fields; it is never passed to the query step instead. A valid one is read and answered with the same fixed reply templates as a question.
 
 ## Install
 
@@ -99,7 +122,7 @@ After install, check it from another agent: `tincan ask history "what was the la
 
 - The service reads your chats. That is its whole job. By default every joined agent may ask it, so any agent on your relay can read your conversation history. If some of your agents should not, write the allowlist file and list only the ones you trust. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
 - With an allowlist file, access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
-- The LLM step sees only the question text. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex and Claude Code readers never report. Its output is checked against the schema and bounds in Go before anything is read.
+- The LLM step sees only the question text, and a structured query skips it entirely. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex and Claude Code readers never report. Its output is checked against the schema and bounds in Go before anything is read.
 - Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside your chats cannot steer the service.
 - Images are written to a private per-request temporary directory (0700, files 0600), uploaded to the relay, and the directory is removed after the reply, including on errors. On the relay they follow its attachment retention.
 - Chrome is never quit or restarted. Live reads use the extension's fixed read operations with your existing session; no cookie or token leaves the browser.
@@ -112,6 +135,7 @@ Replies and what to do:
 - "Declined: this request came through X, which is not on the history allowlist": an allowed agent was asked by X and passed the question on. Ask X's owner, or add X.
 - "Declined: the history agent could not read its allowlist": fix the file's permissions or the bad name in it. The log says which.
 - "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
+- "The structured query was not valid" or "The structured query is too long": the request started with a `query:` line but its JSON was not one object with only the accepted fields in bounds, or the request was over 4000 bytes. The reply lists the fields; see [Structured queries](#structured-queries).
 - "its query step failed": `codex exec` did not run. Check that `codex` is on the service's `PATH` and logged in (`codex login status`), then see `~/Library/Logs/tincan-history.log`.
 - "No Codex history was found on this machine" (on the CLI, "no Codex history found in ~/.codex"; the same for Claude Code): that tool has not been used on this machine yet, or keeps its history elsewhere (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`).
 - "source unavailable: chatgpt: Chrome is not running": start Chrome. Local sources still work.

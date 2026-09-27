@@ -273,7 +273,8 @@ const clarifyExample = `For example: "what was the last thing I asked ChatGPT? s
 
 // Service is the history agent: it polls the relay as its own identity,
 // checks each request's relay-set chain against the allowlist, turns the
-// question into a Query with a tool-less extractor, reads the source, and
+// question into a Query with a tool-less extractor (or parses a structured
+// query in Go, with no model step), reads the source, and
 // replies from a fixed template with the images attached. Retrieved chat
 // content never reaches the extractor or any other LLM.
 type Service struct {
@@ -417,10 +418,27 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		return
 	}
 
-	// 3. The question text, and only that, goes to the extractor.
-	q, err := s.Extractor.Extract(ctx, req.Body)
-	if err == nil {
-		err = ValidateServiceQuery(q)
+	// 3. The query. A structured query is parsed in Go and never reaches a
+	// model; anything else is question text, and only that goes to the
+	// extractor.
+	var q Query
+	if raw, ok := structuredBody(req.Body); ok {
+		if len(req.Body) > MaxQuestionBytes {
+			s.logf("request %s from %s: structured query too long (%d bytes)", req.ID, req.From, len(req.Body))
+			s.reply(ctx, req, fmt.Sprintf("The structured query is too long (over %d bytes), so the history agent did not run it. %s", MaxQuestionBytes, structuredHelp), envelope.StatusFailed, nil)
+			return
+		}
+		if q, err = parseStructured(raw); err != nil {
+			s.logf("request %s from %s: structured query rejected: %v", req.ID, req.From, err)
+			s.reply(ctx, req, "The structured query was not valid, so the history agent did not run it. "+structuredHelp, envelope.StatusFailed, nil)
+			return
+		}
+		s.logf("request %s from %s: structured query, no model step", req.ID, req.From)
+	} else {
+		q, err = s.Extractor.Extract(ctx, req.Body)
+		if err == nil {
+			err = ValidateServiceQuery(q)
+		}
 	}
 	if errors.Is(err, ErrUnclearQuestion) {
 		s.logf("request %s from %s: unclear question: %v", req.ID, req.From, err)

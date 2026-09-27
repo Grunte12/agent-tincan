@@ -245,6 +245,88 @@ func parseExtraction(raw []byte) (Query, error) {
 	return q, nil
 }
 
+// structuredMarker starts a structured query's first line.
+const structuredMarker = "query:"
+
+// structuredHelp names the structured query's fields in its failed reply.
+// It is fixed text and never echoes the request.
+const structuredHelp = `Put "query:" on the first line and one JSON object after it, with only these fields: source (chatgpt, claude-ai, codex or claude-code), mode (latest, search or conversation), terms (the words to search for, up to 8), conversation_id (with mode conversation), count (0 to 20), want_images and with_images (true or false). For example: query: {"source":"chatgpt","mode":"latest","count":1}`
+
+// structuredBody reports whether body is a structured query and returns
+// its JSON text. The first line, trimmed and in any case, must be exactly
+// "query:" (the JSON on the following lines) or "query:" followed by
+// optional spaces or tabs and a JSON object starting with "{" on the same line.
+// Anything else, such as "Query: what did I ask ChatGPT", is a free-text
+// question.
+func structuredBody(body string) (string, bool) {
+	first, rest, _ := strings.Cut(body, "\n")
+	head := strings.TrimSpace(first)
+	n := len(structuredMarker)
+	if len(head) < n || !strings.EqualFold(head[:n], structuredMarker) {
+		return "", false
+	}
+	switch inline := strings.TrimLeft(head[n:], " \t"); {
+	case inline == "":
+		return rest, true
+	case strings.HasPrefix(inline, "{"):
+		return inline + "\n" + rest, true
+	}
+	return "", false
+}
+
+// parseStructured parses a caller-authored structured query strictly,
+// unlike parseExtraction's leniency for model output: the text must be
+// exactly one JSON object with only whitespace around it (no code fence,
+// no trailing text), no unknown fields (so no window), and every field is
+// validated as sent. Nothing is trimmed or dropped before validation:
+// terms or conversation_id on a mode that does not use them, a blank
+// term or a padded id are rejected. Failures are ErrUnclearQuestion.
+func parseStructured(raw string) (Query, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var e extraction
+	if err := dec.Decode(&e); err != nil {
+		return Query{}, fmt.Errorf("%w: not the query schema: %v", ErrUnclearQuestion, err)
+	}
+	if rest := raw[dec.InputOffset():]; strings.TrimSpace(rest) != "" {
+		return Query{}, fmt.Errorf("%w: text after the query object", ErrUnclearQuestion)
+	}
+	// Every field is checked as sent: a key named twice (the decoder keeps
+	// the last) or an explicit null (the decoder keeps the default) would
+	// run a lookup the caller did not ask for.
+	if err := uniqueKeys([]byte(raw)); err != nil {
+		return Query{}, fmt.Errorf("%w: %v", ErrUnclearQuestion, err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err == nil {
+		for k, v := range fields {
+			if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+				return Query{}, fmt.Errorf("%w: %s is null", ErrUnclearQuestion, k)
+			}
+		}
+	}
+	mode := Mode(e.Mode)
+	if len(e.Terms) > 0 && mode != ModeSearch {
+		return Query{}, fmt.Errorf("%w: terms on mode %q", ErrUnclearQuestion, e.Mode)
+	}
+	if e.ConversationID != "" && mode != ModeConversation {
+		return Query{}, fmt.Errorf("%w: conversation_id on mode %q", ErrUnclearQuestion, e.Mode)
+	}
+	q := Query{
+		Source:         Source(e.Source),
+		Mode:           mode,
+		Terms:          e.Terms,
+		ConversationID: e.ConversationID,
+		Count:          e.Count,
+		WantImages:     e.WantImages || e.WithImages,
+		WithImages:     e.WithImages,
+	}
+	if err := ValidateServiceQuery(q); err != nil {
+		return Query{}, err
+	}
+	return q, nil
+}
+
 // ValidateServiceQuery checks a query from an extractor before any read:
 // Query.Validate plus a source that is one of the four. Failures are
 // ErrUnclearQuestion.
