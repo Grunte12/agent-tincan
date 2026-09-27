@@ -142,6 +142,7 @@ func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 		keys, ids = append(keys, "q:"+p.ID), append(ids, p.ID)
 		addFrom(p.From)
 	}
+	urgent = max(urgent, w.Urgent)
 	if len(w.Pending) == 0 && w.Queued > 0 {
 		// A relay that predates pending gives only a count.
 		keys = append(keys, fmt.Sprintf("q#%d", w.Queued))

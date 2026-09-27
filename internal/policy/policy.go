@@ -103,6 +103,20 @@ func (p *Policy) parent(ctx context.Context, req *envelope.Request) (envelope.Re
 	return parent, true, nil
 }
 
+// Refund returns the urgent slot req took in Prepare, for a send the relay
+// then failed to queue (a bad attachment, say), so a failed send never
+// spends the sender's urgent allowance.
+func (p *Policy) Refund(req envelope.Request) {
+	if !req.Urgent {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := len(p.urgent[req.From]); n > 0 {
+		p.urgent[req.From] = p.urgent[req.From][:n-1]
+	}
+}
+
 func (p *Policy) rate(sender string, urgent bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

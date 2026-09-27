@@ -289,8 +289,11 @@ func (in Inbox) ReplyIDs() []string {
 
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
-	Total   int      `json:"waiting"` // queued requests plus unseen replies
-	Queued  int      `json:"queued"`
+	Total  int `json:"waiting"` // queued requests plus unseen replies
+	Queued int `json:"queued"`
+	// Urgent counts the queued requests marked urgent, beyond the ones
+	// Pending can list. A relay that predates it leaves it zero.
+	Urgent  int      `json:"urgent,omitempty"`
 	Replies []Result `json:"replies,omitempty"`
 	// Pending names the oldest queued requests (id and sender, no body).
 	// A relay that predates it leaves it empty.

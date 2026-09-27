@@ -548,6 +548,14 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+// CountUrgentQueued returns how many of agent's queued requests are urgent.
+func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ?`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
+	return n, err
+}
+
 // PendingRequests names up to limit of agent's queued requests, urgent
 // first and then oldest, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {

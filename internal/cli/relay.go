@@ -75,7 +75,12 @@ With --dist <dir>, the relay serves tincan release binaries from dir to joined
 agents and admins, so tincan upgrade works on machines without GitHub access.
 Put the raw binaries there as tincan_<os>_<arch> (linux or darwin, amd64 or
 arm64), plus checksums.txt and a VERSION file naming the release.`,
-		RunE: func(cmd *cobra.Command, _ []string) error { return runRelay(cmd.Context(), f) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if f.urgentPerHour < 1 {
+				return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
+			}
+			return runRelay(cmd.Context(), f)
+		},
 	}
 	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
 	cmd.Flags().StringVar(&f.hostname, "hostname", "tincan-relay", "tsnet node name")

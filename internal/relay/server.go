@@ -72,6 +72,12 @@ type Preparer interface {
 	Prepare(ctx context.Context, req *envelope.Request) error
 }
 
+// Refunder is an optional Preparer that gives back what Prepare took (the
+// urgent allowance) when the relay then fails to queue the request.
+type Refunder interface {
+	Refund(req envelope.Request)
+}
+
 // Events lets other parts of the relay react to queue changes (wake, audit).
 type Events interface {
 	Queued(ctx context.Context, req envelope.Request)
@@ -432,8 +438,12 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
+	prepared := req
 	req, err = s.store.Enqueue(r.Context(), req, s.cfg.RequestTTL)
 	if err != nil {
+		if rf, ok := s.prep.(Refunder); ok {
+			rf.Refund(prepared)
+		}
 		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
 		return
 	}
@@ -505,6 +515,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			if n > 0 || len(reps) > 0 {
 				out := map[string]any{"waiting": n + len(reps) + more, "queued": n}
 				if n > 0 {
+					urgent, err := s.store.CountUrgentQueued(r.Context(), name)
+					if err != nil {
+						writeErr(w, http.StatusInternalServerError, err)
+						return
+					}
+					if urgent > 0 {
+						out["urgent"] = urgent
+					}
 					pending, err := s.store.PendingRequests(r.Context(), name, MaxPeekPending)
 					if err != nil {
 						writeErr(w, http.StatusInternalServerError, err)

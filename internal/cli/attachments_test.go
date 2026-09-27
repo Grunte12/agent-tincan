@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,5 +161,29 @@ func TestUrgentCLIAndChannel(t *testing.T) {
 	in, err := m.Client(t, "muse").Poll(t.Context(), 0)
 	if err != nil || len(in.Requests) != 2 || !in.Requests[0].Urgent || in.Requests[1].Urgent || len(in.Requests[0].Attachments) != 1 {
 		t.Fatalf("inbox = %+v, %v", in, err)
+	}
+}
+
+func TestUrgentNoticeCountsPastThePendingList(t *testing.T) {
+	a := announcer{}
+	pending := make([]envelope.Pending, 50)
+	for i := range pending {
+		pending[i] = envelope.Pending{ID: fmt.Sprintf("r%d", i), From: "grokbot", Urgent: true}
+	}
+	n, ok := a.next(client.Waiting{Total: 60, Queued: 60, Urgent: 60, Pending: pending}, time.Now())
+	if !ok || !strings.Contains(n.content, "60 urgent requests waiting") {
+		t.Fatalf("notice = %+v", n)
+	}
+}
+
+func TestRelayRejectsNonPositiveUrgentLimit(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		cmd := relayCmd()
+		cmd.SetArgs([]string{"--urgent-per-hour", v, "--state-dir", t.TempDir()})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), "--urgent-per-hour") {
+			t.Fatalf("urgent-per-hour %s: %v", v, err)
+		}
 	}
 }

@@ -232,3 +232,19 @@ func TestUrgentConfiguredLimit(t *testing.T) {
 		t.Fatalf("limit = %v", err)
 	}
 }
+
+func TestRefundReturnsUrgentSlot(t *testing.T) {
+	f := newFixture(t, Config{UrgentPerHour: 1})
+	req := envelope.Request{From: "sender", To: "target", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatal(err)
+	}
+	f.pol.Refund(req)
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatalf("refunded slot still spent: %v", err)
+	}
+	f.pol.Refund(envelope.Request{From: "sender", To: "target"})
+	if err := f.pol.Prepare(t.Context(), &req); !errors.Is(err, ErrUrgentLimited) {
+		t.Fatalf("a non-urgent refund gave back an urgent slot: %v", err)
+	}
+}

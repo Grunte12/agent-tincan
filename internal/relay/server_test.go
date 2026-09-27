@@ -684,3 +684,41 @@ func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
 		})
 	}
 }
+
+type refundingPreparer struct{ refunded []envelope.Request }
+
+func (p *refundingPreparer) Prepare(_ context.Context, req *envelope.Request) error {
+	return newChain{}.Prepare(context.Background(), req)
+}
+
+func (p *refundingPreparer) Refund(req envelope.Request) { p.refunded = append(p.refunded, req) }
+
+func TestFailedSendIsRefunded(t *testing.T) {
+	h := newHarness(t, Config{})
+	prep := &refundingPreparer{}
+	h.srv.SetPreparer(prep)
+	h.srv.SetAttachmentDir(t.TempDir())
+	// An attachment id that was never uploaded fails at queue time, after Prepare.
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"x","urgent":true,"attachments":[{"id":"missing"}]}`, http.StatusBadRequest, nil)
+	if len(prep.refunded) != 1 || !prep.refunded[0].Urgent || prep.refunded[0].From != "grokbot" {
+		t.Fatalf("refunded = %+v", prep.refunded)
+	}
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"x","urgent":true}`, http.StatusCreated, nil)
+	if len(prep.refunded) != 1 {
+		t.Fatalf("a queued send was refunded: %+v", prep.refunded)
+	}
+}
+
+func TestPeekCountsAllUrgentRequests(t *testing.T) {
+	h := newHarness(t, Config{})
+	for range MaxPeekPending + 5 {
+		if _, err := h.st.Enqueue(context.Background(), envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk, Body: "x", Urgent: true}, time.Hour); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	var out client.Waiting
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, &out)
+	if out.Urgent != MaxPeekPending+5 || len(out.Pending) != MaxPeekPending {
+		t.Fatalf("peek = urgent %d, pending %d", out.Urgent, len(out.Pending))
+	}
+}
