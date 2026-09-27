@@ -366,10 +366,7 @@ func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration,
 	if err != nil {
 		return 0, err
 	}
-	in, err = client.AnswerPings(ctx, relay, in, surface)
-	if err != nil {
-		return 0, err
-	}
+	in, _ = client.AnswerPings(ctx, relay, in, surface)
 	n := 0
 	for _, req := range in.Requests {
 		handle(ctx, req)

@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,5 +262,115 @@ func TestListenPresenceErrorsAreLoggedOnly(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "tincan listen: presence:") || !strings.Contains(log.String(), "relay down") {
 		t.Fatalf("presence errors not logged: %q", log.String())
+	}
+}
+
+func TestListenContinuesAfterPingFailure(t *testing.T) {
+	for _, phase := range []string{"claim", "reply"} {
+		for _, status := range []int{409, 503} {
+			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
+				fastListen(t, time.Second, time.Minute, time.Second)
+				var peeks, failures atomic.Int32
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.URL.Path == "/v1/poll":
+						if r.URL.Query().Get("hold") == "0" {
+							w.WriteHeader(204)
+							return
+						}
+						if peeks.Add(1) == 1 {
+							fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"ping","kind":"ping"}]}`)
+						} else {
+							fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"work","kind":"ask"}]}`)
+						}
+					case strings.HasSuffix(r.URL.Path, "/"+phase):
+						failures.Add(1)
+						http.Error(w, `{"error":"ping failed"}`, status)
+					default:
+						fmt.Fprint(w, `{}`)
+					}
+				}))
+				defer ts.Close()
+				relay, err := client.NewRelay(ts.URL, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				marker := filepath.Join(t.TempDir(), "nudged")
+				if err := listen(ctx, relay, "touch "+marker, true); err != nil {
+					t.Fatal(err)
+				}
+				if failures.Load() != 1 || peeks.Load() < 2 {
+					t.Fatalf("failures=%d peeks=%d", failures.Load(), peeks.Load())
+				}
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestInboxPingFailurePreservesWork(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/poll":
+			fmt.Fprint(w, `{"requests":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask","body":"real work"}]}`)
+		case "/v1/requests/ping/claim":
+			http.Error(w, `{"error":"ping failed"}`, 503)
+		case "/v1/requests/work/claim":
+			fmt.Fprint(w, `{"id":"work","kind":"ask","body":"real work"}`)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, jsonOutput := range []bool{false, true} {
+		var out, errOut bytes.Buffer
+		check := checkInbox
+		if jsonOutput {
+			check = checkInboxJSON
+		}
+		if err := check(t.Context(), relay, 0, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "real work") {
+			t.Fatalf("output: %s", &out)
+		}
+	}
+	in, err := waitForInbox(t.Context(), relay, time.Second, client.RepliesNone)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "work" {
+		t.Fatalf("wait: %+v, %v", in, err)
+	}
+}
+
+func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
+	fastListen(t, time.Second, time.Minute, time.Second)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/poll" {
+			fmt.Fprint(w, `{"waiting":2,"pending":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask"}]}`)
+			return
+		}
+		http.Error(w, `{"error":"ping failed"}`, 503)
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	marker := filepath.Join(t.TempDir(), "waiting")
+	if err := listen(ctx, relay, `printf %s "$TINCAN_WAITING" > `+marker, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || string(got) != "1" {
+		t.Fatalf("waiting=%q: %v", got, err)
 	}
 }

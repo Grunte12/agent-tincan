@@ -461,10 +461,7 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 	if err != nil {
 		return err
 	}
-	in, err = client.AnswerPings(ctx, r, in, "inbox")
-	if err != nil {
-		return err
-	}
+	in, _ = client.AnswerPings(ctx, r, in, "inbox")
 	return printInboxJSON(ctx, r, in, out, errOut)
 }
 
@@ -504,10 +501,7 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	if err != nil {
 		return err
 	}
-	in, err = client.AnswerPings(ctx, r, in, "inbox")
-	if err != nil {
-		return err
-	}
+	in, _ = client.AnswerPings(ctx, r, in, "inbox")
 	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
 		return err
 	}
@@ -622,18 +616,20 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 	backoff := time.Second
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
+		pingFailed := false
 		if err == nil {
 			in, err = client.AnswerPings(ctx, r, in, "wait")
+			pingFailed = err != nil
 		}
 		switch {
-		case err == nil && !in.Empty():
+		case (err == nil || pingFailed) && !in.Empty():
 			return in, nil
 		case err == nil:
 			backoff = time.Second
 			continue
 		case ctx.Err() != nil:
 			return client.Inbox{}, ctx.Err()
-		case client.IsStatus(err, 403):
+		case client.IsStatus(err, 403) && !pingFailed:
 			return client.Inbox{}, err
 		}
 		select {

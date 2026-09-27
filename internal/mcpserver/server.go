@@ -233,10 +233,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return fail(err)
 			}
 			allReplyIDs := inbox.ReplyIDs()
-			inbox, err = client.AnswerPings(ctx, b, inbox, "check_inbox")
-			if err != nil {
-				return fail(err)
-			}
+			inbox, _ = client.AnswerPings(ctx, b, inbox, "check_inbox")
 			out := client.FormatInbox(ctx, b, inbox)
 			var atts []envelope.Attachment
 			for _, r := range inbox.Replies {

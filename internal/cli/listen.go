@@ -80,22 +80,28 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
-		answeredPing := false
+		pingFailed := false
 		for _, pending := range w.Pending {
 			if pending.Kind != envelope.KindPing {
 				continue
 			}
 			_, err := client.AnswerPings(ctx, r, client.Inbox{Requests: []envelope.Request{{ID: pending.ID, Kind: envelope.KindPing}}}, "listen")
 			if err != nil {
-				return err
+				pingFailed = true
 			}
-			answeredPing = true
+			n--
 		}
-		backoff = time.Second
-		if answeredPing {
+		if pingFailed && n <= 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(jitter(backoff)):
+			}
+			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
-		if n == 0 {
+		backoff = time.Second
+		if n <= 0 {
 			continue
 		}
 		if err := nudge(ctx, r, execCmd, n, once); err != nil {

@@ -882,3 +882,21 @@ func TestCheckInboxAutomaticallyAnswersPing(t *testing.T) {
 		t.Fatalf("pong: %+v %v", result, err)
 	}
 }
+
+type failingPingInbox struct{ recorder }
+
+func (f *failingPingInbox) Poll(context.Context, time.Duration) (client.Inbox, error) {
+	return client.Inbox{Requests: []envelope.Request{{ID: "ping", Kind: envelope.KindPing}, {ID: "work", Kind: envelope.KindAsk, Body: "real work"}}}, nil
+}
+func (f *failingPingInbox) Claim(_ context.Context, id string) (envelope.Request, error) {
+	if id == "ping" {
+		return envelope.Request{}, errors.New("temporary ping failure")
+	}
+	return envelope.Request{ID: id, Kind: envelope.KindAsk, Body: "real work"}, nil
+}
+func TestCheckInboxPingClaimFailurePreservesWork(t *testing.T) {
+	out := call(t, connect(t, mcpserver.New(&failingPingInbox{}, "test")), "check_inbox", nil)
+	if strings.Contains(out, "ERROR:") || !strings.Contains(out, "real work") {
+		t.Fatalf("inbox: %s", out)
+	}
+}
