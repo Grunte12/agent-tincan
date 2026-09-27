@@ -509,6 +509,39 @@ test('a large non-JSON answer is read only up to the sniff cap', async () => {
   assert.ok(pulled <= 256 * 1024, `read ${pulled} bytes`);
 });
 
+// The sniff is bounded by time too: a body that sends a little and then
+// stalls is classified from what arrived, not left to hang the reply.
+test('a body that stalls mid-sniff is classified from what arrived', async () => {
+  const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
+  const stalled = (text, status, type) => () => new Response(new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(text));
+    },
+    pull() {
+      return new Promise(() => {});
+    },
+  }), { status, headers: { 'content-type': type } });
+  const cases = [
+    ['403 JSON that stalls', stalled('{"error":{"type":"permission_error"', 403, 'application/json'), 'not_logged_in'],
+    ['403 JSON with an anti-bot marker that stalls', stalled('{"message":"Request rejected by anti-bot rules.', 403, 'application/json'), 'blocked'],
+    ['200 non-JSON that stalls', stalled('<html><body>', 200, 'text/html'), 'endpoint_changed'],
+  ];
+  for (const [name, resp, code] of cases) {
+    const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [listURL]: resp });
+    const started = Date.now();
+    let timer;
+    const hang = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${name}: sniff did not return`)), 2000);
+    });
+    try {
+      await assert.rejects(Promise.race([run(createRunner({ fetch: f, sniffMs: 50 }), 'chatgpt.list', { count: 1 }), hang]), (e) => e.code === code, name);
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.ok(Date.now() - started < 1000, `${name}: took ${Date.now() - started}ms`);
+  }
+});
+
 test('anti-bot pages are blocked; a plain 401 or a 403 permission error is not_logged_in', async () => {
   const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
   const redirected = (res, url) => {

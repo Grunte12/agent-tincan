@@ -67,7 +67,9 @@ site access settings. Sites added later go under `optional_host_permissions`
 (Grok: `https://grok.com/*` and `https://assets.grok.com/*`, granted together)
 and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in
-`SITE_ACCESS`, shows whether all its origins are granted, and its Grant button calls
+`SITE_ACCESS`, shows whether all its origins are granted (a site with only
+its page origins granted shows as granted with images and files needing
+file access, and a "Grant file access" button), and its Grant button calls
 `chrome.permissions.request` for all of the site's origins straight from the
 click (Chrome allows the
 request only during a user gesture). The page is built with `textContent`, has
@@ -75,7 +77,9 @@ no inline script, and never runs in a site's page.
 
 The hello lists the granted sites (`granted`, op prefixes), and the worker
 says hello again on `chrome.permissions.onAdded` and `onRemoved`, so the host
-learns a grant without a reconnect. The host treats a hello without `granted`
+learns a grant without a reconnect. Only the newest hello started is posted,
+so one built before a later change and finishing after it is dropped rather
+than overwriting the newer grant list the host keeps. The host treats a hello without `granted`
 (an older extension) as ChatGPT and claude.ai only. `tincan web serve` asks
 the host (`host.status`, answered by the host itself) at startup. When the
 extension is connected and reports its site ungranted, it logs that once

@@ -267,27 +267,35 @@ function finalURL(res, url) {
 // anti-bot rules or a captcha.
 const ANTI_BOT_TEXT = /just a moment\.\.\.|cf-challenge|challenge-platform|anti-?bot|captcha/i;
 
-// BODY_TEXT_BYTES caps how much of a body bodyText reads.
+// BODY_TEXT_BYTES caps how much of a body bodyText reads, and
+// BODY_TEXT_MS how long it waits for it: a body that sends a little and
+// then stalls is judged on what arrived, so the error reply is not held
+// until the request times out.
 const BODY_TEXT_BYTES = 64 * 1024;
+export const BODY_TEXT_MS = 2000;
 
-// bodyText reads at most BODY_TEXT_BYTES of a copy of res's body, '' when
-// it cannot. It streams the copy and stops at the cap, so a large page is
-// never buffered whole.
-async function bodyText(res) {
+// bodyText reads at most BODY_TEXT_BYTES of a copy of res's body, for at
+// most ms milliseconds, '' when it cannot. It streams the copy and stops
+// at either cap, so a large or stalled page is never waited on whole.
+async function bodyText(res, ms = BODY_TEXT_MS) {
+  let reader;
+  let timer;
   try {
     const body = res.clone().body;
     if (!body) return '';
-    const reader = body.getReader();
+    reader = body.getReader();
+    const expired = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ done: true, value: undefined }), ms);
+    });
     const parts = [];
     let total = 0;
     while (total < BODY_TEXT_BYTES) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), expired]);
       if (done) break;
       const part = value.subarray(0, BODY_TEXT_BYTES - total);
       parts.push(part);
       total += part.length;
     }
-    reader.cancel().catch(() => {});
     const bytes = new Uint8Array(total);
     let off = 0;
     for (const part of parts) {
@@ -297,6 +305,9 @@ async function bodyText(res) {
     return new TextDecoder().decode(bytes);
   } catch {
     return '';
+  } finally {
+    clearTimeout(timer);
+    if (reader) reader.cancel().catch(() => {});
   }
 }
 
@@ -314,14 +325,14 @@ function antiBot(res, url, body) {
 // where 404 means the item is gone rather than the API moved. Anti-bot
 // pages are blocked whatever their status, except that a 401 stays
 // not_logged_in.
-async function check(res, url, notFound) {
+async function check(res, url, notFound, sniffMs = BODY_TEXT_MS) {
   const where = `HTTP ${res.status} from ${pathOf(url)}`;
   if (res.status !== 401 && antiBot(res, url)) throw new OpError('blocked', `anti-bot check (${where})`);
   if (res.ok) return;
   if (res.status === 401) throw new OpError('not_logged_in', where);
   if (res.status === 403) {
     if (contentType(res) === 'text/html') throw new OpError('blocked', where);
-    if (antiBot(res, url, await bodyText(res))) throw new OpError('blocked', `anti-bot check (${where})`);
+    if (antiBot(res, url, await bodyText(res, sniffMs))) throw new OpError('blocked', `anti-bot check (${where})`);
     throw new OpError('not_logged_in', where);
   }
   if (res.status === 404 || res.status === 410) throw new OpError(notFound ? 'not_found' : 'endpoint_changed', where);
@@ -342,8 +353,10 @@ function b64(bytes) {
 // and its operations then fail as unsupported.
 //
 // permissions (chrome.permissions) is asked before each operation whether
-// its site is granted; without it every site counts as granted.
-export function createRunner({ fetch, sender = null, reload = null, permissions = null }) {
+// its site is granted; without it every site counts as granted. sniffMs
+// bounds how long an error or non-JSON body is read for anti-bot markers
+// (BODY_TEXT_MS unless a test shortens it).
+export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS }) {
   let claudeOrg = null;
   let reloadPending = false;
 
@@ -385,11 +398,11 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // (the session probes run first, so a logged-out browser never sends).
   async function getJSON(url, init, notFound = false) {
     const res = await send(url, { credentials: 'include', ...init });
-    await check(res, url, notFound);
+    await check(res, url, notFound, sniffMs);
     const at = finalURL(res, url);
     if (at && at.host !== new URL(url).host) throw new OpError('not_logged_in', `redirected to ${at.host}`);
     if (!contentType(res).includes('json')) {
-      if (antiBot(res, url, await bodyText(res))) throw new OpError('blocked', `anti-bot check from ${pathOf(url)}`);
+      if (antiBot(res, url, await bodyText(res, sniffMs))) throw new OpError('blocked', `anti-bot check from ${pathOf(url)}`);
       throw new OpError('endpoint_changed', `non-JSON answer from ${pathOf(url)}`);
     }
     try {
@@ -427,7 +440,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
 
   async function emitFile(url, init, emit) {
     const res = await send(url, init);
-    await check(res, url, true);
+    await check(res, url, true, sniffMs);
     const declared = Number(res.headers.get('content-length') || 0);
     if (declared > MAX_FILE_BYTES) throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
     const mime = contentType(res);
