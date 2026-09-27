@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -951,5 +952,218 @@ func TestServePresenceDuringSlowRequest(t *testing.T) {
 	got, err := codex.Get(t.Context(), queuedID, 0)
 	if err != nil || got.Status != envelope.StatusQueued {
 		t.Fatalf("the request queued during the read: %s %v (want still queued)", got.Status, err)
+	}
+}
+
+// A structured query, marked by a "query:" first line, skips the extractor
+// and reaches the reader as parsed. Both marker forms work.
+func TestServeStructuredQuerySkipsTheExtractor(t *testing.T) {
+	for name, body := range map[string]string{
+		"marker line":       "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+		"same line":         "query: {\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+		"same line no gap":  "query:{\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+		"upper case marker": "  QUERY:  \n{\"source\":\"chatgpt\",\"mode\":\"latest\"}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newServeRig(t, true)
+			res := rig.ask(t, "grokbot", body)
+			if res.Status != envelope.StatusAnswered {
+				t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+			}
+			if got := rig.ext.questions(); len(got) != 0 {
+				t.Fatalf("extractor saw %q, want no model step", got)
+			}
+			if !strings.Contains(res.Reply.Body, "Fox logo ideas") {
+				t.Fatalf("reply is not the templated answer: %q", res.Reply.Body)
+			}
+			rig.chatgpt.mu.Lock()
+			q := slices.Clone(rig.chatgpt.queries)
+			rig.chatgpt.mu.Unlock()
+			if len(q) != 1 || q[0].Source != SourceChatGPT || q[0].Mode != ModeLatest || q[0].WantImages {
+				t.Fatalf("reader got %+v, want the structured query", q)
+			}
+		})
+	}
+}
+
+// A first line that only starts with "query:" in prose stays on the
+// free-text path, and so do "query" without the colon and a marker that
+// is not on the first line.
+func TestServeQueryProseGoesToTheExtractor(t *testing.T) {
+	for _, body := range []string{
+		"Query: what did I ask ChatGPT",
+		"query: [\"chatgpt\"]",
+		"query\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+		"please run this\nquery:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+	} {
+		rig := newServeRig(t, true)
+		res := rig.ask(t, "grokbot", body)
+		if res.Status != envelope.StatusAnswered {
+			t.Fatalf("%q: status %s body %q", body, res.Status, res.Reply.Body)
+		}
+		if got := rig.ext.questions(); len(got) != 1 || got[0] != body {
+			t.Fatalf("%q: extractor saw %q, want the question", body, got)
+		}
+	}
+}
+
+// A malformed structured query gets the structured-query reply naming the
+// schema, never the model and never a reader.
+func TestServeBadStructuredQueryFails(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown field":         "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"days\":3650}",
+		"window field":          "query: {\"source\":\"chatgpt\",\"mode\":\"latest\",\"window\":{\"max\":200}}",
+		"bad source":            "query:\n{\"source\":\"myspace\",\"mode\":\"latest\"}",
+		"no source":             "query:\n{\"mode\":\"latest\"}",
+		"over-limit count":      "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"count\":500}",
+		"no mode":               "query:\n{\"source\":\"chatgpt\"}",
+		"not json":              "query:\nthe last ChatGPT prompt please",
+		"empty":                 "query:",
+		"two objects":           "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}\n{\"source\":\"codex\",\"mode\":\"latest\"}",
+		"bad id":                "query:\n{\"source\":\"chatgpt\",\"mode\":\"conversation\",\"conversation_id\":\"../../etc\"}",
+		"broken same line":      "query: {\"source\":\"chatgpt\",",
+		"trailing brace":        "query: {\"source\":\"chatgpt\",\"mode\":\"latest\"}}",
+		"repeated source":       "query: {\"source\":\"codex\",\"source\":\"chatgpt\",\"mode\":\"latest\"}",
+		"repeated mode":         "query: {\"source\":\"chatgpt\",\"mode\":\"search\",\"mode\":\"latest\"}",
+		"null count":            "query: {\"source\":\"chatgpt\",\"mode\":\"latest\",\"count\":null}",
+		"null source":           "query: {\"source\":null,\"mode\":\"latest\"}",
+		"null terms":            "query: {\"source\":\"chatgpt\",\"mode\":\"search\",\"terms\":null}",
+		"trailing bracket":      "query: {\"source\":\"chatgpt\",\"mode\":\"latest\"}]",
+		"trailing junk":         "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}\nand then some",
+		"trailing value":        "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"} 1",
+		"code fence":            "query:\n```json\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}\n```",
+		"bare code fence":       "query:\n```\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}\n```",
+		"terms on latest":       "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"terms\":[\"relay\"]}",
+		"nine terms on latest":  "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"terms\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\"]}",
+		"nine terms on search":  "query:\n{\"source\":\"chatgpt\",\"mode\":\"search\",\"terms\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\"]}",
+		"blank term":            "query:\n{\"source\":\"chatgpt\",\"mode\":\"search\",\"terms\":[\"relay\",\"  \"]}",
+		"id on latest":          "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"conversation_id\":\"conv-1\"}",
+		"bad id on latest":      "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"conversation_id\":\"../../etc\"}",
+		"id on search":          "query:\n{\"source\":\"chatgpt\",\"mode\":\"search\",\"terms\":[\"fox\"],\"conversation_id\":\"conv-1\"}",
+		"terms on conversation": "query:\n{\"source\":\"chatgpt\",\"mode\":\"conversation\",\"conversation_id\":\"conv-1\",\"terms\":[\"fox\"]}",
+		"padded id":             "query:\n{\"source\":\"chatgpt\",\"mode\":\"conversation\",\"conversation_id\":\" conv-1 \"}",
+		"unknown source":        "query:\n{\"source\":\"unknown\",\"mode\":\"latest\"}",
+		"negative count":        "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"count\":-1}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newServeRig(t, true)
+			res := rig.ask(t, "grokbot", body)
+			if res.Status != envelope.StatusFailed {
+				t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+			}
+			if !strings.HasPrefix(res.Reply.Body, "The structured query was not valid") {
+				t.Fatalf("reply %q, want the invalid structured query template", res.Reply.Body)
+			}
+			assertStructuredHelp(t, res.Reply.Body)
+			if len(rig.ext.questions()) != 0 || rig.chatgpt.reads() != 0 {
+				t.Fatalf("extractor saw %v, reader ran %d times", rig.ext.questions(), rig.chatgpt.reads())
+			}
+		})
+	}
+}
+
+// Each structured mode reaches the reader with exactly the fields sent,
+// including a tab between the marker and same-line JSON.
+func TestServeStructuredQueryModesReachTheReader(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want Query
+	}{
+		"tab same line": {"query:\t{\"source\":\"chatgpt\",\"mode\":\"latest\",\"count\":2}",
+			Query{Source: SourceChatGPT, Mode: ModeLatest, Count: 2}},
+		"search": {"query:\n{\"source\":\"chatgpt\",\"mode\":\"search\",\"terms\":[\"fox\",\"logo ideas\"],\"count\":3}",
+			Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"fox", "logo ideas"}, Count: 3}},
+		"conversation": {"query:\n{\"source\":\"chatgpt\",\"mode\":\"conversation\",\"conversation_id\":\"conv-1\",\"with_images\":true}",
+			Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "conv-1", WantImages: true, WithImages: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newServeRig(t, true)
+			res := rig.ask(t, "grokbot", tc.body)
+			if res.Status != envelope.StatusAnswered {
+				t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+			}
+			if got := rig.ext.questions(); len(got) != 0 {
+				t.Fatalf("extractor saw %q, want no model step", got)
+			}
+			rig.chatgpt.mu.Lock()
+			q := slices.Clone(rig.chatgpt.queries)
+			rig.chatgpt.mu.Unlock()
+			if len(q) != 1 || !reflect.DeepEqual(q[0], tc.want) {
+				t.Fatalf("reader got %+v, want %+v", q, tc.want)
+			}
+		})
+	}
+}
+
+// A structured query of exactly MaxQuestionBytes is accepted.
+func TestServeStructuredQueryAtTheLimitIsAccepted(t *testing.T) {
+	rig := newServeRig(t, true)
+	body := "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}"
+	body += strings.Repeat(" ", MaxQuestionBytes-len(body))
+	if len(body) != MaxQuestionBytes {
+		t.Fatalf("body is %d bytes", len(body))
+	}
+	res := rig.ask(t, "grokbot", body)
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if len(rig.ext.questions()) != 0 || rig.chatgpt.reads() != 1 {
+		t.Fatalf("extractor saw %v, reader ran %d times", rig.ext.questions(), rig.chatgpt.reads())
+	}
+}
+
+// A structured query longer than MaxQuestionBytes fails before parsing.
+func TestServeOversizedStructuredQueryFails(t *testing.T) {
+	rig := newServeRig(t, true)
+	body := "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\"}" + strings.Repeat(" ", MaxQuestionBytes)
+	res := rig.ask(t, "grokbot", body)
+	if res.Status != envelope.StatusFailed {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if !strings.HasPrefix(res.Reply.Body, "The structured query is too long") {
+		t.Fatalf("reply %q, want the too long template", res.Reply.Body)
+	}
+	assertStructuredHelp(t, res.Reply.Body)
+	if len(rig.ext.questions()) != 0 || rig.chatgpt.reads() != 0 {
+		t.Fatalf("extractor saw %v, reader ran %d times", rig.ext.questions(), rig.chatgpt.reads())
+	}
+}
+
+// A disallowed agent is declined on its relay-set identity before its
+// structured query is looked at.
+func TestServeStructuredQueryFromDisallowedAgentIsDeclined(t *testing.T) {
+	rig := newServeRig(t, true)
+	var log bytes.Buffer
+	rig.svc.Log = &log
+	rig.svc.Allowlist = StaticAllowlist("grokbot")
+	res := rig.ask(t, "muse", "query:\n{\"source\":\"chatgpt\",\"mode\":\"latest\",\"days\":1}")
+	if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "muse") {
+		t.Fatalf("status %s body %q, want declined naming muse", res.Status, res.Reply.Body)
+	}
+	if len(rig.ext.questions()) != 0 || rig.chatgpt.reads() != 0 {
+		t.Fatal("a declined request reached the extractor or a reader")
+	}
+	if strings.Contains(log.String(), "structured query") {
+		t.Fatalf("the structured query was parsed for a declined agent: %q", log.String())
+	}
+}
+
+// assertStructuredHelp checks a structured-query failure names every
+// accepted field, mode and source, and is not the free-text clarifying
+// reply.
+func assertStructuredHelp(t *testing.T, body string) {
+	t.Helper()
+	for _, want := range []string{"query:", "source", "mode", "terms", "conversation_id", "count", "want_images", "with_images", "latest", "search", "conversation"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reply missing %q: %q", want, body)
+		}
+	}
+	for _, s := range Sources {
+		if !strings.Contains(body, string(s)) {
+			t.Errorf("reply missing source %q: %q", s, body)
+		}
+	}
+	if strings.Contains(body, "clearer question") {
+		t.Errorf("reply is the free-text clarifying text: %q", body)
 	}
 }

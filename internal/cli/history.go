@@ -274,7 +274,8 @@ func historyServeCmd() *cobra.Command {
 		Long: "Long-polls the relay as the history agent and answers each request itself, in order:\n" +
 			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
 			"     with no file (or a * entry) any joined agent may ask;\n" +
-			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query;\n" +
+			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query,\n" +
+			"     unless the request is already one (a \"query:\" first line and JSON), which is checked in Go and never reaches a model;\n" +
 			"  3. the matching source is read (ChatGPT and claude.ai through the Tincan Chrome extension);\n" +
 			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
 			"Retrieved chat content is never sent to an LLM. The allowlist file is reread for every request.\n" +
