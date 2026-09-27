@@ -38,7 +38,7 @@ func TestSearchBodiesRepliesAndLiteralTerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	hits, err = s.Search(t.Context(), "Tuesday", "a", 20)
-	if err != nil || len(hits) != 1 || hits[0].Status != envelope.StatusAnswered || !strings.Contains(hits[0].Snippet, "[Tuesday]") {
+	if err != nil || len(hits) != 1 || hits[0].Status != envelope.StatusAnswered || !strings.Contains(hits[0].ReplySnippet, "[Tuesday]") {
 		t.Fatalf("reply = %+v, %v", hits, err)
 	}
 	if hits, err := s.Search(t.Context(), "Tuesday", "outsider", 20); err != nil || len(hits) != 0 {
@@ -95,5 +95,111 @@ func TestSearchBackfillAndReopen(t *testing.T) {
 	ask(t, s, "a", "b", "new message")
 	if hits, err := s.Search(t.Context(), "new", "b", 20); err != nil || len(hits) != 1 {
 		t.Fatalf("after reopen = %+v, %v", hits, err)
+	}
+}
+
+func TestSearchCandidateCap(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	old := ask(t, s, "visible", "b", "common")
+	// Give the old request the newest timestamp: the candidate cap must precede
+	// both timestamp ordering and visibility filtering.
+	if _, err := s.db.Exec("UPDATE requests SET created_at = 9999999999999 WHERE id = ?", old.ID); err != nil {
+		t.Fatal(err)
+	}
+	for range searchCandidateLimit {
+		ask(t, s, "other", "b", "common")
+	}
+	hits, err := s.Search(t.Context(), "common", "visible", 50)
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("outside cap: %+v, %v", hits, err)
+	}
+	hits, err = s.Search(t.Context(), "common", "", 1)
+	if err != nil || len(hits) != 1 || hits[0].RequestID == old.ID {
+		t.Fatalf("ordering before cap: %+v, %v", hits, err)
+	}
+}
+
+func TestSearchSplitExcerpts(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	req := ask(t, s, "a", "b", "restaurant booking")
+	if _, err := s.Reply(t.Context(), req.ID, "b", envelope.Reply{Body: "confirmed Tuesday", Status: envelope.StatusAnswered}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(t.Context(), "restaurant Tuesday", "", 20)
+	if err != nil || len(hits) != 1 || !strings.Contains(hits[0].Snippet, "[restaurant]") || !strings.Contains(hits[0].ReplySnippet, "[Tuesday]") {
+		t.Fatalf("split: %+v, %v", hits, err)
+	}
+	for _, tc := range []struct {
+		query   string
+		request bool
+	}{{"restaurant", true}, {"Tuesday", false}} {
+		hits, err := s.Search(t.Context(), tc.query, "", 20)
+		if err != nil || len(hits) != 1 {
+			t.Fatalf("%s: %+v, %v", tc.query, hits, err)
+		}
+		if (hits[0].Snippet != "") != tc.request || (hits[0].ReplySnippet != "") == tc.request {
+			t.Fatalf("unmatched excerpt: %+v", hits[0])
+		}
+	}
+}
+
+func TestSearchBackfillBatchFailureAndResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range searchBackfillBatchSize + 3 {
+		ask(t, s, "a", "b", "historical")
+	}
+	// Simulate an unindexed history and a write failure in the second batch.
+	_, err = s.db.Exec(`DELETE FROM requests_fts;
+ CREATE TRIGGER fail_backfill BEFORE UPDATE ON search_backfill WHEN new.high_water > 500
+ BEGIN SELECT RAISE(ABORT, 'injected backfill failure'); END;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("backfill failure prevented Open: %v", err)
+	}
+	var high, count int
+	if err := s.db.QueryRow("SELECT high_water FROM search_backfill").Scan(&high); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM requests_fts").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if high != searchBackfillBatchSize || count != searchBackfillBatchSize {
+		t.Fatalf("checkpoint=%d indexed=%d", high, count)
+	}
+	req := ask(t, s, "a", "b", "fresh")
+	if _, err := s.Reply(t.Context(), req.ID, "b", envelope.Reply{Body: "live", Status: envelope.StatusAnswered}); err != nil {
+		t.Fatal(err)
+	}
+	if hits, err := s.Search(t.Context(), "fresh live", "", 20); err != nil || len(hits) != 1 {
+		t.Fatalf("live triggers: %+v, %v", hits, err)
+	}
+	if _, err := s.db.Exec("DROP TRIGGER fail_backfill"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.db.QueryRow("SELECT count(*) FROM requests_fts").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != searchBackfillBatchSize+4 {
+		t.Fatalf("resumed count=%d", count)
+	}
+	if err := s.db.QueryRow("SELECT high_water FROM search_backfill").Scan(&high); err != nil {
+		t.Fatal(err)
+	}
+	if high != count {
+		t.Fatalf("resumed checkpoint=%d count=%d", high, count)
 	}
 }

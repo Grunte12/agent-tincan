@@ -230,6 +230,7 @@ type SearchResult struct {
 	To              string    `json:"to"`
 	Status          Status    `json:"status"`
 	CreatedAt       time.Time `json:"created_at"`
-	Snippet         string    `json:"snippet"`
+	Snippet         string    `json:"snippet,omitempty"`
+	ReplySnippet    string    `json:"reply_snippet,omitempty"`
 	AttachmentNames []string  `json:"attachment_names,omitempty"`
 }

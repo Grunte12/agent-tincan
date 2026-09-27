@@ -19,6 +19,10 @@ func TestSearchCLI(t *testing.T) {
 	if err != nil || !strings.Contains(out, req.TraceID) || !strings.Contains(out, "[restaurant]") {
 		t.Fatalf("search = %s, %v", out, err)
 	}
+	out, err = run(t, Root(), "search", "restaurant", "Tuesday")
+	if err != nil || !strings.Contains(out, "[restaurant]") || !strings.Contains(out, "[Tuesday]") {
+		t.Fatalf("split excerpts = %s, %v", out, err)
+	}
 	out, err = run(t, Root(), "search", "Tuesday", "--json")
 	var hits []envelope.SearchResult
 	if err != nil {
@@ -38,5 +42,17 @@ func TestSearchCLI(t *testing.T) {
 		if _, err := run(t, Root(), "search", "restaurant", "--limit", limit); err == nil {
 			t.Fatal("invalid limit accepted")
 		}
+	}
+}
+
+func TestSearchAttachmentNamesBounded(t *testing.T) {
+	names := []string{strings.Repeat("界", 100), "two\nlines", "three", "four", "five", "hidden", "also hidden"}
+	got := searchAttachmentNames(names)
+	want := strings.Repeat("界", 79) + "…, two lines, three, four, five, and 2 more"
+	if got != want {
+		t.Fatalf("names = %q, want %q", got, want)
+	}
+	if got := searchAttachmentNames(nil); got != "" {
+		t.Fatalf("empty = %q", got)
 	}
 }

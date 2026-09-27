@@ -9,6 +9,9 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
+const searchCandidateLimit = 2000
+const searchBackfillBatchSize = 500
+
 func (s *Store) migrateSearch() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -20,12 +23,17 @@ func (s *Store) migrateSearch() error {
 		return err
 	}
 	if exists != 0 {
+		_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS search_backfill (id INTEGER PRIMARY KEY CHECK (id = 1), high_water INTEGER NOT NULL);
+ INSERT OR IGNORE INTO search_backfill VALUES (1, 0);`)
+		if err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	_, err = tx.Exec(`
  CREATE VIRTUAL TABLE requests_fts USING fts5(request_id UNINDEXED, trace_id UNINDEXED, body, reply_body);
- INSERT INTO requests_fts(rowid, request_id, trace_id, body, reply_body)
- SELECT r.rowid, r.id, r.trace_id, r.body, COALESCE(p.body, '') FROM requests r LEFT JOIN replies p ON p.request_id = r.id;
+ CREATE TABLE search_backfill (id INTEGER PRIMARY KEY CHECK (id = 1), high_water INTEGER NOT NULL);
+ INSERT INTO search_backfill VALUES (1, 0);
  CREATE TRIGGER requests_search_insert AFTER INSERT ON requests BEGIN
    INSERT INTO requests_fts(rowid, request_id, trace_id, body, reply_body) VALUES (new.rowid, new.id, new.trace_id, new.body, '');
  END;
@@ -38,6 +46,36 @@ func (s *Store) migrateSearch() error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// backfillSearchBatch commits the index and its checkpoint together. Triggers
+// may already have indexed rows beyond the checkpoint; replacing them is safe.
+func (s *Store) backfillSearchBatch() (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var high, end int64
+	if err := tx.QueryRow(`SELECT high_water FROM search_backfill WHERE id = 1`).Scan(&high); err != nil {
+		return false, err
+	}
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(rowid), ?) FROM
+ (SELECT rowid FROM requests WHERE rowid > ? ORDER BY rowid LIMIT ?)`, high, high, searchBackfillBatchSize).Scan(&end); err != nil {
+		return false, err
+	}
+	if end == high {
+		return false, tx.Commit()
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO requests_fts(rowid, request_id, trace_id, body, reply_body)
+ SELECT r.rowid, r.id, r.trace_id, r.body, COALESCE(p.body, '') FROM requests r
+ LEFT JOIN replies p ON p.request_id = r.id WHERE r.rowid > ? AND r.rowid <= ?`, high, end); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE search_backfill SET high_water = ? WHERE id = 1`, end); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // Search finds request and reply text, newest requests first. An empty
@@ -58,12 +96,17 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 	}
 	limit = min(limit, 50)
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.trace_id, r.from_agent, r.to_agent, r.status, r.created_at,
- snippet(requests_fts, -1, '[', ']', '…', 24), r.attachments, COALESCE(p.attachments, '')
- FROM requests_fts JOIN requests r ON r.rowid = requests_fts.rowid
+ c.snippet, c.reply_snippet, r.attachments, COALESCE(p.attachments, '')
+ FROM (
+ SELECT rowid,
+ CASE WHEN highlight(requests_fts, 2, '[', ']') != body THEN snippet(requests_fts, 2, '[', ']', '…', 24) ELSE '' END AS snippet,
+ CASE WHEN highlight(requests_fts, 3, '[', ']') != reply_body THEN snippet(requests_fts, 3, '[', ']', '…', 24) ELSE '' END AS reply_snippet
+ FROM requests_fts WHERE requests_fts MATCH ? ORDER BY rowid DESC LIMIT ?
+ ) c JOIN requests r ON r.rowid = c.rowid
  LEFT JOIN replies p ON p.request_id = r.id
- WHERE requests_fts MATCH ? AND (? = '' OR EXISTS (
+ WHERE (? = '' OR EXISTS (
    SELECT 1 FROM requests step WHERE step.trace_id = r.trace_id AND (step.from_agent = ? OR step.to_agent = ?)
- )) ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, strings.Join(terms, " AND "), participant, participant, participant, limit)
+ )) ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, strings.Join(terms, " AND "), searchCandidateLimit, participant, participant, participant, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +115,7 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 		var hit envelope.SearchResult
 		var created int64
 		var requestAttachments, replyAttachments string
-		if err := rows.Scan(&hit.RequestID, &hit.TraceID, &hit.From, &hit.To, &hit.Status, &created, &hit.Snippet, &requestAttachments, &replyAttachments); err != nil {
+		if err := rows.Scan(&hit.RequestID, &hit.TraceID, &hit.From, &hit.To, &hit.Status, &created, &hit.Snippet, &hit.ReplySnippet, &requestAttachments, &replyAttachments); err != nil {
 			return nil, err
 		}
 		hit.CreatedAt = time.UnixMilli(created).UTC()

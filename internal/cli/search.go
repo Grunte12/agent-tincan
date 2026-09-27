@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,8 +33,11 @@ func searchCmd() *cobra.Command {
 			}
 			for _, hit := range hits {
 				cmd.Printf("%s  %s  %s -> %s  %s  %s\n", hit.TraceID, hit.RequestID, hit.From, hit.To, hit.Status, oneLine(hit.Snippet))
+				if hit.ReplySnippet != "" {
+					cmd.Printf("  Reply: %s\n", oneLine(hit.ReplySnippet))
+				}
 				if len(hit.AttachmentNames) > 0 {
-					cmd.Printf("  Attachments: %s\n", strings.Join(hit.AttachmentNames, ", "))
+					cmd.Printf("  Attachments: %s\n", searchAttachmentNames(hit.AttachmentNames))
 				}
 			}
 			if len(hits) == 0 {
@@ -47,4 +51,20 @@ func searchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	return cmd
+}
+
+// searchAttachmentNames bounds human-readable output; JSON retains all names.
+func searchAttachmentNames(names []string) string {
+	shown := make([]string, 0, 6)
+	for _, name := range names[:min(len(names), 5)] {
+		chars := []rune(strings.Join(strings.Fields(name), " "))
+		if len(chars) > 80 {
+			chars = append(chars[:79], '…')
+		}
+		shown = append(shown, string(chars))
+	}
+	if len(names) > 5 {
+		shown = append(shown, fmt.Sprintf("and %d more", len(names)-5))
+	}
+	return strings.Join(shown, ", ")
 }

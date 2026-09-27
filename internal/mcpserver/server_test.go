@@ -884,6 +884,10 @@ func TestSearchOverMCP(t *testing.T) {
 			t.Fatalf("search = %s", got)
 		}
 	}
+	got := call(t, session(t, m, "grokbot"), "search", map[string]any{"query": "restaurant Tuesday"})
+	if !strings.Contains(got, `"reply_snippet"`) || !strings.Contains(got, "[restaurant]") || !strings.Contains(got, "[Tuesday]") {
+		t.Fatalf("split excerpts = %s", got)
+	}
 	if got := call(t, session(t, m, "instinct"), "search", map[string]any{"query": "restaurant"}); got != "[]" {
 		t.Fatalf("outsider search = %s", got)
 	}

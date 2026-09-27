@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"time"
 
@@ -146,6 +147,16 @@ func Open(path string) (*Store, error) {
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
+	}
+	for {
+		more, err := s.backfillSearchBatch()
+		if err != nil {
+			log.Printf("search backfill incomplete; will resume on reopen: %v", err)
+			break
+		}
+		if !more {
+			break
+		}
 	}
 	return s, nil
 }
