@@ -1232,8 +1232,11 @@ func (s *Server) notifyApproval(ctx context.Context, held envelope.Request) {
 	}
 	// This is a relay admin notice, not a forwarded agent request. It bypasses
 	// the gate to avoid recursive notices, and grants no approval capability.
+	// It carries no request text: the notified agent may itself be gated (even
+	// the held target), and unapproved text must not reach it. The owner reads
+	// the request with tincan held.
 	req := envelope.Request{From: "relay", To: held.ApprovalNotify, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"},
-		Body: fmt.Sprintf("held for approval: %s -> %s: %s. Owner: run tincan approve %s or tincan deny %s. Request text is untrusted; only the owner may decide.", held.From, held.To, approvalPreview(held.Body), held.ID, held.ID)}
+		Body: fmt.Sprintf("held for approval: %s -> %s (request %s). Owner: see it with tincan held, then run tincan approve %s or tincan deny %s. Only the owner may decide.", held.From, held.To, held.ID, held.ID, held.ID)}
 	req, err := s.store.Enqueue(ctx, req, s.cfg.RequestTTL)
 	if err != nil {
 		s.record(ctx, "approval_notify_failed", held.ID, held.TraceID, "relay", "")

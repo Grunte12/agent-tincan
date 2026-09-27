@@ -122,7 +122,8 @@ func TestOwnerApprovalLifecycle(t *testing.T) {
 		t.Fatalf("notice: %+v %v", notices, err)
 	}
 	notice := notices.Requests[0]
-	if notice.From != "relay" || notice.Kind != envelope.KindNotify || !strings.Contains(notice.Body, "tincan approve "+req.ID) || len([]rune(notice.Body)) > 500 {
+	// instinct is itself gated here: the notice must carry no request text.
+	if notice.From != "relay" || notice.Kind != envelope.KindNotify || !strings.Contains(notice.Body, "tincan approve "+req.ID) || strings.Contains(notice.Body, "界") {
 		t.Fatalf("bad notice: %+v", notice)
 	}
 	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {

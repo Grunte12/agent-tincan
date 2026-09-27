@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
@@ -130,5 +131,34 @@ func TestApprovalReloadFailureAndRecovery(t *testing.T) {
 	}
 	if _, err := LoadApproval(path); err == nil {
 		t.Fatal("dangling link treated as absent")
+	}
+}
+
+// An in-place edit that keeps the file's size and modification time must
+// still take effect: a gate the owner adds cannot be missed.
+func TestApprovalSeesSameSizeSameMtimeEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval.json")
+	write := func(body string, at time.Time) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	write(`{"gate":{"aaaa":{"from":"*"}}}`, at)
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := envelope.Request{From: "safe", To: "muse", Chain: []string{"safe"}}
+	if held, err := a.Held(&req); held || err != nil {
+		t.Fatalf("before edit: %v %v", held, err)
+	}
+	write(`{"gate":{"muse":{"from":"*"}}}`, at) // same length, same mtime
+	if held, err := a.Held(&req); !held || err != nil {
+		t.Fatalf("edit missed: held=%v err=%v", held, err)
 	}
 }

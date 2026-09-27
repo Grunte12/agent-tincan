@@ -73,9 +73,8 @@ func (a *Approval) reload() error {
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		return errors.New("approval.json must be a regular file with mode 0600")
 	}
-	if a.info != nil && os.SameFile(a.info, info) && a.info.ModTime().Equal(info.ModTime()) && a.info.Size() == info.Size() {
-		return nil
-	}
+	// Read the file on every check (it is capped at 1 MiB): an in-place edit
+	// that keeps the size and modification time must still take effect.
 	raw, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
 	if err != nil {
 		return err

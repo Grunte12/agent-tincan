@@ -103,10 +103,12 @@ approved. Senders can cancel a hold, and removing an agent cancels its holds.
 The audit log records `held`, `approved`, `denied`, and `hold_expired` transitions.
 
 If `notify` names a joined operator, the relay sends it a `notify` attributed to
-`relay`, with the sender, target, first 200 characters and owner commands. This
+`relay`, with the sender, target, request id and owner commands, and no request
+text: the notified agent may itself be gated (even the held target), and
+unapproved text must not reach it. The owner reads the request with `tincan held`. This
 admin notice bypasses gating to avoid recursion, is logged as
 `approval_notified` (or `approval_notify_failed` on failure), and carries no
-approval authority. Its quoted text remains untrusted agent input. Notification
+approval authority. Notification
 failure leaves the original request held. The operator must never approve on
 another agent's request. Approval remains an action on an admin device or the
 local socket; the notice does not grant the receiving agent those powers.

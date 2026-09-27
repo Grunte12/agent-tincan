@@ -964,8 +964,9 @@ and queued counts and do not wake their target. Senders see `held`, waiting for
 the owner's approval. Approval starts a fresh normal request TTL; denial returns
 `declined` with the reason, and the hold deadline expires to `expired`.
 
-The optional operator receives a relay-authored `notify` containing the sender,
-target, first 200 characters, and owner commands. This notice bypasses the gate
-to avoid recursive notices, but grants no admin rights. Treat its quoted request
-text as untrusted. The owner must approve from an admin device or local socket;
+The optional operator receives a relay-authored `notify` naming the sender,
+target and request id, with the owner commands. It carries no request text, since
+the notified agent may itself be gated; the owner reads the request with
+`tincan held`. This notice bypasses the gate to avoid recursive notices, but
+grants no admin rights. The owner must approve from an admin device or local socket;
 a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).
