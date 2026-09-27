@@ -43,9 +43,12 @@ func FormatResult(r Result) string {
 	}
 }
 
-// FormatProgress renders the latest note with its author and age.
+// FormatProgress renders the latest note with its author and age, on one
+// line: a note with newlines must not pass for another request or event in
+// a trace.
 func FormatProgress(p *envelope.Progress) string {
-	return fmt.Sprintf("claimed by %s, %s ago: %s", p.By, max(time.Duration(0), time.Since(p.At)).Truncate(time.Second), p.Note)
+	note := strings.Join(strings.Fields(p.Note), " ")
+	return fmt.Sprintf("claimed by %s, %s ago: %s", p.By, max(time.Duration(0), time.Since(p.At)).Truncate(time.Second), note)
 }
 
 // RepliesHeading introduces replies to the agent's own requests in an inbox.
