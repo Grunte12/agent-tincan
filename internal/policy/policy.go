@@ -80,7 +80,14 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Hop > p.cfg.HopLimit {
 		return reject(http.StatusConflict, fmt.Errorf("%w: hop %d exceeds %d", ErrHopLimit, req.Hop, p.cfg.HopLimit))
 	}
-	return p.rate(req.From, req.Urgent)
+	at, err := p.rate(req.From, req.Urgent)
+	if err != nil {
+		return err
+	}
+	// Stamp the request with the slot it took, so Refund gives back this
+	// send's slot and not a concurrent one's. Enqueue sets the real time.
+	req.CreatedAt = at
+	return nil
 }
 
 // parent resolves the request's parent: the one it names, or else the
@@ -112,12 +119,12 @@ func (p *Policy) Refund(req envelope.Request) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if n := len(p.urgent[req.From]); n > 0 {
-		p.urgent[req.From] = p.urgent[req.From][:n-1]
+	if i := slices.IndexFunc(p.urgent[req.From], req.CreatedAt.Equal); i >= 0 {
+		p.urgent[req.From] = slices.Delete(p.urgent[req.From], i, i+1)
 	}
 }
 
-func (p *Policy) rate(sender string, urgent bool) error {
+func (p *Policy) rate(sender string, urgent bool) (time.Time, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.cfg.Now()
@@ -125,19 +132,19 @@ func (p *Policy) rate(sender string, urgent bool) error {
 	recent := slices.DeleteFunc(p.sent[sender], func(t time.Time) bool { return !t.After(cutoff) })
 	if len(recent) >= p.cfg.PerMinute {
 		p.sent[sender] = recent
-		return reject(http.StatusTooManyRequests, ErrRateLimited)
+		return time.Time{}, reject(http.StatusTooManyRequests, ErrRateLimited)
 	}
 	if urgent {
 		cutoff := now.Add(-time.Hour)
 		recentUrgent := slices.DeleteFunc(p.urgent[sender], func(t time.Time) bool { return !t.After(cutoff) })
 		p.urgent[sender] = recentUrgent
 		if len(recentUrgent) >= p.cfg.UrgentPerHour {
-			return reject(http.StatusTooManyRequests, ErrUrgentLimited)
+			return time.Time{}, reject(http.StatusTooManyRequests, ErrUrgentLimited)
 		}
 		p.urgent[sender] = append(recentUrgent, now)
 	}
 	p.sent[sender] = append(recent, now)
-	return nil
+	return now, nil
 }
 
 func reject(code int, err error) error { return &relay.StatusError{Code: code, Err: err} }

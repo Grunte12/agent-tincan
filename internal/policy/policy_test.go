@@ -248,3 +248,25 @@ func TestRefundReturnsUrgentSlot(t *testing.T) {
 		t.Fatalf("a non-urgent refund gave back an urgent slot: %v", err)
 	}
 }
+
+func TestRefundGivesBackTheFailedSendsOwnSlot(t *testing.T) {
+	f := newFixture(t, Config{UrgentPerHour: 2})
+	failed := envelope.Request{From: "sender", To: "target", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &failed); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(30 * time.Minute)
+	ok := envelope.Request{From: "sender", To: "target", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &ok); err != nil {
+		t.Fatal(err)
+	}
+	// The older send fails; its slot, not the newer one, comes back.
+	f.pol.Refund(failed)
+	f.now = f.now.Add(45 * time.Minute) // past the refunded slot's hour, inside the kept one's
+	if err := f.pol.Prepare(t.Context(), &envelope.Request{From: "sender", To: "target", Urgent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pol.Prepare(t.Context(), &envelope.Request{From: "sender", To: "target", Urgent: true}); !errors.Is(err, ErrUrgentLimited) {
+		t.Fatalf("limit after refund = %v; the kept send's slot was lost", err)
+	}
+}
