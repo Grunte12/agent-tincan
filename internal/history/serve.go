@@ -240,7 +240,7 @@ func DescribeWindow(path string, w Window, err error) string {
 	a := w.orDefault()
 	desc := fmt.Sprintf("the last %d conversations, up to %s", a.Max, daysText(a.MaxAge))
 	if a.Max > MaxListCount {
-		desc += fmt.Sprintf(" (ChatGPT and claude.ai read at most %d)", MaxListCount)
+		desc += fmt.Sprintf(" (%s read at most %d)", LiveSourcesLabel(), MaxListCount)
 	}
 	if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) {
 		return fmt.Sprintf("window: %s (default, no file at %s)", desc, path)
@@ -602,11 +602,10 @@ func readFailure(q Query, err error) string {
 }
 
 func sourceLabel(s Source) string {
+	if site := siteFor(s); site != nil {
+		return site.label
+	}
 	switch s {
-	case SourceChatGPT:
-		return "ChatGPT"
-	case SourceClaudeAI:
-		return "claude.ai"
 	case SourceCodex:
 		return "Codex"
 	case SourceClaudeCode:

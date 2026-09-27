@@ -25,15 +25,11 @@ var historyNow = time.Now
 // historyReader returns the reader for a source name. The live sources go
 // through the Tincan Chrome extension's native host.
 func historyReader(source string) (history.Reader, error) {
-	switch history.Source(source) {
-	case history.SourceChatGPT:
-		r := history.NewChatGPT(history.NewClient())
-		r.Now = historyNow
+	src := history.Source(source)
+	if r, ok := history.NewLiveReader(src, history.NewClient(), historyNow); ok {
 		return r, nil
-	case history.SourceClaudeAI:
-		r := history.NewClaudeAI(history.NewClient())
-		r.Now = historyNow
-		return r, nil
+	}
+	switch src {
 	case history.SourceCodex:
 		r := history.NewCodex()
 		r.Now = historyNow
@@ -43,7 +39,7 @@ func historyReader(source string) (history.Reader, error) {
 		r.Now = historyNow
 		return r, nil
 	}
-	return nil, fmt.Errorf("unknown history source %q (want chatgpt, claude-ai, codex or claude-code)", source)
+	return nil, fmt.Errorf("unknown history source %q (want %s)", source, history.SourceNames())
 }
 
 func historyCmd() *cobra.Command {
@@ -158,11 +154,10 @@ func limitNote(page history.Page, source history.Source, listing bool) string {
 			return fmt.Sprintf(prefix+"only the newest %d conversations could be listed.", history.MaxListCount)
 		}
 		n := page.Window.Max
-		live := source == history.SourceChatGPT || source == history.SourceClaudeAI
 		hint := "use --max to widen it"
 		switch {
-		case live && n >= history.MaxListCount:
-			hint = fmt.Sprintf("ChatGPT and claude.ai read at most %d", history.MaxListCount)
+		case history.IsLiveSource(source) && n >= history.MaxListCount:
+			hint = fmt.Sprintf("%s read at most %d", history.LiveSourcesLabel(), history.MaxListCount)
 		case n >= history.MaxWindowMax:
 			hint = fmt.Sprintf("%d is the most --max allows", history.MaxWindowMax)
 		}
