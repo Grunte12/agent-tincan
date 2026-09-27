@@ -577,7 +577,7 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 		return envelope.Request{}, ErrForbidden
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?,		lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END, updated_at = ?
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END, updated_at = ?
 		WHERE id = ? AND status IN (?, ?, ?) AND expires_at > ?`,
 		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(lease).UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli())
