@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"math"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -16,6 +15,7 @@ const searchCandidateLimit = 2000
 // searchVisibleWindow is how many of an agent's visible requests one search
 // query covers; a search walks them in chunks of this size.
 var searchVisibleWindow = 5000
+
 const searchBackfillBatchSize = 500
 
 func (s *Store) migrateSearch() error {
@@ -143,7 +143,8 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 		}
 		below = chunkLow
 	}
-	slices.SortStableFunc(out, func(a, b envelope.SearchResult) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	// Chunks are walked newest first by insertion order, so out is already
+	// in the order results are returned: newest request first.
 	return out, nil
 }
 
@@ -160,7 +161,7 @@ func (s *Store) searchRows(ctx context.Context, candidates string, limit int, ar
  c.snippet, c.reply_snippet, r.attachments, COALESCE(p.attachments, '')
  FROM (`+candidates+`) c JOIN requests r ON r.rowid = c.rowid
  LEFT JOIN replies p ON p.request_id = r.id
- ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, append(args, limit)...)
+ ORDER BY r.rowid DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
