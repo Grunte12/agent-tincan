@@ -673,6 +673,26 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 		})
 	}
 	wg.Wait()
+	r.groupsMu.Lock()
+	// A concurrent poll may have retrieved a newer result while this one failed.
+	for i, res := range g.Results {
+		if res.Error == "" {
+			continue
+		}
+		for _, cached := range r.groups[g.Group].Results {
+			if cached.Request.ID == res.Request.ID {
+				g.Results[i].Result = cached.Result
+				break
+			}
+		}
+	}
 	g.summarize()
+	if r.groups == nil {
+		r.groups = map[string]GroupResult{}
+	}
+	cached := g
+	cached.Results = append([]GroupEntry(nil), g.Results...)
+	r.groups[g.Group] = cached
+	r.groupsMu.Unlock()
 	return g, nil
 }

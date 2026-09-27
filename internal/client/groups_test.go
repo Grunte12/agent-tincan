@@ -214,6 +214,55 @@ func TestGroupMaximumBodies(t *testing.T) {
 	}
 }
 
+func TestGroupSuccessivePollErrorPreservesReply(t *testing.T) {
+	var polls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/capabilities":
+			http.NotFound(w, r)
+		case "/v1/send":
+			_ = json.NewEncoder(w).Encode(envelope.Request{ID: "request-a", To: "a"})
+		case "/v1/requests/request-a":
+			if polls.Add(1) == 2 {
+				http.Error(w, "poll unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(client.Result{
+				Request: envelope.Request{ID: "request-a", To: "a"}, Status: envelope.StatusAnswered,
+				Reply: &envelope.Reply{From: "a", Status: envelope.StatusAnswered, Body: "saved answer"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	c, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := c.SendGroup(t.Context(), []string{"a"}, "question", envelope.KindAsk, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for poll := 1; poll <= 3; poll++ {
+		got, err := c.GetGroup(t.Context(), g.Group, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := got.Results[0]
+		if got.Outcome != "answered" || entry.Status != envelope.StatusAnswered || entry.Reply == nil || entry.Reply.Body != "saved answer" {
+			t.Fatalf("poll %d lost answered reply: %+v", poll, got)
+		}
+		if poll == 2 {
+			if !strings.Contains(entry.Error, "poll unavailable") {
+				t.Fatalf("missing polling error: %+v", entry)
+			}
+		} else if entry.Error != "" {
+			t.Fatalf("poll %d retained error: %+v", poll, entry)
+		}
+	}
+}
+
 func TestGroupPollErrorPreservesResults(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/failed") {
