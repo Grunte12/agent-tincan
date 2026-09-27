@@ -863,3 +863,31 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 		t.Fatalf("check_inbox = %q", out)
 	}
 }
+
+func (r *recorder) Search(context.Context, string, int) ([]envelope.SearchResult, error) {
+	r.calls = append(r.calls, "Search")
+	return []envelope.SearchResult{}, nil
+}
+
+func TestSearchOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "restaurant reservation", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "muse").Reply(t.Context(), req.ID, "confirmed Tuesday", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"restaurant", "Tuesday"} {
+		got := call(t, session(t, m, "grokbot"), "search", map[string]any{"query": query, "limit": 1})
+		if !strings.Contains(got, req.TraceID) || !strings.Contains(got, query) {
+			t.Fatalf("search = %s", got)
+		}
+	}
+	if got := call(t, session(t, m, "instinct"), "search", map[string]any{"query": "restaurant"}); got != "[]" {
+		t.Fatalf("outsider search = %s", got)
+	}
+	if got := call(t, session(t, m, "muse"), "search", map[string]any{"query": "restaurant", "limit": 51}); !strings.HasPrefix(got, "ERROR:") {
+		t.Fatalf("invalid limit = %s", got)
+	}
+}

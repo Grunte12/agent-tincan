@@ -139,6 +139,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate attachments: %w", err)
 	}
+	if err := s.migrateSearch(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate search: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
