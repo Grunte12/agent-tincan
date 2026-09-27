@@ -93,6 +93,10 @@ TINCAN_CODEX_WRITE_ROOTS="$HOME/code/my-project:$HOME/Documents/Codex/site" \
 
 It is a colon-separated list of absolute paths to existing directories. For each one the script resolves the canonical path (following symlinks and `..`) and adds it as `--add-dir` only if that path is at or under an allowed root. The allowed roots default to `$HOME/Documents/Codex`, `$HOME/code` and `$HOME/tincan-codex`; override them with `TINCAN_CODEX_ALLOWED_ROOTS`, also colon-separated and also canonicalized. Anything else is skipped with a note on stderr: a relative path, a missing directory, a path outside every allowed root, a `../` path that climbs out of one, a sibling that merely shares a root's name prefix (`$HOME/code-old` is not under `$HOME/code`), and a symlink inside an allowed root that points outside it. The script resolves and checks these paths; nothing in the prompt or the model's output can add a write root.
 
+### Other command-woken CLIs
+
+codex-wake.sh stands on its own. Wake scripts for other command-woken CLIs source `examples/lib/tincan-wake-lib.sh` (copy it next to the script), a POSIX sh library that adds what an unattended run needs beyond codex-wake.sh: a lock that breaks when the run holding it is gone, a hard run timeout (`TINCAN_WAKE_TIMEOUT`, default 1500 seconds) that works without GNU `timeout`, a backoff after three failed runs in a row with an optional one-time notice to an operator teammate (`TINCAN_WAKE_OPERATOR`, off by default), a check that the binary is the expected tool, and the same write-root checks as above. Before each run it reads the CLI's MCP server list and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is in `TINCAN_WAKE_ALLOWED_SERVERS`, so a wake never acts as another teammate. The header of the library lists its settings.
+
 ## Limits
 
 - No persistent session: Codex starts over on every wake, so the whole exchange, check_inbox, each reply, and any teammate asks it makes, has to finish inside that one `codex exec` run.

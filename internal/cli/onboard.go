@@ -141,7 +141,7 @@ Kinds: ` + strings.Join(onboard.Kinds, ", "),
 				return err
 			}
 			if err := r.SetKind(cmd.Context(), args[0], args[1]); err != nil {
-				return err
+				return olderRelayKind(err, args[0], args[1])
 			}
 			if args[1] == "" {
 				cmd.Printf("Cleared the kind of %q.\n", args[0])
