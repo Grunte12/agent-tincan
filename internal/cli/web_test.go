@@ -124,8 +124,8 @@ func shortNativeDir(t *testing.T) string {
 }
 
 // fakeHostStatus serves the native host socket in dir and answers
-// host.status with status, as a native host would.
-func fakeHostStatus(t *testing.T, dir string, status history.ExtensionStatus) {
+// host.status with status(), as a native host would.
+func fakeHostStatus(t *testing.T, dir string, status func() history.ExtensionStatus) {
 	t.Helper()
 	ln, err := history.ListenSocket(filepath.Join(dir, "host.sock"))
 	if err != nil {
@@ -143,7 +143,7 @@ func fakeHostStatus(t *testing.T, dir string, status history.ExtensionStatus) {
 			if err == nil && json.Unmarshal(b, &req) == nil {
 				resp := history.NativeResponse{ID: req.ID, Error: &history.NativeError{Code: "bad_request", Message: "unexpected op"}}
 				if req.Op == history.OpHostStatus {
-					res, _ := json.Marshal(status)
+					res, _ := json.Marshal(status())
 					resp = history.NativeResponse{ID: req.ID, OK: true, Result: res}
 				}
 				_ = history.WriteMessage(conn, resp, 1<<20)
@@ -154,16 +154,76 @@ func fakeHostStatus(t *testing.T, dir string, status history.ExtensionStatus) {
 }
 
 // The extension is connected and says chatgpt.com is not granted: web
-// serve exits at startup, naming the options page, before any poll
-// (whoamiRelay fails the test on one).
-func TestWebServeExitsWhenConnectedExtensionLacksTheGrant(t *testing.T) {
+// serve does not exit (the service manager would restart it every few
+// seconds, forever). It logs the missing grant once, naming the options
+// page, makes no poll while it waits, and starts serving once the grant
+// appears.
+func TestWebServeWaitsForAMissingGrant(t *testing.T) {
 	dir := shortNativeDir(t)
-	fakeHostStatus(t, dir, history.ExtensionStatus{Hello: true, Granted: []string{"claudeai"}})
-	srv := whoamiRelay(t, "chatgpt-web")
-	allow := filepath.Join(t.TempDir(), "allow.txt")
-	_, err := run(t, Root(), "web", "serve", "--site", "chatgpt", "--config", serveConfig(t, srv.URL, "chatgpt-web"), "--allowlist", allow)
-	if err == nil || !strings.Contains(err.Error(), "no access to chatgpt.com") || !strings.Contains(err.Error(), "Extension options") {
-		t.Fatalf("ungranted site: %v", err)
+	old := webGrantRecheck
+	webGrantRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { webGrantRecheck = old })
+	var granted atomic.Bool
+	fakeHostStatus(t, dir, func() history.ExtensionStatus {
+		if granted.Load() {
+			return history.ExtensionStatus{Hello: true, Granted: []string{"claudeai", "chatgpt"}}
+		}
+		return history.ExtensionStatus{Hello: true, Granted: []string{"claudeai"}}
+	})
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": "chatgpt-web"})
+		case "/v1/poll":
+			polls.Add(1)
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := Root()
+	var out syncBuffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"web", "serve", "--site", "chatgpt", "--config", serveConfig(t, srv.URL, "chatgpt-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+	time.Sleep(400 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("web serve exited on a missing grant: %v\n%s", err, out.String())
+	default:
+	}
+	log := out.String()
+	if n := strings.Count(log, "no access to chatgpt.com"); n != 1 || !strings.Contains(log, "Extension options") {
+		t.Fatalf("want the missing grant logged once, naming the options page:\n%s", log)
+	}
+	if n := polls.Load(); n != 0 {
+		t.Fatalf("%d polls while the grant is missing", n)
+	}
+	granted.Store(true)
+	deadline := time.Now().Add(5 * time.Second)
+	for polls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if polls.Load() == 0 {
+		t.Fatalf("web serve did not start serving after the grant:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "serving chatgpt") {
+		t.Fatalf("no serving line:\n%s", out.String())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("web serve did not stop")
 	}
 }
 

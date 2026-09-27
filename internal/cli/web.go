@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -115,12 +118,15 @@ func webServeCmd() *cobra.Command {
 				return wrongWebAgent(name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			// A connected extension that reports the site ungranted cannot
-			// serve it, so the service stops here. With no extension
-			// connected (launchd starts this at login, often before Chrome)
-			// it starts, and each request gets the matching reply.
+			// serve it, so the service waits here for the grant rather than
+			// exiting (the service manager would restart it every few
+			// seconds, forever). With no extension connected (launchd starts
+			// this at login, often before Chrome) it starts, and each request
+			// gets the matching reply.
 			native := history.NewClient()
-			if err := native.CheckSiteGrant(ctx, src); err != nil {
-				return fmt.Errorf("web serve refuses to start: %w", err)
+			if err := waitForSiteGrant(ctx, native, src, cmd.ErrOrStderr(), name); err != nil {
+				cmd.PrintErrf("tincan web %s: stopped\n", name)
+				return nil
 			}
 			agent := &history.WebAgent{
 				Relay:       r,
@@ -148,6 +154,39 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
 	return cmd
+}
+
+// webGrantRecheck is how often web serve asks the extension again while
+// it waits for a missing site grant. Tests shorten it.
+var webGrantRecheck = time.Minute
+
+// waitForSiteGrant returns once src can be served: at once when the
+// extension grants it or no extension answers, else after logging the
+// missing grant once (naming the options page) and asking again every
+// webGrantRecheck until it is granted or the extension goes away. It
+// fails only when ctx ends first.
+func waitForSiteGrant(ctx context.Context, native *history.Client, src history.Source, log io.Writer, name string) error {
+	err := native.CheckSiteGrant(ctx, src)
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(log, "tincan web %s: waiting for the site grant, checking every %s: %v\n", name, webGrantRecheck, err)
+	t := time.NewTicker(webGrantRecheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+		if native.CheckSiteGrant(ctx, src) == nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(log, "tincan web %s: %s is granted (or no extension is connected); starting\n", name, src)
+			return nil
+		}
+	}
 }
 
 func expandHome(p string) string {

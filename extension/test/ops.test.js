@@ -405,6 +405,7 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   for (const s of Object.values(SITE_ACCESS)) {
     assert.ok(typeof s.label === 'string' && s.label !== '');
     assert.ok(s.origins.length > 0 && s.origins.every((o) => /^https:\/\/[a-z0-9.*-]+\/\*$/.test(o)), s.label);
+    assert.ok(s.pageOrigins.length > 0 && s.pageOrigins.every((o) => s.origins.includes(o)), s.label);
   }
   // Every op prefix but extension.* has a site entry.
   for (const op of OPS) {
@@ -434,7 +435,7 @@ test('an op for a site without its grant fails permission_missing and opens no t
   // revoked while a reply is read still lets its tab close.
   assert.deepEqual(await run(r, 'chatgpt.close', { conversation_id: 'c1' }), [{ ok: true, result: { closed: 1 } }]);
   assert.deepEqual(closed, [['chatgpt', 'c1']]);
-  assert.deepEqual(perms.asked[0], [...SITE_ACCESS.chatgpt.origins]);
+  assert.deepEqual(perms.asked[0], [...SITE_ACCESS.chatgpt.pageOrigins]);
 
   // Granted: the op runs.
   perms.granted.add('https://chatgpt.com/*');
@@ -448,6 +449,30 @@ test('an op for a site without its grant fails permission_missing and opens no t
   await assert.rejects(run(broken, 'claudeai.list', { count: 1 }), (e) => e.code === 'permission_missing');
 });
 
+// ChatGPT's file host (*.oaiusercontent.com) is not needed to list or
+// read conversations: withholding it leaves those ops working, the site
+// counts as granted in the hello, and a file fetch from that host still
+// fails as it would without the grant.
+test('a site with only its page origin granted passes list and detail', async () => {
+  const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
+  const detailURL = 'https://chatgpt.com/backend-api/conversation/c1';
+  const f = fakeFetch({
+    [SESSION]: jsonResponse({ accessToken: TOKEN }),
+    [listURL]: jsonResponse({ items: [] }),
+    [detailURL]: jsonResponse({ id: 'c1', mapping: {} }),
+  });
+  const perms = fakePermissions(['https://chatgpt.com/*']);
+  const r = createRunner({ fetch: f, permissions: perms });
+  await run(r, 'chatgpt.list', { count: 1 });
+  await run(r, 'chatgpt.detail', { id: 'c1' });
+  assert.ok(f.calls.some((c) => c.url === listURL), 'list fetched');
+  assert.ok(f.calls.some((c) => c.url === detailURL), 'detail fetched');
+  assert.deepEqual(await grantedSites(perms), ['chatgpt']);
+  // The page origin alone withheld: permission_missing.
+  perms.granted = new Set(['https://*.oaiusercontent.com/*']);
+  await assert.rejects(run(r, 'chatgpt.list', { count: 1 }), (e) => e.code === 'permission_missing');
+});
+
 test('the hello lists the granted sites', async () => {
   const files = { 'manifest.json': 'x' };
   const perms = fakePermissions(['https://claude.ai/*']);
@@ -455,6 +480,23 @@ test('the hello lists the granted sites', async () => {
   assert.deepEqual(h, { id: 0, hello: { version: '1.0.0', unpacked: true, files, granted: ['claudeai'] } });
   perms.granted = new Set(ALL_ORIGINS);
   assert.deepEqual((await grantedSites(perms)).sort(), Object.keys(SITE_ACCESS).sort());
+});
+
+// The anti-bot sniff reads at most 64 KiB of a body, not all of it.
+test('a large non-JSON answer is read only up to the sniff cap', async () => {
+  const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
+  let pulled = 0;
+  const big = () => new Response(new ReadableStream({
+    pull(c) {
+      if (pulled >= 8 * 1024 * 1024) return c.close();
+      pulled += 16 * 1024;
+      c.enqueue(new Uint8Array(16 * 1024).fill(0x61));
+    },
+  }, { highWaterMark: 0 }), { status: 200, headers: { 'content-type': 'text/html' } });
+  const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [listURL]: big });
+  const r = createRunner({ fetch: f });
+  await assert.rejects(run(r, 'chatgpt.list', { count: 1 }), (e) => e.code === 'endpoint_changed');
+  assert.ok(pulled <= 256 * 1024, `read ${pulled} bytes`);
 });
 
 test('anti-bot pages are blocked; a plain 401 or a 403 permission error is not_logged_in', async () => {

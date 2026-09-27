@@ -537,6 +537,26 @@ func TestWebGrantRevokedMidPollRepliesPermissionMissingAndClosesTab(t *testing.T
 	}
 }
 
+// The site shows an anti-bot check while the reply is being read: the
+// wait ends at the first blocked poll, the asker is told about the check,
+// and the tab is closed.
+func TestWebBlockedMidPollRepliesAntiBotAndClosesTab(t *testing.T) {
+	rig := newWebRig(t)
+	rig.browser.inProgress = -1
+	rig.browser.detailErr, rig.browser.detailErrAfter = "blocked", 2
+	res := rig.ask(t, "grokbot", "a question")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusFailed || !strings.Contains(body, "anti-bot check") || !strings.Contains(body, "conv-1") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+	if n := rig.browser.opCount(OpChatGPTDetail); n != 3 {
+		t.Fatalf("detail polled %d times; the wait should end at the first blocked answer", n)
+	}
+	if got := rig.browser.closed(); len(got) != 1 || got[0] != "conv-1" {
+		t.Fatalf("closes = %v", got)
+	}
+}
+
 // A send refused for a missing grant or an anti-bot page names the cause
 // and the fix.
 func TestWebSendPermissionMissingAndBlockedReplies(t *testing.T) {

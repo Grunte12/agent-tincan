@@ -13,11 +13,13 @@
 
 import { SITE_ACCESS, siteGranted } from './ops.js';
 
-// siteStates lists every site with whether its origins are granted.
+// siteStates lists every site with whether all its origins are granted;
+// a site missing any (ChatGPT's file host withheld) keeps its Grant
+// button, which asks for all of them.
 export async function siteStates(permissions) {
   const out = [];
   for (const [site, s] of Object.entries(SITE_ACCESS)) {
-    out.push({ site, label: s.label, granted: await siteGranted(permissions, site) });
+    out.push({ site, label: s.label, granted: await siteGranted(permissions, site, { all: true }) });
   }
   return out;
 }

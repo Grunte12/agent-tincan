@@ -12,7 +12,7 @@
 // ever executed; responses are returned as data.
 //
 // Every operation but close first checks that Chrome has granted the
-// extension its site's origins (SITE_ACCESS) and fails permission_missing
+// extension its site's page origins (SITE_ACCESS) and fails permission_missing
 // without a tab or a fetch when it has not. The hello lists the granted
 // sites, and the worker says hello again whenever a grant changes.
 //
@@ -32,31 +32,38 @@ export const MAX_MESSAGE_BYTES = 32 * 1024;
 // native host can tell when the unpacked files on disk have changed.
 export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js', 'options.html', 'options.js', 'icon16.png', 'icon48.png', 'icon128.png']);
 
-// SITE_ACCESS is each site's host access, keyed by its op prefix: the
-// origins its operations fetch and open tabs on, all of which must be
-// granted before any of its operations runs. A required site's origins
+// SITE_ACCESS is each site's host access, keyed by its op prefix: origins
+// are all the origins its operations fetch and open tabs on (what the
+// options page asks Chrome for), and pageOrigins the site's own pages,
+// which must be granted before any of its operations runs. An origin in
+// origins but not pageOrigins (ChatGPT's file host) is needed only by the
+// fetches that reach it, which fail without it as any fetch to an
+// ungranted host does, so withholding it leaves list and read working.
+// A required site's origins
 // are the manifest's host_permissions, granted at install (the owner can
 // still withhold them in Chrome's site access settings); any other site's
 // are optional_host_permissions, granted from the options page, so adding
 // a site never disables an existing install until the owner accepts it.
 export const SITE_ACCESS = Object.freeze({
-  chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), required: true }),
-  claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), required: true }),
+  chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), pageOrigins: Object.freeze(['https://chatgpt.com/*']), required: true }),
+  claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
 });
 
-// siteGranted reports whether permissions (chrome.permissions) holds all
-// of site's origins; an API failure counts as not granted.
-export async function siteGranted(permissions, site) {
+// siteGranted reports whether permissions (chrome.permissions) holds
+// site's page origins, what its operations need, or with all set every
+// one of its origins (the options page's full grant); an API failure
+// counts as not granted.
+export async function siteGranted(permissions, site, { all = false } = {}) {
   const s = SITE_ACCESS[site];
   if (!s) return false;
   try {
-    return (await permissions.contains({ origins: [...s.origins] })) === true;
+    return (await permissions.contains({ origins: [...(all ? s.origins : s.pageOrigins)] })) === true;
   } catch {
     return false;
   }
 }
 
-// grantedSites lists the SITE_ACCESS keys whose origins are all granted.
+// grantedSites lists the SITE_ACCESS keys whose page origins are granted.
 export async function grantedSites(permissions) {
   const out = [];
   for (const site of Object.keys(SITE_ACCESS)) {
@@ -248,11 +255,34 @@ function finalURL(res, url) {
 // anti-bot rules or a captcha.
 const ANTI_BOT_TEXT = /just a moment\.\.\.|cf-challenge|challenge-platform|anti-?bot|captcha/i;
 
-// bodyText reads at most 64 KiB of a copy of res's body, '' when it
-// cannot.
+// BODY_TEXT_BYTES caps how much of a body bodyText reads.
+const BODY_TEXT_BYTES = 64 * 1024;
+
+// bodyText reads at most BODY_TEXT_BYTES of a copy of res's body, '' when
+// it cannot. It streams the copy and stops at the cap, so a large page is
+// never buffered whole.
 async function bodyText(res) {
   try {
-    return (await res.clone().text()).slice(0, 64 * 1024);
+    const body = res.clone().body;
+    if (!body) return '';
+    const reader = body.getReader();
+    const parts = [];
+    let total = 0;
+    while (total < BODY_TEXT_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const part = value.subarray(0, BODY_TEXT_BYTES - total);
+      parts.push(part);
+      total += part.length;
+    }
+    reader.cancel().catch(() => {});
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const part of parts) {
+      bytes.set(part, off);
+      off += part.length;
+    }
+    return new TextDecoder().decode(bytes);
   } catch {
     return '';
   }
@@ -518,7 +548,8 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     },
   };
 
-  // requireGrant fails permission_missing when op's site is not granted.
+  // requireGrant fails permission_missing when op's site's page origins
+  // are not granted.
   // Closing a tab the extension opened reaches no site, so it runs
   // regardless: a grant revoked while a reply is read still lets the tab
   // close.
