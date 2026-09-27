@@ -20,7 +20,7 @@ An agent that drives the CLI from a script, rather than reading its text, can pa
 
 - `tincan ask <name> "<message>" --json` and `tincan get <id> --json` print `{"outcome": "answered|failed|pending", "result": {...}}` and exit 0 when answered, 1 when the request ended any other way (failed, declined, cancelled or expired) and 2 when no reply has come yet. Check again later with `tincan get <id> --json`, using `result.request.id`.
 - `tincan ask <name> "<message>" --notify --json` prints `{"outcome": "sent", "request": {...}}` and exits 0.
-- `tincan inbox --json` prints `{"requests": [...], "replies": [...]}`. Handle only requests with `"claimed": true`; one with `"claimed": false` and a `claim_error` was taken by another session.
+- `tincan inbox --json` prints `{"requests": [...], "replies": [...]}`. Handle only requests with `"claimed": true`; one with `"claimed": false` and a `claim_error` could not be claimed, usually because another session took it. A `"replies_remaining"` count (left out when zero) means more unread replies are waiting; run it again to read them.
 - Exit 1 with empty stdout and a message on stderr means the relay could not be reached or refused the call, not that a teammate answered.
 
 Without `--json` the output is the same text as always.

@@ -219,7 +219,7 @@ For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON do
 
 - `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
 - `ask --notify --json` prints `{"outcome": "sent", "request": <request>}` and exits 0.
-- `inbox --json` prints `{"requests": [...], "replies": [...]}`. Each request carries `"claimed": true`, or `"claimed": false` with a `claim_error` when another session got to it first. Replies are marked read only after the JSON is printed. It exits 0.
+- `inbox --json` prints `{"requests": [...], "replies": [...]}`. Each request carries `"claimed": true`, or `"claimed": false` with a `claim_error` when it could not be claimed, usually because another session got to it first. Replies are marked read only after the JSON is printed. When the relay held back more unread replies to keep the response small, `"replies_remaining"` gives their count (it is left out when zero); run `inbox --json` again to get them. It exits 0.
 - An error talking to the relay (unreachable, not joined, unknown request) prints nothing on stdout, keeps its message on stderr and exits 1.
 
 Without `--json` the text output and exit codes are unchanged.
