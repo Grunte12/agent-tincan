@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,7 +69,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -312,17 +313,28 @@ func askCmd() *cobra.Command {
 				if asJSON {
 					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req})
 				}
-				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
+				if req.Status == envelope.StatusHeld {
+					cmd.Printf("Request %s: held, waiting for the owner's approval.\n", req.ID)
+				} else {
+					cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
+				}
 				return nil
 			}
 			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
 			if err != nil {
 				return err
 			}
+			if res.Request.Status == envelope.StatusHeld {
+				res.Status = envelope.StatusHeld
+			}
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)
 			}
-			cmd.Print(client.FormatResult(res))
+			if res.Status == envelope.StatusHeld {
+				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+			} else {
+				cmd.Print(client.FormatResult(res))
+			}
 			return nil
 		},
 	}
@@ -353,7 +365,11 @@ func getCmd() *cobra.Command {
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)
 			}
-			cmd.Print(client.FormatResult(res))
+			if res.Status == envelope.StatusHeld {
+				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+			} else {
+				cmd.Print(client.FormatResult(res))
+			}
 			return nil
 		},
 	}
@@ -636,4 +652,50 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 
 func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(time.Now().UnixNano()%int64(d/2+1))
+}
+
+func heldCmd() *cobra.Command {
+	var socket, relayURL string
+	cmd := &cobra.Command{Use: "held", Short: "List requests waiting for owner approval (admin only)", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			var reqs []envelope.Request
+			if err := r.Raw(cmd.Context(), "GET", "/v1/admin/held", nil, &reqs); err != nil {
+				return err
+			}
+			for _, req := range reqs {
+				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, req.To, strings.Join(req.Chain, " -> "), req.Body)
+			}
+			return nil
+		}}
+	cmd.Flags().StringVar(&socket, "socket", "", "local admin socket")
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL")
+	return cmd
+}
+
+func approvalCmd(action string) *cobra.Command {
+	var socket, relayURL string
+	cmd := &cobra.Command{Use: action + " <id>", Short: action + " a held request (admin only)", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			in := map[string]string{"reason": strings.Join(args[1:], " ")}
+			if err := r.Raw(cmd.Context(), "POST", "/v1/admin/requests/"+url.PathEscape(args[0])+"/"+action, in, nil); err != nil {
+				return err
+			}
+			cmd.Printf("%s: %s\n", action, args[0])
+			return nil
+		}}
+	if action == "deny" {
+		cmd.Use = "deny <id> [reason...]"
+		cmd.Args = cobra.MinimumNArgs(1)
+	}
+	cmd.Flags().StringVar(&socket, "socket", "", "local admin socket")
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL")
+	return cmd
 }

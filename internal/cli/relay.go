@@ -144,6 +144,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		return err
 	}
 	defer st.Close()
+	approval, err := policy.LoadApproval(filepath.Join(f.stateDir, "approval.json"))
+	if err != nil {
+		return err
+	}
 
 	var ln net.Listener
 	var who *identity.LocalResolver
@@ -186,7 +190,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 			"Agents with tailscale find it again by themselves; proxy-only agents may need tincan rejoin. "+
 			"Without --listen the relay is its own tailnet node (%s) and keeps its name while --state-dir is kept.", f.hostname)
 	}
-	srv.SetPreparer(policy.New(st, policy.Config{}))
+	srv.SetPreparer(policy.New(st, policy.Config{Approval: approval}))
 	if f.dist != "" {
 		if fi, err := os.Stat(f.dist); err != nil || !fi.IsDir() {
 			return fmt.Errorf("--dist %s: not a directory", f.dist)

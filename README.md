@@ -925,3 +925,47 @@ Always upload the `checksums.txt` written after signing; `make release-mac` rewr
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+## Owner approval
+
+To require approval before selected agents receive incoming requests, create
+`approval.json` in the relay's `--state-dir` and run `chmod 600 approval.json`:
+
+```json
+{
+  "gate": {
+    "muse": { "from": "*" },
+    "instinct": { "from": ["chatgpt", "grokbot"] }
+  },
+  "notify": "grokbot",
+  "hold_ttl": "2h"
+}
+```
+
+`from: "*"` holds every request to that target. A `from` list holds requests
+when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]`
+in place of `from` to hold requests unless every agent in the chain is listed.
+`hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes.
+A missing file disables the gate. An unreadable, malformed, or overly accessible
+file holds all requests to the targets in the last valid copy; without a valid
+copy the relay refuses to start. A bad file first appearing at runtime rejects
+new sends until fixed.
+
+From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
+
+```sh
+tincan held
+tincan approve <id>
+tincan deny <id> "reason"
+```
+
+These commands also accept `--relay <url>`. Held requests are absent from inboxes
+and queued counts and do not wake their target. Senders see `held`, waiting for
+the owner's approval. Approval starts a fresh normal request TTL; denial returns
+`declined` with the reason, and the hold deadline expires to `expired`.
+
+The optional operator receives a relay-authored `notify` containing the sender,
+target, first 200 characters, and owner commands. This notice bypasses the gate
+to avoid recursive notices, but grants no admin rights. Treat its quoted request
+text as untrusted. The owner must approve from an admin device or local socket;
+a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).

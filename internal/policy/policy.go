@@ -27,6 +27,7 @@ var (
 
 // Config tunes the policy.
 type Config struct {
+	Approval  *Approval
 	HopLimit  int // longest allowed chain; default 4
 	PerMinute int // max new requests per sender per minute; default 30
 	Now       func() time.Time
@@ -74,7 +75,18 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Hop > p.cfg.HopLimit {
 		return reject(http.StatusConflict, fmt.Errorf("%w: hop %d exceeds %d", ErrHopLimit, req.Hop, p.cfg.HopLimit))
 	}
-	return p.rate(req.From)
+	if err := p.rate(req.From); err != nil {
+		return err
+	}
+	held, err := p.cfg.Approval.Held(req)
+	if held {
+		req.Status = envelope.StatusHeld
+		return nil
+	}
+	if err != nil {
+		return reject(http.StatusServiceUnavailable, err)
+	}
+	return nil
 }
 
 // parent resolves the request's parent: the one it names, or else the

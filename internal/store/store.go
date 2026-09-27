@@ -470,6 +470,11 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 // A bad reference stores nothing.
 func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
+	status := envelope.StatusQueued
+	if req.Status == envelope.StatusHeld {
+		status = envelope.StatusHeld
+		ttl = req.HoldTTL
+	}
 	req.ID = randomID()
 	req.CreatedAt = now.UTC().Truncate(time.Millisecond)
 	if req.TraceID == "" {
@@ -492,7 +497,7 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -626,7 +631,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if req.From != agent && req.To != agent {
+	if (req.From != agent && req.To != agent) || (status == envelope.StatusHeld && req.From != agent) {
 		return Result{}, ErrNotFound
 	}
 	rep, err := s.replyFor(ctx, id)
@@ -670,8 +675,8 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 	if req.From != agent {
 		return ErrForbidden
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
-		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered))
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`,
+		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
 	if err != nil {
 		return err
 	}
@@ -686,9 +691,9 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 // the cancelled ids.
 func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?) RETURNING id`,
+		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?) RETURNING id`,
 		string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusHeld))
 	if err != nil {
 		return nil, err
 	}
@@ -706,6 +711,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 
 // Transition is one state change made by Sweep.
 type Transition struct {
+	Held    bool
 	ID      string
 	TraceID string
 	From    string
@@ -734,6 +740,13 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 			out = append(out, t)
 		}
 		return rows.Err()
+	}
+	if err := collect(`UPDATE requests SET status = ?, updated_at = ? WHERE status = ? AND expires_at <= ?
+ RETURNING id, trace_id, from_agent, to_agent, status`, string(envelope.StatusExpired), now, string(envelope.StatusHeld), now); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Held = true
 	}
 	// A claim past its TTL expires once its lease runs out rather than going
 	// back to the queue, where it would only wake the agent for a request
@@ -830,4 +843,53 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// Held lists unexpired requests waiting for the owner.
+func (s *Store) Held(ctx context.Context) ([]envelope.Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE status = ? AND expires_at > ? ORDER BY created_at`, string(envelope.StatusHeld), s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequests(rows)
+}
+
+// Release queues a held request with a fresh delivery TTL and its original creation time.
+func (s *Store) Release(ctx context.Context, id string, ttl time.Duration) (envelope.Request, error) {
+	now := s.now()
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ?, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return envelope.Request{}, ErrWrongState
+	}
+	req, _, err := s.lookup(ctx, id)
+	return req, err
+}
+
+// DenyHeld atomically declines a held request and saves the owner's reason.
+func (s *Store) DenyHeld(ctx context.Context, id, reason string) (envelope.Request, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	defer tx.Rollback()
+	now := s.now().UnixMilli()
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusDeclined), now, id, string(envelope.StatusHeld), now)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return envelope.Request{}, ErrWrongState
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO replies (request_id,from_agent,status,body,created_at) VALUES (?,?,?,?,?)`, id, "relay", string(envelope.StatusDeclined), reason, now); err != nil {
+		return envelope.Request{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return envelope.Request{}, err
+	}
+	req, _, err := s.lookup(ctx, id)
+	return req, err
 }

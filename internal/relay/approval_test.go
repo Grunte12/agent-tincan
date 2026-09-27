@@ -1,0 +1,307 @@
+package relay_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/policy"
+	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/testrelay"
+)
+
+type approvalWakes struct {
+	mu      sync.Mutex
+	targets []string
+}
+
+func (w *approvalWakes) Queued(_ context.Context, r envelope.Request) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.targets = append(w.targets, r.To)
+}
+func (w *approvalWakes) count(target string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, v := range w.targets {
+		if v == target {
+			n++
+		}
+	}
+	return n
+}
+
+func TestOwnerApprovalLifecycle(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"},"instinct":{"from":"*"}},"notify":"instinct","hold_ttl":"1h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	wakes := &approvalWakes{}
+	m.Server.SetEvents(wakes)
+	sender, target, admin := m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "admin")
+	send := func() envelope.Request {
+		t.Helper()
+		r, err := sender.Send(t.Context(), "muse", strings.Repeat("界", 210), envelope.KindAsk, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != envelope.StatusHeld {
+			t.Fatalf("send status %s", r.Status)
+		}
+		return r
+	}
+	req := send()
+	if wakes.count("muse") != 0 || m.Server.QueuedCount("muse") != 0 {
+		t.Fatal("held request queued/woken")
+	}
+	inbox, err := target.Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 0 {
+		t.Fatalf("held delivered: %+v %v", inbox, err)
+	}
+	if _, err := target.Claim(t.Context(), req.ID); !client.IsStatus(err, 409) {
+		t.Fatalf("held claim: %v", err)
+	}
+	if _, err := target.Reply(t.Context(), req.ID, "bypass", envelope.StatusAnswered); !client.IsStatus(err, 409) {
+		t.Fatalf("held reply: %v", err)
+	}
+	if _, err := target.Get(t.Context(), req.ID, 0); !client.IsStatus(err, 404) {
+		t.Fatalf("target read held: %v", err)
+	}
+	var trace struct {
+		Steps []envelope.Result `json:"steps"`
+	}
+	if err := target.Raw(t.Context(), "GET", "/v1/trace/"+req.TraceID, nil, &trace); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range trace.Steps {
+		if strings.Contains(step.Request.Body, "界") {
+			t.Fatal("held body leaked through trace")
+		}
+	}
+	res, err := sender.Get(t.Context(), req.ID, time.Second)
+	if err != nil || res.Status != envelope.StatusHeld || res.Done() {
+		t.Fatalf("held result: %+v %v", res, err)
+	}
+	raw, _ := json.Marshal(res)
+	var old client.Result
+	if err := json.Unmarshal(raw, &old); err != nil || string(old.Status) != "held" {
+		t.Fatalf("old decode: %v", err)
+	}
+	for _, who := range []string{"grokbot", "muse", "instinct", "stranger"} {
+		for _, action := range []string{"approve", "deny"} {
+			if err := m.Client(t, who).Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/"+action, map[string]string{}, nil); !client.IsStatus(err, 403) {
+				t.Fatalf("%s %s: %v", who, action, err)
+			}
+		}
+		if err := m.Client(t, who).Raw(t.Context(), "GET", "/v1/admin/held", nil, nil); !client.IsStatus(err, 403) {
+			t.Fatalf("%s list: %v", who, err)
+		}
+	}
+	var held []envelope.Request
+	if err := admin.Raw(t.Context(), "GET", "/v1/admin/held", nil, &held); err != nil || len(held) != 1 || len([]rune(held[0].Body)) != 200 {
+		t.Fatalf("held list: %+v %v", held, err)
+	}
+	notices, err := m.Client(t, "instinct").Poll(t.Context(), time.Millisecond)
+	if err != nil || len(notices.Requests) != 1 {
+		t.Fatalf("notice: %+v %v", notices, err)
+	}
+	notice := notices.Requests[0]
+	if notice.From != "relay" || notice.Kind != envelope.KindNotify || !strings.Contains(notice.Body, "tincan approve "+req.ID) || len([]rune(notice.Body)) > 500 {
+		t.Fatalf("bad notice: %+v", notice)
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if wakes.count("muse") != 1 || m.Server.QueuedCount("muse") != 1 {
+		t.Fatal("approval did not queue/wake")
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); !client.IsStatus(err, 409) {
+		t.Fatalf("repeat approval: %v", err)
+	}
+	inbox, err = target.Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 || !inbox.Requests[0].CreatedAt.Equal(req.CreatedAt) {
+		t.Fatalf("approved delivery: %+v %v", inbox, err)
+	}
+	denied := send()
+	// The local admin handler uses the same routes and auth boundary as the socket.
+	local := httptest.NewServer(m.Server.AdminHandler())
+	defer local.Close()
+	socketAdmin := client.NewRelayHTTP(local.URL, http.DefaultClient)
+	if err := socketAdmin.Raw(t.Context(), "POST", "/v1/admin/requests/"+denied.ID+"/deny", map[string]string{"reason": "owner said no"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err = sender.Get(t.Context(), denied.ID, 0)
+	if err != nil || res.Status != envelope.StatusDeclined || res.Reply == nil || res.Reply.Body != "owner said no" || res.Reply.From != "relay" {
+		t.Fatalf("deny: %+v %v", res, err)
+	}
+	expired := send()
+	now := time.Now().Add(2 * time.Hour)
+	m.Store.SetClock(func() time.Time { return now })
+	m.Server.Sweep(t.Context())
+	res, err = sender.Get(t.Context(), expired.ID, 0)
+	if err != nil || res.Status != envelope.StatusExpired {
+		t.Fatalf("expiry: %+v %v", res, err)
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+expired.ID+"/approve", nil, nil); !client.IsStatus(err, 409) {
+		t.Fatalf("approve expired: %v", err)
+	}
+	events, err := m.Store.AuditEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []string{"held", "approved", "denied", "hold_expired", "approval_notified"} {
+		found := false
+		for _, e := range events {
+			if e.Event == event {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing %s audit", event)
+		}
+	}
+	if _, err := m.Store.VerifyAudit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApprovalUsesRecordedChainAndFailsClosed(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"gate":{"muse":{"from":["grokbot"]}}}`)
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	parent, err := m.Client(t, "grokbot").Send(t.Context(), "instinct", "handle this", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "instinct").Claim(t.Context(), parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	var req envelope.Request
+	if err := m.Client(t, "instinct").Raw(t.Context(), "POST", "/v1/send", map[string]any{"to": "muse", "body": "chain request", "from": "safe", "chain": []string{"safe"}, "status": "queued"}, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Status != envelope.StatusHeld || req.From != "instinct" || strings.Join(req.Chain, ",") != "grokbot,instinct" {
+		t.Fatalf("forged chain: %+v", req)
+	}
+	write(`broken`)
+	// Muse's previously non-matching sender restriction must now hold too.
+	if err := m.Client(t, "instinct").Raw(t.Context(), "POST", "/v1/requests/"+parent.ID+"/reply", map[string]string{"body": "done"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "after corruption", envelope.KindAsk, "")
+	if err != nil || req.Status != envelope.StatusHeld {
+		t.Fatalf("fail closed: %+v %v", req, err)
+	}
+	if err := m.Client(t, "instinct").Cancel(t.Context(), req.ID); err != nil {
+		t.Fatal(err)
+	}
+	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "remove me", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Client(t, "admin").Remove(t.Context(), "muse"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.Client(t, "instinct").Get(t.Context(), req.ID, 0)
+	if err != nil || res.Status != envelope.StatusCancelled {
+		t.Fatalf("remove held: %+v %v", res, err)
+	}
+}
+
+func TestHeldAttachmentAccess(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Server.SetAttachmentDir(t.TempDir())
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	sender, target, admin := m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "admin")
+	upload, err := sender.UploadAttachment(t.Context(), "private.txt", "text/plain", strings.NewReader("secret"), 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := sender.SendAttached(t.Context(), "muse", "", envelope.KindAsk, "", []string{upload.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body strings.Builder
+	if _, err := target.DownloadAttachment(t.Context(), upload.ID, &body); !client.IsStatus(err, 404) {
+		t.Fatalf("held attachment leaked: %v", err)
+	}
+	if _, err := sender.DownloadAttachment(t.Context(), upload.ID, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.DownloadAttachment(t.Context(), upload.ID, &body); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	body.Reset()
+	if _, err := target.DownloadAttachment(t.Context(), upload.ID, &body); err != nil || body.String() != "secret" {
+		t.Fatalf("approved attachment: %q %v", body.String(), err)
+	}
+}
+
+func TestApprovalNotificationFailureKeepsHeld(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"}},"notify":"missing"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "hello", envelope.KindNotify, "")
+	if err != nil || req.Status != envelope.StatusHeld {
+		t.Fatalf("held notify: %+v %v", req, err)
+	}
+	res, err := m.Client(t, "grokbot").Get(t.Context(), req.ID, 0)
+	if err != nil || res.Status != envelope.StatusHeld {
+		t.Fatalf("notification failure lost hold: %+v %v", res, err)
+	}
+	events, err := m.Store.AuditForTrace(t.Context(), req.TraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Event == "approval_notify_failed" {
+			return
+		}
+	}
+	t.Fatal("missing notification failure audit")
+}

@@ -51,6 +51,7 @@ const (
 type Status string
 
 const (
+	StatusHeld      Status = "held"
 	StatusQueued    Status = "queued"
 	StatusDelivered Status = "delivered"
 	StatusClaimed   Status = "claimed"
@@ -82,6 +83,12 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+
+	// Status is set on held sends; omitted for ordinary requests.
+	Status Status `json:"status,omitempty"`
+	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
+	HoldTTL        time.Duration `json:"-"`
+	ApprovalNotify string        `json:"-"`
 }
 
 // Pending names a queued request without its body, as a peek reports it.
