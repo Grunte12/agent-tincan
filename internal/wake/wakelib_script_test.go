@@ -17,15 +17,24 @@ import (
 // script, the way a per-CLI wake script does, and run it against a fake CLI
 // and a fake tincan that only record what they were asked to do.
 
-// fakeCLI answers --version, records each real run, and can sleep (with a
-// child of its own, like a CLI running an MCP server) or fail.
+// fakeCLI answers --version (after FAKE_VERSION_SLEEP seconds, if set),
+// records each real run, and can sleep (with a child of its own, like a CLI
+// running an MCP server), start a child that ignores TERM (FAKE_STUBBORN),
+// or fail.
 const fakeCLI = `#!/bin/sh
 if [ "${1:-}" = --version ]; then
+  [ -z "${FAKE_VERSION_SLEEP:-}" ] || sleep "$FAKE_VERSION_SLEEP"
   echo "${FAKE_VERSION:-Fake CLI 1.2.3}"
   exit 0
 fi
 echo run >> "$RUNS"
 echo $$ > "$STATE_OUT/cli.pid"
+if [ -n "${FAKE_STUBBORN:-}" ]; then
+  sh -c 'trap "" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+  echo $! > "$STATE_OUT/child.pid"
+  sleep 60 &
+  wait
+fi
 if [ -n "${FAKE_SLEEP:-}" ]; then
   sleep "$FAKE_SLEEP" &
   echo $! > "$STATE_OUT/child.pid"
@@ -355,6 +364,9 @@ func TestWakeLibIdentityCheckStopsTheWake(t *testing.T) {
 			return []string{"agent-tincan\t" + h.config + "\ttincan mcp", "github\t\tgh mcp", "fs\t\tnpx fs"}
 		}, []string{"TINCAN_WAKE_ALLOWED_SERVERS=fs"}, "github"},
 		{"listing fails", func(h *libHarness) []string { return nil }, []string{"FAKE_LIST_FAIL=1"}, "MCP servers"},
+		{"server with no name", func(h *libHarness) []string {
+			return []string{"agent-tincan\t" + h.config + "\ttincan mcp", "\t/other/cfg.json\t/usr/local/bin/tincan mcp", "\t\tnpx evil-server"}
+		}, nil, "no name"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -405,6 +417,22 @@ func TestWakeLibIdentityCheckAllows(t *testing.T) {
 	}
 	if n := h.count(h.runs); n != 1 {
 		t.Fatalf("CLI ran %d times, want 1", n)
+	}
+}
+
+// A server that only mentions tincan in its arguments (a filesystem server
+// on a checkout of this repo) is an ordinary server, governed by the
+// allowlist.
+func TestWakeLibIdentityTincanInArgsIsOrdinary(t *testing.T) {
+	h := newLibHarness(t)
+	h.setListing("agent-tincan\t"+h.config+"\ttincan mcp", "fs\t\tnpx @modelcontextprotocol/server-filesystem /Users/me/code/agent-tincan", "", "")
+	if r := h.run(driver, "TINCAN_WAKE_ALLOWED_SERVERS=fs"); r.err != nil || h.count(h.runs) != 1 {
+		t.Fatalf("allowed fs server: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+	h2 := newLibHarness(t)
+	h2.setListing("agent-tincan\t"+h2.config+"\ttincan mcp", "fs\t\tnpx @modelcontextprotocol/server-filesystem /Users/me/code/agent-tincan")
+	if r := h2.run(driver); r.err == nil || !strings.Contains(r.stderr, "did not allow: fs") {
+		t.Fatalf("unallowed fs server: %v\nstderr:\n%s", r.err, r.stderr)
 	}
 }
 
@@ -463,5 +491,179 @@ for a in "$@"; do printf '%s\n' "$a"; done > "$STATE_OUT/argv"
 		if !strings.Contains(r.stderr, refused) {
 			t.Errorf("refused root %q not reported on stderr:\n%s", refused, r.stderr)
 		}
+	}
+}
+
+// waitDead waits up to five seconds for every pid to be gone.
+func waitDead(pids ...int) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		live := false
+		for _, p := range pids {
+			if alive(p) {
+				live = true
+			}
+		}
+		if !live {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// A CLI that exits on TERM but leaves a child that ignores TERM: the child
+// must not outlive the wake, with a process group (perl or setsid) or with
+// the saved-tree fallback.
+func TestWakeLibTimeoutKillsTERMIgnoringChild(t *testing.T) {
+	for _, mode := range []struct{ name, env string }{
+		{"process group", ""},
+		{"saved tree", "_TW_NO_PGRP=1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			h := newLibHarness(t)
+			env := []string{"TINCAN_WAKE_TIMEOUT=1", "FAKE_STUBBORN=1"}
+			if mode.env != "" {
+				env = append(env, mode.env)
+			}
+			r := h.run(driver, env...)
+			child := readPid(t, filepath.Join(h.dir, "child.pid"))
+			t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+			if code := exitCode(r.err); code != 124 {
+				t.Fatalf("exit = %d (%v), want 124\nstderr:\n%s", code, r.err, r.stderr)
+			}
+			if !waitDead(child) {
+				t.Fatalf("TERM-ignoring child %d outlived the timed-out wake", child)
+			}
+			if h.exists(h.lockDir()) {
+				t.Fatal("lock left behind after a timeout")
+			}
+		})
+	}
+}
+
+// A SIGTERM to the wake itself (the listener stopping) takes the CLI and
+// its children with it and removes the lock.
+func TestWakeLibSignalCleansUp(t *testing.T) {
+	h := newLibHarness(t)
+	script := filepath.Join(h.dir, "driver.sh")
+	if err := os.WriteFile(script, []byte(driver), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + h.dir,
+		"TINCAN_WAKE_LIB=" + h.lib,
+		"TINCAN_WAKE_STATE_DIR=" + h.state,
+		"TINCAN_BIN=" + filepath.Join(h.dir, "tincan"),
+		"TINCAN_CONFIG=" + h.config,
+		"FAKE_BIN=" + h.bin,
+		"MCP_LISTING=" + h.listing,
+		"RUNS=" + h.runs,
+		"NOTICES=" + h.notices,
+		"STATE_OUT=" + h.dir,
+		"FAKE_STUBBORN=1",
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childFile := filepath.Join(h.dir, "child.pid")
+	deadline := time.Now().Add(10 * time.Second)
+	for !h.exists(childFile) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // let the pid files be written in full
+	cli, child := readPid(t, filepath.Join(h.dir, "cli.pid")), readPid(t, childFile)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL); _ = syscall.Kill(cli, syscall.SIGKILL) })
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	if !waitDead(cli, child) {
+		t.Fatalf("CLI (%d alive=%v) or its child (%d alive=%v) survived a SIGTERM to the wake\nstderr:\n%s", cli, alive(cli), child, alive(child), stderr.String())
+	}
+	if h.exists(h.lockDir()) {
+		t.Fatalf("lock left behind after a SIGTERM\nstderr:\n%s", stderr.String())
+	}
+}
+
+// A state directory that cannot be created is an error the operator hears
+// about, not a run in progress.
+func TestWakeLibUnwritableStateDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	h := newLibHarness(t)
+	ro := filepath.Join(h.dir, "ro")
+	mkdirs(t, ro)
+	if err := os.Chmod(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+	env := []string{"TINCAN_WAKE_STATE_DIR=" + filepath.Join(ro, "state"), "TINCAN_WAKE_OPERATOR=ops"}
+	r := h.run(driver, env...)
+	if code := exitCode(r.err); code != 1 {
+		t.Fatalf("exit = %d (%v), want 1\nstderr:\n%s", code, r.err, r.stderr)
+	}
+	if strings.Contains(r.stderr, "in progress") || !strings.Contains(r.stderr, "state directory") {
+		t.Fatalf("state-dir failure not reported as such:\n%s", r.stderr)
+	}
+	if h.count(h.runs) != 0 {
+		t.Fatal("CLI ran without a state directory")
+	}
+	if n := h.count(h.notices); n != 1 {
+		t.Fatalf("operator notices = %d, want 1", n)
+	}
+	// The notice is sent once until a run succeeds, tracked beside the config.
+	if r := h.run(driver, env...); exitCode(r.err) != 1 || h.count(h.notices) != 1 {
+		t.Fatalf("second nudge: %v, notices %d\nstderr:\n%s", r.err, h.count(h.notices), r.stderr)
+	}
+	if r := h.run(driver); r.err != nil {
+		t.Fatalf("run with a good state dir: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if h.exists(h.config + ".wake-notified") {
+		t.Fatal("successful run left the state-dir notice marker")
+	}
+}
+
+func TestWakeLibPreflightTimeout(t *testing.T) {
+	h := newLibHarness(t)
+	r := h.run(driver, "FAKE_VERSION_SLEEP=60", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=1", "TINCAN_WAKE_OPERATOR=ops")
+	if code := exitCode(r.err); code != 1 {
+		t.Fatalf("exit = %d (%v), want 1\nstderr:\n%s", code, r.err, r.stderr)
+	}
+	if r.took > 20*time.Second {
+		t.Fatalf("hanging version probe held the wake for %s", r.took)
+	}
+	if !strings.Contains(r.stderr, "timed out") || !h.exists(filepath.Join(h.state, "backoff")) || h.count(h.notices) != 1 {
+		t.Fatalf("hung probe: backoff %v, notices %d\nstderr:\n%s", h.exists(filepath.Join(h.state, "backoff")), h.count(h.notices), r.stderr)
+	}
+	if h.count(h.runs) != 0 || h.exists(h.lockDir()) {
+		t.Fatalf("runs %d, lock left %v", h.count(h.runs), h.exists(h.lockDir()))
+	}
+}
+
+func TestWakeLibPreflightTimeoutOnListing(t *testing.T) {
+	h := newLibHarness(t)
+	body := strings.Replace(driver, `cat "$MCP_LISTING"`, `sleep 60; cat "$MCP_LISTING"`, 1)
+	r := h.run(body, "TINCAN_WAKE_PREFLIGHT_TIMEOUT=1")
+	if exitCode(r.err) != 1 || r.took > 20*time.Second || !strings.Contains(r.stderr, "timed out") {
+		t.Fatalf("hung listing: %v after %s\nstderr:\n%s", r.err, r.took, r.stderr)
+	}
+}
+
+// Without TINCAN_CONFIG the notice would go out as the default config's
+// agent, so it is only logged.
+func TestWakeLibNoConfigSendsNoNotice(t *testing.T) {
+	h := newLibHarness(t)
+	r := h.run(driver, "TINCAN_CONFIG=", "TINCAN_WAKE_OPERATOR=ops")
+	if exitCode(r.err) != 1 || !strings.Contains(r.stderr, "TINCAN_CONFIG") {
+		t.Fatalf("unset TINCAN_CONFIG: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if n := h.count(h.notices); n != 0 {
+		t.Fatalf("operator notices = %d without TINCAN_CONFIG, want 0", n)
 	}
 }

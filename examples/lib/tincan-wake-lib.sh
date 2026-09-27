@@ -22,16 +22,28 @@
 #   TINCAN_CONFIG                  this teammate's tincan config (required)
 #   TINCAN_WAKE_STATE_DIR          lock, failure count and backoff marker
 #                                  (default ${TMPDIR:-/tmp}/tincan-<name>-wake)
-#   TINCAN_WAKE_TIMEOUT            seconds one CLI run may take (default 1500)
+#   TINCAN_WAKE_TIMEOUT            seconds one CLI run may take (default
+#                                  1500, 25 minutes)
+#   TINCAN_WAKE_PREFLIGHT_TIMEOUT  seconds the version probe and the MCP
+#                                  listing may each take (default 30)
 #   TINCAN_WAKE_MAX_FAILURES       failures in a row before backing off (3)
-#   TINCAN_WAKE_BACKOFF            seconds to back off (default 3600)
+#   TINCAN_WAKE_BACKOFF            seconds to back off (default 3600, an hour)
 #   TINCAN_WAKE_OPERATOR           teammate told once when the wake backs
-#                                  off (default none: no notice is sent)
+#                                  off, or when it cannot create its state
+#                                  directory (default none: no notice is
+#                                  sent). The notice is sent as this
+#                                  teammate, so none goes out while
+#                                  TINCAN_CONFIG is unset.
 #   TINCAN_WAKE_ALLOWED_SERVERS    MCP servers other than tincan the CLI may
 #                                  have, comma or space separated (default
 #                                  none). The CLI runs with tool approval
 #                                  off, so every listed server is trusted.
 #   TINCAN_BIN                     the tincan binary (default tincan)
+#
+# The CLI runs in a process group of its own (through perl, or setsid when
+# perl is missing), so a timeout reaches everything it started, even
+# processes that were reparented. With neither tool the wake signals the
+# CLI's process tree as it stood when the timeout fired.
 #
 # Every function keeps its own variables under the _tw_ prefix, since POSIX
 # sh has no local variables.
@@ -42,6 +54,7 @@ tincan_wake_init() {
   _tw_name=$1
   : "${TINCAN_WAKE_STATE_DIR:=${TMPDIR:-/tmp}/tincan-$_tw_name-wake}"
   : "${TINCAN_WAKE_TIMEOUT:=1500}"
+  : "${TINCAN_WAKE_PREFLIGHT_TIMEOUT:=30}"
   : "${TINCAN_WAKE_MAX_FAILURES:=3}"
   : "${TINCAN_WAKE_BACKOFF:=3600}"
   : "${TINCAN_WAKE_OPERATOR:=}"
@@ -51,10 +64,12 @@ tincan_wake_init() {
   _tw_lock=$_tw_state/lock
   _tw_locked=
   _tw_child=
-  for _tw_v in "$TINCAN_WAKE_TIMEOUT" "$TINCAN_WAKE_MAX_FAILURES" "$TINCAN_WAKE_BACKOFF"; do
+  _tw_group=
+  _tw_watchdog=
+  for _tw_v in "$TINCAN_WAKE_TIMEOUT" "$TINCAN_WAKE_PREFLIGHT_TIMEOUT" "$TINCAN_WAKE_MAX_FAILURES" "$TINCAN_WAKE_BACKOFF"; do
     case $_tw_v in
       '' | *[!0-9]*)
-        tincan_wake_log "TINCAN_WAKE_TIMEOUT, TINCAN_WAKE_MAX_FAILURES and TINCAN_WAKE_BACKOFF must be whole numbers"
+        tincan_wake_log "TINCAN_WAKE_TIMEOUT, TINCAN_WAKE_PREFLIGHT_TIMEOUT, TINCAN_WAKE_MAX_FAILURES and TINCAN_WAKE_BACKOFF must be whole numbers"
         exit 2
         ;;
     esac
@@ -67,9 +82,20 @@ tincan_wake_log() {
 
 # tincan_wake_begin takes the lock and checks the backoff marker. When a run
 # is already in progress, or the wake is backing off, it exits 0 and the
-# requests stay queued for a later nudge.
+# requests stay queued for a later nudge. When the state directory cannot
+# be made, it tells the operator and exits 1.
 tincan_wake_begin() {
-  if ! tincan_wake_lock; then
+  _tw_rc=0
+  tincan_wake_lock || _tw_rc=$?
+  if [ "$_tw_rc" -eq 2 ]; then
+    tincan_wake_log "cannot create or secure the state directory $_tw_state (set TINCAN_WAKE_STATE_DIR to a directory this user can write); not running"
+    # The notified marker cannot go in the state directory, so it goes
+    # beside this teammate's config, and a successful run removes it.
+    _tw_marker=${TINCAN_CONFIG:+$TINCAN_CONFIG.wake-notified}
+    tincan_wake_notify "The $_tw_name wake cannot create or secure its state directory $_tw_state, so it is not running. Requests to it stay queued. Fix the directory's permissions or set TINCAN_WAKE_STATE_DIR on its machine."
+    exit 1
+  fi
+  if [ "$_tw_rc" -ne 0 ]; then
     tincan_wake_log "a run is already in progress, leaving requests queued"
     exit 0
   fi
@@ -82,9 +108,10 @@ tincan_wake_begin() {
 # tincan_wake_lock takes the lock directory (mkdir is atomic) and records
 # this script's pid in it. A lock whose pid is gone was left by a run that
 # was killed, and is broken. So is one older than a run can take, whatever
-# its pid says, since pids are reused. Returns 1 when a live run holds it.
+# its pid says, since pids are reused. Returns 1 when a live run holds it,
+# 2 when the state directory cannot be made.
 tincan_wake_lock() {
-  mkdir -p "$_tw_state" && chmod 700 "$_tw_state" || return 1
+  { mkdir -p "$_tw_state" && chmod 700 "$_tw_state"; } 2>/dev/null || return 2
   trap '_tw_cleanup' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -122,8 +149,11 @@ _tw_older() {
 }
 
 _tw_cleanup() {
+  if [ -n "$_tw_watchdog" ]; then
+    kill "$_tw_watchdog" 2>/dev/null || true
+  fi
   if [ -n "$_tw_child" ]; then
-    _tw_kill_tree KILL "$_tw_child"
+    _tw_signal KILL "$_tw_group" "$(_tw_tree "$_tw_child")"
   fi
   if [ -n "$_tw_locked" ] && [ "$(cat "$_tw_lock/pid" 2>/dev/null)" = "$$" ]; then
     rm -rf "$_tw_lock"
@@ -160,13 +190,20 @@ _tw_backoff() {
 }
 
 # tincan_wake_notify MESSAGE sends MESSAGE to TINCAN_WAKE_OPERATOR, as this
-# teammate, once until a run succeeds. Nothing is sent when no operator is
-# set, and a failed send is only logged.
+# teammate, once until a run succeeds (the notified marker is _tw_marker,
+# default in the state directory). Nothing is sent when no operator is set,
+# or when TINCAN_CONFIG is unset, since tincan would then send it as
+# whichever agent its default config names. A failed send is only logged.
 tincan_wake_notify() {
   [ -n "$TINCAN_WAKE_OPERATOR" ] || return 0
-  [ ! -e "$_tw_state/notified" ] || return 0
+  if [ -z "${TINCAN_CONFIG:-}" ]; then
+    tincan_wake_log "not notifying $TINCAN_WAKE_OPERATOR: TINCAN_CONFIG is not set, so the notice would not come from this teammate"
+    return 0
+  fi
+  _tw_marker=${_tw_marker:-$_tw_state/notified}
+  [ ! -e "$_tw_marker" ] || return 0
   if "$TINCAN_BIN" ask --notify "$TINCAN_WAKE_OPERATOR" "$1" >/dev/null 2>&1 </dev/null; then
-    : >"$_tw_state/notified"
+    : >"$_tw_marker" 2>/dev/null || true
   else
     tincan_wake_log "could not notify $TINCAN_WAKE_OPERATOR"
   fi
@@ -194,9 +231,21 @@ tincan_wake_record_failure() {
 }
 
 # tincan_wake_record_success clears the failure count, the backoff marker
-# and the notice marker.
+# and the notice markers.
 tincan_wake_record_success() {
   rm -f "$_tw_state/failures" "$_tw_state/backoff" "$_tw_state/notified"
+  if [ -n "${TINCAN_CONFIG:-}" ]; then
+    rm -f "$TINCAN_CONFIG.wake-notified"
+  fi
+}
+
+# _tw_preflight OUTFILE CMD [ARGS...] runs CMD (a program or a shell
+# function) with its output in OUTFILE, under TINCAN_WAKE_PREFLIGHT_TIMEOUT.
+# Returns CMD's status, or 124 when it timed out.
+_tw_preflight() {
+  _tw_pf_out=$1
+  shift
+  _tw_supervise "$TINCAN_WAKE_PREFLIGHT_TIMEOUT" "$@" >"$_tw_pf_out" 2>&1
 }
 
 # tincan_wake_check_binary BIN PATTERN [ARGS...] runs BIN ARGS (default
@@ -211,7 +260,14 @@ tincan_wake_check_binary() {
   if ! command -v "$_tw_bin" >/dev/null 2>&1; then
     tincan_wake_refuse "$_tw_bin is not installed or not on PATH"
   fi
-  if ! _tw_out=$("$_tw_bin" "$@" 2>&1 </dev/null); then
+  _tw_rc=0
+  _tw_preflight "$_tw_state/preflight.$$" "$_tw_bin" "$@" || _tw_rc=$?
+  _tw_out=$(cat "$_tw_state/preflight.$$" 2>/dev/null) || _tw_out=
+  rm -f "$_tw_state/preflight.$$"
+  if [ "$_tw_rc" -eq 124 ]; then
+    tincan_wake_refuse "$_tw_bin $* timed out after $TINCAN_WAKE_PREFLIGHT_TIMEOUT seconds"
+  fi
+  if [ "$_tw_rc" -ne 0 ]; then
     tincan_wake_refuse "$_tw_bin $* failed: $(printf '%s\n' "$_tw_out" | head -n 1)"
   fi
   if ! printf '%s\n' "$_tw_out" | grep -Eq -- "$_tw_pattern"; then
@@ -224,7 +280,11 @@ tincan_wake_check_binary() {
 #
 #   name<TAB>TINCAN_CONFIG from the server's env (empty if none)<TAB>command and args
 #
-# A server is agent-tincan when its name or its command mentions tincan.
+# Blank lines are skipped; a row with no name stops the wake. A server is
+# agent-tincan when its name contains tincan (any case) or its command's
+# executable is named tincan; a server that only mentions tincan in its
+# arguments (say a filesystem server on ~/code/agent-tincan) is an ordinary
+# server. The listing runs under TINCAN_WAKE_PREFLIGHT_TIMEOUT.
 # The wake refuses to run unless there is exactly one, its TINCAN_CONFIG is
 # this wake's TINCAN_CONFIG, and every other server is in
 # TINCAN_WAKE_ALLOWED_SERVERS: the CLI runs with tool approval off, so it
@@ -233,20 +293,39 @@ tincan_wake_check_identity() {
   if [ -z "${TINCAN_CONFIG:-}" ]; then
     tincan_wake_refuse "TINCAN_CONFIG is not set for this wake"
   fi
-  if ! _tw_listing=$("$1"); then
+  _tw_rc=0
+  _tw_preflight "$_tw_state/listing.$$" "$1" || _tw_rc=$?
+  _tw_listing=$(cat "$_tw_state/listing.$$" 2>/dev/null) || _tw_listing=
+  rm -f "$_tw_state/listing.$$"
+  if [ "$_tw_rc" -eq 124 ]; then
+    tincan_wake_refuse "listing the CLI's MCP servers timed out after $TINCAN_WAKE_PREFLIGHT_TIMEOUT seconds"
+  fi
+  if [ "$_tw_rc" -ne 0 ]; then
     tincan_wake_refuse "could not list the CLI's MCP servers"
   fi
   _tw_allowed=$(printf '%s' "$TINCAN_WAKE_ALLOWED_SERVERS" | tr ',' ' ')
   # awk -F '\t' keeps an empty TINCAN_CONFIG field in place, where the
-  # shell's read would collapse the two tabs around it.
+  # shell's read would collapse the two tabs around it. tincan() looks at
+  # the name and the command's executable, never its other arguments.
   # shellcheck disable=SC2016 # awk program text, expanded by awk
-  _tw_tincan_awk='$1 != "" && (tolower($1) ~ /tincan/ || $3 ~ /tincan/)'
-  _tw_count=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_tincan_awk { n++ } END { print n + 0 }")
-  _tw_tincan=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_tincan_awk { print \$2; exit }")
-  _tw_extra=$(printf '%s\n' "$_tw_listing" | awk -F '\t' -v allowed="$_tw_allowed" "
-    BEGIN { n = split(allowed, a, \" \"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
-    \$1 == \"\" || ($_tw_tincan_awk) { next }
-    !(\$1 in ok) { printf \"%s%s\", sep, \$1; sep = \", \" }")
+  _tw_awk_lib='
+    function tincan(  argv, exe) {
+      if (tolower($1) ~ /tincan/) return 1
+      split($3, argv, " ")
+      exe = argv[1]
+      sub(/.*\//, "", exe)
+      return exe == "tincan"
+    }'
+  _tw_noname=$(printf '%s\n' "$_tw_listing" | awk -F '\t' '$0 != "" && $1 !~ /[^ ]/ { n++ } END { print n + 0 }')
+  if [ "$_tw_noname" -ne 0 ]; then
+    tincan_wake_refuse "the CLI listed an MCP server with no name"
+  fi
+  _tw_count=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_awk_lib"' $0 != "" && tincan() { n++ } END { print n + 0 }')
+  _tw_tincan=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_awk_lib"' $0 != "" && tincan() { print $2; exit }')
+  _tw_extra=$(printf '%s\n' "$_tw_listing" | awk -F '\t' -v allowed="$_tw_allowed" "$_tw_awk_lib"'
+    BEGIN { n = split(allowed, a, " "); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+    $0 == "" || tincan() { next }
+    !($1 in ok) { printf "%s%s", sep, $1; sep = ", " }')
   if [ "$_tw_count" -ne 1 ]; then
     tincan_wake_refuse "the CLI has $_tw_count agent-tincan servers; it needs exactly one, with TINCAN_CONFIG=$TINCAN_CONFIG"
   fi
@@ -360,51 +439,122 @@ _tw_tree() {
   echo $_tw_all
 }
 
-# _tw_kill_tree SIGNAL PID signals PID and its descendants, collected first
-# so none is reparented out of reach.
-_tw_kill_tree() {
-  _tw_pids=$(_tw_tree "$2")
-  # shellcheck disable=SC2086
-  kill -"$1" $_tw_pids 2>/dev/null || true
+# _tw_signal SIGNAL GROUP PIDS sends SIGNAL to process group GROUP (if set)
+# and to each of PIDS.
+_tw_signal() {
+  if [ -n "$2" ]; then
+    kill -"$1" -"$2" 2>/dev/null || true
+  fi
+  # shellcheck disable=SC2086 # a list of pids
+  [ -z "$3" ] || kill -"$1" $3 2>/dev/null || true
 }
 
-# tincan_wake_run CMD [ARGS...] runs the CLI with stdin closed and a hard
-# TINCAN_WAKE_TIMEOUT (GNU timeout is not on macOS, so a watchdog does it:
-# TERM to the CLI and everything it started, KILL five seconds later). A
-# clean exit clears the failure count; anything else counts as a failure.
-# Returns the CLI's status, or 124 when it timed out.
-tincan_wake_run() {
+# _tw_any_alive GROUP PIDS succeeds while the group or any of PIDS lives.
+_tw_any_alive() {
+  if [ -n "$1" ] && kill -0 -"$1" 2>/dev/null; then
+    return 0
+  fi
+  for _tw_p in $2; do
+    kill -0 "$_tw_p" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# _tw_pgrp_tool prints how to start a program in a process group of its
+# own, keeping its pid: perl, else setsid (which keeps the pid as long as
+# the caller is not a group leader, and a background job without job
+# control never is), else nothing. _TW_NO_PGRP forces the fallback, for the
+# tests.
+_tw_pgrp_tool() {
+  [ -z "${_TW_NO_PGRP:-}" ] || return 0
+  if command -v perl >/dev/null 2>&1; then
+    echo perl
+  elif command -v setsid >/dev/null 2>&1; then
+    echo setsid
+  fi
+}
+
+# _tw_supervise TIMEOUT CMD [ARGS...] runs CMD with stdin closed and a hard
+# TIMEOUT in seconds (GNU timeout is not on macOS, so a watchdog does it).
+# A program runs in a process group of its own when setsid or perl can make
+# one; a shell function runs in a subshell. On timeout the watchdog saves
+# the process tree, sends TERM to the group and the tree, and five seconds
+# later KILL to whatever is left, so descendants that ignore TERM or were
+# reparented still die. Returns CMD's status, or 124 when it timed out.
+_tw_supervise() {
+  _tw_limit=$1
+  shift
   _tw_timed_out=$_tw_state/timed-out.$$
   rm -f "$_tw_timed_out"
-  "$@" </dev/null &
+  _tw_tool=
+  case $(command -v "$1" 2>/dev/null) in
+    */*) _tw_tool=$(_tw_pgrp_tool) ;;
+  esac
+  case $_tw_tool in
+    setsid) setsid "$@" </dev/null & ;;
+    perl) perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV; print STDERR "$ARGV[0]: $!\n"; exit 127' -- "$@" </dev/null & ;;
+    *) "$@" </dev/null & ;;
+  esac
   _tw_child=$!
+  # setsid and perl keep the pid, so the group's id is the child's pid.
+  _tw_group=
+  [ -z "$_tw_tool" ] || _tw_group=$_tw_child
   (
+    trap - EXIT HUP INT TERM
     _tw_i=0
-    while [ "$_tw_i" -lt "$TINCAN_WAKE_TIMEOUT" ]; do
+    while [ "$_tw_i" -lt "$_tw_limit" ]; do
       sleep 1
       kill -0 "$_tw_child" 2>/dev/null || exit 0
       _tw_i=$((_tw_i + 1))
     done
     : >"$_tw_timed_out"
-    _tw_kill_tree TERM "$_tw_child"
-    sleep 5
-    _tw_kill_tree KILL "$_tw_child"
+    _tw_saved=$(_tw_tree "$_tw_child")
+    _tw_signal TERM "$_tw_group" "$_tw_saved"
+    _tw_i=0
+    while [ "$_tw_i" -lt 5 ] && _tw_any_alive "$_tw_group" "$_tw_saved"; do
+      sleep 1
+      _tw_i=$((_tw_i + 1))
+    done
+    _tw_signal KILL "$_tw_group" "$_tw_saved"
   ) </dev/null >/dev/null 2>&1 &
   _tw_watchdog=$!
   _tw_status=0
   wait "$_tw_child" || _tw_status=$?
+  if [ -e "$_tw_timed_out" ]; then
+    # The watchdog is between TERM and KILL: let it finish.
+    wait "$_tw_watchdog" 2>/dev/null || true
+  else
+    kill "$_tw_watchdog" 2>/dev/null || true
+    wait "$_tw_watchdog" 2>/dev/null || true
+    # It may have fired between the wait and the kill.
+    if [ -e "$_tw_timed_out" ]; then
+      _tw_signal KILL "$_tw_group" ""
+    fi
+  fi
   _tw_child=
-  kill "$_tw_watchdog" 2>/dev/null || true
-  wait "$_tw_watchdog" 2>/dev/null || true
+  _tw_group=
+  _tw_watchdog=
   if [ -e "$_tw_timed_out" ]; then
     rm -f "$_tw_timed_out"
+    return 124
+  fi
+  return "$_tw_status"
+}
+
+# tincan_wake_run CMD [ARGS...] runs the CLI under TINCAN_WAKE_TIMEOUT (see
+# _tw_supervise). A clean exit clears the failure count; anything else
+# counts as a failure. Returns the CLI's status, or 124 when it timed out.
+tincan_wake_run() {
+  _tw_run_status=0
+  _tw_supervise "$TINCAN_WAKE_TIMEOUT" "$@" || _tw_run_status=$?
+  if [ "$_tw_run_status" -eq 124 ]; then
     tincan_wake_record_failure "timed out after $TINCAN_WAKE_TIMEOUT seconds"
     return 124
   fi
-  if [ "$_tw_status" -eq 0 ]; then
+  if [ "$_tw_run_status" -eq 0 ]; then
     tincan_wake_record_success
     return 0
   fi
-  tincan_wake_record_failure "exit status $_tw_status"
-  return "$_tw_status"
+  tincan_wake_record_failure "exit status $_tw_run_status"
+  return "$_tw_run_status"
 }
