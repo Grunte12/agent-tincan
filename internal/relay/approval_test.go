@@ -80,7 +80,7 @@ func TestOwnerApprovalLifecycle(t *testing.T) {
 	if _, err := target.Reply(t.Context(), req.ID, "bypass", envelope.StatusAnswered); !client.IsStatus(err, 409) {
 		t.Fatalf("held reply: %v", err)
 	}
-	if _, err := target.Get(t.Context(), req.ID, 0); !client.IsStatus(err, 404) {
+	if res, err := target.Get(t.Context(), req.ID, 0); err != nil || res.Request.Body != "waiting for the owner's approval" || len(res.Request.Attachments) != 0 {
 		t.Fatalf("target read held: %v", err)
 	}
 	var trace struct {
@@ -304,4 +304,111 @@ func TestApprovalNotificationFailureKeepsHeld(t *testing.T) {
 		}
 	}
 	t.Fatal("missing notification failure audit")
+}
+
+func TestNeverApprovedContentRemainsPrivate(t *testing.T) {
+	for _, transition := range []string{"cancelled", "denied", "expired", "approved"} {
+		t.Run(transition, func(t *testing.T) {
+			m := testrelay.New(t, relay.Config{})
+			m.Server.SetAttachmentDir(t.TempDir())
+			path := filepath.Join(t.TempDir(), "approval.json")
+			if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"}},"hold_ttl":"1h"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			gate, err := policy.LoadApproval(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: gate}))
+			sender, target, admin := m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "admin")
+			upload, err := sender.UploadAttachment(t.Context(), "secret.txt", "text/plain", strings.NewReader("secret"), 6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := sender.SendAttached(t.Context(), "muse", "private body", envelope.KindAsk, "", []string{upload.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch transition {
+			case "cancelled":
+				err = sender.Cancel(t.Context(), req.ID)
+			case "denied":
+				err = admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/deny", nil, nil)
+			case "expired":
+				now := time.Now().Add(2 * time.Hour)
+				m.Store.SetClock(func() time.Time { return now })
+				m.Server.Sweep(t.Context())
+			case "approved":
+				err = admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved := transition == "approved"
+			for _, who := range []string{"grokbot", "muse", "admin"} {
+				c := m.Client(t, who)
+				visible := approved || who != "muse"
+				check := func(r envelope.Request) {
+					t.Helper()
+					if visible {
+						if r.Body != "private body" || len(r.Attachments) != 1 {
+							t.Fatalf("%s lost content: %+v", who, r)
+						}
+					} else if r.Body != "waiting for the owner's approval" || len(r.Attachments) != 0 {
+						t.Fatalf("%s leaked content: %+v", who, r)
+					}
+				}
+				if who != "admin" {
+					res, err := c.Get(t.Context(), req.ID, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					check(res.Request)
+				}
+				var trace struct {
+					Steps []envelope.Result `json:"steps"`
+				}
+				if err := c.Raw(t.Context(), "GET", "/v1/trace/"+req.TraceID, nil, &trace); err != nil {
+					t.Fatal(err)
+				}
+				if len(trace.Steps) != 1 {
+					t.Fatalf("trace: %+v", trace)
+				}
+				check(trace.Steps[0].Request)
+				var body strings.Builder
+				_, err := c.DownloadAttachment(t.Context(), upload.ID, &body)
+				if visible {
+					if err != nil || body.String() != "secret" {
+						t.Fatalf("%s download: %q %v", who, body.String(), err)
+					}
+				} else if !client.IsStatus(err, 404) || body.Len() != 0 {
+					t.Fatalf("attachment leaked: %q %v", body.String(), err)
+				}
+			}
+			var peek struct {
+				Pending []envelope.Pending `json:"pending"`
+			}
+			if err := target.Raw(t.Context(), "GET", "/v1/poll?peek=1&hold=0", nil, &peek); err != nil {
+				t.Fatal(err)
+			}
+			if approved {
+				if len(peek.Pending) != 1 || peek.Pending[0].ID != req.ID {
+					t.Fatalf("approved peek: %+v", peek)
+				}
+			} else if len(peek.Pending) != 0 {
+				t.Fatalf("unapproved peek: %+v", peek)
+			}
+			inbox, err := target.Poll(t.Context(), time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if approved {
+				if len(inbox.Requests) != 1 || inbox.Requests[0].Body != "private body" || len(inbox.Requests[0].Attachments) != 1 {
+					t.Fatalf("approved poll: %+v", inbox)
+				}
+			} else if len(inbox.Requests) != 0 {
+				t.Fatalf("unapproved poll: %+v", inbox)
+			}
+		})
+	}
 }

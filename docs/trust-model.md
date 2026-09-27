@@ -113,3 +113,15 @@ local socket; the notice does not grant the receiving agent those powers.
 
 This gate adds a relay-enforced pause for owner review, not a judgment about
 whether the message is safe. Protect admin devices and the relay state directory.
+
+Requests retain whether they were ever held and whether the owner approved them.
+For every request that was held and never approved, only its sender and admins
+may read its body or attachments, regardless of its current status (including
+declined, expired and cancelled). Other callers, including the target, see
+`waiting for the owner's approval` and no attachment metadata wherever the
+request is otherwise visible: get, trace, search-like listings, poll and peek
+pending entries. Attachment downloads by those callers return 404. Held requests
+remain excluded from delivery; pending entries carry only ids and senders.
+An approved request follows the ordinary body and attachment access rules,
+even after it reaches a terminal state. Approval history survives relay restarts;
+upgrades backfill existing holds and decisions from request state and audit events.

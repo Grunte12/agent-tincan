@@ -549,6 +549,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(reqs) > 0 || len(reps) > 0 {
+			for i := range reqs {
+				reqs[i].RedactFor(name)
+			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
 			}
@@ -1073,10 +1076,7 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for i := range steps {
-			if steps[i].Status == envelope.StatusHeld && steps[i].Request.From != name {
-				steps[i].Request.Body = "waiting for the owner's approval"
-				steps[i].Request.Attachments = nil
-			}
+			steps[i].Request.RedactFor(name)
 		}
 		if !slices.Contains(store.Participants(steps), name) {
 			writeErr(w, http.StatusNotFound, errors.New("no such trace"))
@@ -1247,21 +1247,21 @@ func (s *Server) notifyApproval(ctx context.Context, held envelope.Request) {
 	}
 }
 
-// Held attachments follow the same access boundary as held request bodies.
+// Never-approved attachments remain private even after the hold ends.
 func (s *Server) handleApprovalFetch(w http.ResponseWriter, r *http.Request) {
 	rec, err := s.store.Attachment(r.Context(), r.PathValue("id"))
 	if err == nil && rec.RequestID != "" {
-		req, status, err := s.store.Request(r.Context(), rec.RequestID)
+		req, _, err := s.store.Request(r.Context(), rec.RequestID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		if status == envelope.StatusHeld && !s.isAdmin(r) {
+		if req.WasHeld && !req.Approved && !s.isAdmin(r) {
 			name := s.agent(w, r)
 			if name == "" {
 				return
 			}
-			if name != req.From && name != rec.Uploader {
+			if name != req.From {
 				writeErr(w, http.StatusNotFound, store.ErrNotFound)
 				return
 			}

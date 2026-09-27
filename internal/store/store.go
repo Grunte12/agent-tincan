@@ -143,6 +143,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
 	}
+	if err := s.migrateApproval(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate approval: %w", err)
+	}
 	return s, nil
 }
 
@@ -475,6 +479,7 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		status = envelope.StatusHeld
 		ttl = req.HoldTTL
 	}
+	req.WasHeld, req.Approved = status == envelope.StatusHeld, false
 	req.ID = randomID()
 	req.CreatedAt = now.UTC().Truncate(time.Millisecond)
 	if req.TraceID == "" {
@@ -494,10 +499,10 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -631,7 +636,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if (req.From != agent && req.To != agent) || (status == envelope.StatusHeld && req.From != agent) {
+	if req.From != agent && req.To != agent {
 		return Result{}, ErrNotFound
 	}
 	rep, err := s.replyFor(ctx, id)
@@ -643,6 +648,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 			return Result{}, err
 		}
 	}
+	req.RedactFor(agent)
 	return Result{Request: req, Status: status, Reply: rep}, nil
 }
 
@@ -790,7 +796,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, was_held, approved`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -798,7 +804,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
 	var chain, kind, status, atts string
 	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.WasHeld, &r.Approved); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -858,7 +864,7 @@ func (s *Store) Held(ctx context.Context) ([]envelope.Request, error) {
 // Release queues a held request with a fresh delivery TTL and its original creation time.
 func (s *Store) Release(ctx context.Context, id string, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ?, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, approved = 1, updated_at = ?, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
 	if err != nil {
 		return envelope.Request{}, err
 	}

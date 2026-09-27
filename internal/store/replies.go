@@ -58,7 +58,7 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(args, MaxUnseenReplies)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments,
-		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), COALESCE(substr(par.body, 1, ?), ''), COALESCE(par.status, '')
+		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), CASE WHEN par.was_held = 1 AND par.approved = 0 AND par.from_agent != q.from_agent THEN 'waiting for the owner''s approval' ELSE COALESCE(substr(par.body, 1, ?), '') END, COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
 		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
 		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+`

@@ -89,6 +89,17 @@ type Request struct {
 	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
 	HoldTTL        time.Duration `json:"-"`
 	ApprovalNotify string        `json:"-"`
+	// WasHeld and Approved are persisted relay-only approval history.
+	WasHeld  bool `json:"-"`
+	Approved bool `json:"-"`
+}
+
+// RedactFor hides content that the owner has never released to other agents.
+func (r *Request) RedactFor(agent string) {
+	if r.WasHeld && !r.Approved && r.From != agent {
+		r.Body = "waiting for the owner's approval"
+		r.Attachments = nil
+	}
 }
 
 // Pending names a queued request without its body, as a peek reports it.

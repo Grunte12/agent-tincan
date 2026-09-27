@@ -88,8 +88,9 @@ A held send response has an optional `status: "held"` field; ordinary send
 responses remain unchanged. Get-reply and trace report `held` in their existing
 status field. Older clients can decode this unknown string and keep waiting.
 Held requests are excluded from poll, peek, queued counts, claim, reply and
-wake delivery. The sender can get or cancel them; held bodies and attachment
-metadata are hidden from other agents' traces. Admin devices can inspect them.
+wake delivery. The sender can get or cancel them. Other agents, including the target, see
+the placeholder body and no attachments in get and trace. This restriction
+persists until approval, as specified below. Admin devices can inspect them.
 
 Admin devices and the local admin socket have these endpoints; agent callers
 receive 403:
@@ -108,3 +109,15 @@ with their original deadline. Policy changes apply only to future sends.
 The other transitions are audited as `held`, `approved`, and `denied`.
 An optional relay-authored operator `notify` bypasses the gate and is logged
 as `approval_notified`; it never grants the notified agent admin access.
+
+Requests retain whether they were ever held and whether the owner approved them.
+For every request that was held and never approved, only its sender and admins
+may read its body or attachments, regardless of its current status (including
+declined, expired and cancelled). Other callers, including the target, see
+`waiting for the owner's approval` and no attachment metadata wherever the
+request is otherwise visible: get, trace, search-like listings, poll and peek
+pending entries. Attachment downloads by those callers return 404. Held requests
+remain excluded from delivery; pending entries carry only ids and senders.
+An approved request follows the ordinary body and attachment access rules,
+even after it reaches a terminal state. Approval history survives relay restarts;
+upgrades backfill existing holds and decisions from request state and audit events.
