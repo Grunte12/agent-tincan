@@ -343,3 +343,44 @@ func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 		t.Fatalf("~/.grok/config.toml read although GROK_HOME points elsewhere: %+v", es)
 	}
 }
+
+// A grok-cli teammate's tincan server lives in its wake home
+// (<name>.wake/.grok/config.toml beside its tincan config). tincan doctor
+// run with that teammate's TINCAN_CONFIG reads it without GROK_HOME, and
+// with GROK_HOME pointed at the wake home (as it is inside a wake run) too.
+func TestFindMCPConfigsReadsGrokWakeHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("GROK_HOME", "")
+	cfgDir := filepath.Join(dir, "home", ".config", "tincan")
+	grokHome := filepath.Join(cfgDir, "grok-cli.wake", ".grok")
+	if err := os.MkdirAll(grokHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(grokHome, "config.toml")
+	toml := "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nargs = [\"mcp\"]\nenv = { TINCAN_CONFIG = \"" + filepath.Join(cfgDir, "grok-cli.json") + "\" }\n"
+	if err := os.WriteFile(f, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found := func() bool {
+		for _, e := range findMCPConfigs(nil) {
+			if e.File == f && e.Name == "agent-tincan" {
+				return true
+			}
+		}
+		return false
+	}
+	t.Setenv("TINCAN_CONFIG", filepath.Join(cfgDir, "claude.json"))
+	if found() {
+		t.Fatal("another agent's doctor read the grok-cli wake home")
+	}
+	t.Setenv("TINCAN_CONFIG", filepath.Join(cfgDir, "grok-cli.json"))
+	if !found() {
+		t.Fatal("doctor with the grok-cli TINCAN_CONFIG did not read its wake home's config.toml")
+	}
+	t.Setenv("TINCAN_CONFIG", filepath.Join(cfgDir, "claude.json"))
+	t.Setenv("GROK_HOME", grokHome)
+	if !found() {
+		t.Fatal("doctor with GROK_HOME at the wake home did not read its config.toml")
+	}
+}

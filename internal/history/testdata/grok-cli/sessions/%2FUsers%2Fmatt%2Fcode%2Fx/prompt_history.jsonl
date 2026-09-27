@@ -1,0 +1,4 @@
+{"timestamp": "2026-09-20T08:00:05Z", "session_id": "01a0f000-0000-7000-8000-000000000002", "prompt": "rename the config loader", "is_bash": false}
+{"timestamp": "2026-09-21T09:00:05Z", "session_id": "01a0f000-0000-7000-8000-000000000001", "prompt": "plan the parser refactor", "is_bash": false}
+{"timestamp": "2026-09-21T09:30:00Z", "session_id": "01a0f000-0000-7000-8000-000000000001", "prompt": "ls", "is_bash": true}
+{"timestamp": "2026-09-21T09:59:00Z", "session_id": "01a0f000-0000-7000-8000-000000000001", "prompt": "does this diagram match", "is_bash": false}

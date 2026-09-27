@@ -38,6 +38,10 @@ func historyReader(source string) (history.Reader, error) {
 		r := history.NewClaudeCode()
 		r.Now = historyNow
 		return r, nil
+	case history.SourceGrokCLI:
+		r := history.NewGrokCLI()
+		r.Now = historyNow
+		return r, nil
 	}
 	return nil, fmt.Errorf("unknown history source %q (want %s)", source, history.SourceNames())
 }
@@ -47,10 +51,10 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <chatgpt|claude-ai|grok|codex|claude-code>",
-		Short: "Read the owner's ChatGPT, claude.ai, Grok, Codex or Claude Code history",
-		Long: "Read the owner's ChatGPT, claude.ai, Grok, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web, claude-web and grok-web agents sent into) are left out unless --all is given.\n" +
+		Use:   "history <chatgpt|claude-ai|grok|codex|claude-code|grok-cli>",
+		Short: "Read the owner's ChatGPT, claude.ai, Grok, Codex, Claude Code or Grok CLI history",
+		Long: "Read the owner's ChatGPT, claude.ai, Grok, Codex, Claude Code or Grok CLI history. With no mode flag it shows the latest prompt the owner typed.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, grok-cli wakes, and chats the chatgpt-web, claude-web and grok-web agents sent into) are left out unless --all is given.\n" +
 			"chatgpt, claude-ai and grok are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
 			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
 			"(ChatGPT, claude.ai and Grok read at most 100). When that window cut the answer short, a note says so on stderr.",
@@ -120,7 +124,7 @@ func historyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&list, "list", 20, "list the N most recent conversations with their working directory")
-	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK) and the web agents' chats")
+	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK, grok-cli wakes) and the web agents' chats")
 	cmd.Flags().BoolVar(&latest, "latest", false, "show the latest prompt and its reply (default)")
 	cmd.Flags().StringVar(&search, "search", "", "find recent conversations whose title or a prompt contains every word")
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")

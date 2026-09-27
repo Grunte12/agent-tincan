@@ -12,10 +12,11 @@
 #   tincan_wake_begin                       # lock and backoff; may exit 0
 #   tincan_wake_check_binary "$BIN" '^MyCLI '
 #   mycli_mcp_list() { ... }                # prints the CLI's MCP listing
-#   tincan_wake_check_identity mycli_mcp_list
+#   tincan_wake_check_identity mycli_mcp_list   # sets tincan_wake_server
 #   roots=$(tincan_wake_write_roots "$ALLOWED_ROOTS" "$WRITE_ROOTS")
 #   set -- "$BIN" <headless and sandbox flags>   # plus one flag per root
 #   tincan_wake_run "$@" "$PROMPT"          # timeout, failure count
+#   tincan_wake_backoff "login expired"     # optional: back off at once
 #
 # Operator settings, read from the environment (the listener's):
 #
@@ -217,6 +218,13 @@ tincan_wake_refuse() {
   exit 1
 }
 
+# tincan_wake_backoff REASON backs off at once and tells the operator, after
+# a run failed in a way the next run cannot fix on its own (an expired
+# login). The requests stay queued.
+tincan_wake_backoff() {
+  _tw_backoff "$1"
+}
+
 # tincan_wake_record_failure REASON counts one failed run, and backs off
 # once TINCAN_WAKE_MAX_FAILURES runs in a row have failed.
 tincan_wake_record_failure() {
@@ -289,6 +297,8 @@ tincan_wake_check_binary() {
 # this wake's TINCAN_CONFIG, and every other server is in
 # TINCAN_WAKE_ALLOWED_SERVERS: the CLI runs with tool approval off, so it
 # must not be able to act as another teammate or through an unvetted server.
+# When the check passes, tincan_wake_server holds that server's name (for a
+# CLI flag that names the servers it may start).
 tincan_wake_check_identity() {
   if [ -z "${TINCAN_CONFIG:-}" ]; then
     tincan_wake_refuse "TINCAN_CONFIG is not set for this wake"
@@ -322,6 +332,7 @@ tincan_wake_check_identity() {
   fi
   _tw_count=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_awk_lib"' $0 != "" && tincan() { n++ } END { print n + 0 }')
   _tw_tincan=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_awk_lib"' $0 != "" && tincan() { print $2; exit }')
+  _tw_tincan_name=$(printf '%s\n' "$_tw_listing" | awk -F '\t' "$_tw_awk_lib"' $0 != "" && tincan() { print $1; exit }')
   _tw_extra=$(printf '%s\n' "$_tw_listing" | awk -F '\t' -v allowed="$_tw_allowed" "$_tw_awk_lib"'
     BEGIN { n = split(allowed, a, " "); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
     $0 == "" || tincan() { next }
@@ -338,6 +349,8 @@ tincan_wake_check_identity() {
   if [ -n "$_tw_extra" ]; then
     tincan_wake_refuse "the CLI has MCP servers the operator did not allow: $_tw_extra (list them in TINCAN_WAKE_ALLOWED_SERVERS, or remove them)"
   fi
+  # shellcheck disable=SC2034 # read by the per-CLI script
+  tincan_wake_server=$_tw_tincan_name
 }
 
 # _tw_same_file A B succeeds if A and B are the same path, or name the same

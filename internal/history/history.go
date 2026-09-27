@@ -1,5 +1,5 @@
 // Package history reads Matt's conversations with ChatGPT, claude.ai, Grok,
-// Codex and Claude Code so the history agent can answer "what did Matt last ask"
+// Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
 // and send back the images from that turn.
 //
 // Every source is an adapter behind Reader. Adapters share one Query shape,
@@ -36,11 +36,12 @@ const (
 	SourceChatGPT    Source = "chatgpt"
 	SourceClaudeAI   Source = "claude-ai"
 	SourceGrok       Source = "grok"
+	SourceGrokCLI    Source = "grok-cli"
 )
 
 // Sources lists every valid Source: the live sites, in the site table's
 // order, then the local sources.
-var Sources = append(siteSources(), SourceCodex, SourceClaudeCode)
+var Sources = append(siteSources(), SourceCodex, SourceClaudeCode, SourceGrokCLI)
 
 // Mode is what a query asks for.
 type Mode string

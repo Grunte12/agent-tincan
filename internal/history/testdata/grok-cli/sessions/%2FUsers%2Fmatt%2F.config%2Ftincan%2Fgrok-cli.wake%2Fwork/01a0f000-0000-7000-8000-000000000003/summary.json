@@ -1,0 +1,11 @@
+{
+  "info": {
+    "id": "01a0f000-0000-7000-8000-000000000003",
+    "cwd": "/Users/matt/.config/tincan/grok-cli.wake/work"
+  },
+  "num_messages": 3,
+  "agent_name": "grok-build-plan",
+  "created_at": "2026-09-22T08:00:00.000000Z",
+  "updated_at": "2026-09-22T08:01:00.000000Z",
+  "sandbox_profile": "workspace"
+}

@@ -137,6 +137,35 @@ func TestHistoryClaudeCodeSearchAndID(t *testing.T) {
 	}
 }
 
+// tincan history grok-cli reads the owner's $GROK_HOME and leaves out the
+// runs a grok-cli wake recorded beside its tincan config, unless --all.
+func TestHistoryGrokCLI(t *testing.T) {
+	historyEnv(t)
+	base := t.TempDir()
+	grokHome := filepath.Join(base, "grok")
+	if err := os.CopyFS(grokHome, os.DirFS("../history/testdata/grok-cli")); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "home")
+	if err := os.CopyFS(filepath.Join(home, ".config", "tincan"), os.DirFS("../history/testdata/grok-cli/tincan")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_HOME", grokHome)
+	t.Setenv("HOME", home)
+	out, err := run(t, Root(), "history", "grok-cli")
+	if err != nil || !strings.Contains(out, "does this diagram match") || !strings.Contains(out, "Parser refactor plan") {
+		t.Fatalf("latest: %v\n%s", err, out)
+	}
+	out, err = run(t, Root(), "history", "grok-cli", "--list", "10")
+	if err != nil || strings.Contains(out, "01a0f000-0000-7000-8000-000000000003") || strings.Contains(out, "01a0f000-0000-7000-8000-000000000005") {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	out, err = run(t, Root(), "history", "grok-cli", "--list", "10", "--all")
+	if err != nil || !strings.Contains(out, "01a0f000-0000-7000-8000-000000000003") || !strings.Contains(out, "01a0f000-0000-7000-8000-000000000004") {
+		t.Fatalf("list --all: %v\n%s", err, out)
+	}
+}
+
 func TestHistoryBadArgs(t *testing.T) {
 	historyEnv(t)
 	cases := [][]string{

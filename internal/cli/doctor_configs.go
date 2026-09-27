@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // mcpConfigEntry is one MCP server entry, in a config file an app reads,
@@ -52,6 +54,7 @@ func mcpConfigFiles(extra []string) []string {
 		filepath.Join(cwd, ".cursor", "mcp.json"),
 		"/workspace/.mcp.json",
 		"/workspace/.cursor/mcp.json",
+		grokWakeConfig(),
 	}
 	files = append(files, extra...)
 	seen := map[string]bool{}
@@ -66,6 +69,15 @@ func mcpConfigFiles(extra []string) []string {
 		}
 	}
 	return out
+}
+
+// grokWakeConfig is the Grok config.toml in the wake home of a grok-cli
+// teammate whose tincan config is the active one: examples/grok-cli's
+// grok-wake.sh runs Grok with GROK_HOME <name>.wake/.grok beside
+// <name>.json. mcpConfigFiles skips it when it does not exist.
+func grokWakeConfig() string {
+	p := client.ConfigPath()
+	return filepath.Join(filepath.Dir(p), strings.TrimSuffix(filepath.Base(p), ".json")+".wake", ".grok", "config.toml")
 }
 
 func findMCPConfigs(extra []string) []mcpConfigEntry {

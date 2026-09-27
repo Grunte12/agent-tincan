@@ -442,7 +442,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	}
 	if errors.Is(err, ErrUnclearQuestion) {
 		s.logf("request %s from %s: unclear question: %v", req.ID, req.From, err)
-		s.reply(ctx, req, "I could not turn that into a history lookup. Please ask a clearer question naming ChatGPT, claude.ai, Grok, Codex or Claude Code. "+clarifyExample, envelope.StatusFailed, nil)
+		s.reply(ctx, req, "I could not turn that into a history lookup. Please ask a clearer question naming ChatGPT, claude.ai, Grok, Codex, Claude Code or Grok CLI. "+clarifyExample, envelope.StatusFailed, nil)
 		return
 	}
 	if err != nil {
@@ -610,6 +610,8 @@ func sourceLabel(s Source) string {
 		return "Codex"
 	case SourceClaudeCode:
 		return "Claude Code"
+	case SourceGrokCLI:
+		return "Grok CLI"
 	}
 	return string(s)
 }
