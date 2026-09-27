@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
@@ -13,6 +14,9 @@ type PingResponder interface {
 	Claimer
 	Reply(context.Context, string, string, envelope.Status) (envelope.Reply, error)
 }
+
+// pongRetry spaces the retries of a failed pong reply.
+var pongRetry = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second}
 
 // AnswerPings removes pings from the inbox and answers them without model work.
 // The non-ping inbox is always returned. Claim races are benign; other failures
@@ -40,7 +44,22 @@ func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string)
 		if version == "" {
 			version = "dev"
 		}
-		if _, err := r.Reply(ctx, req.ID, fmt.Sprintf("pong (answered by %s, tincan %s)", surface, version), envelope.StatusAnswered); err != nil && !IsStatus(err, 409) {
+		// The ping is claimed now, so polling will not see it again until the
+		// lease runs out; retry a failed pong here instead.
+		body := fmt.Sprintf("pong (answered by %s, tincan %s)", surface, version)
+		var err error
+		for attempt := 0; ; attempt++ {
+			if _, err = r.Reply(ctx, req.ID, body, envelope.StatusAnswered); err == nil || IsStatus(err, 409) || attempt >= len(pongRetry) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(pongRetry[attempt]):
+				continue
+			}
+			break
+		}
+		if err != nil && !IsStatus(err, 409) {
 			log.Printf("tincan %s: ping %s reply failed: %v", surface, req.ID, err)
 			if first == nil {
 				first = err
