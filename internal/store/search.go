@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"math"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -11,8 +13,9 @@ import (
 
 const searchCandidateLimit = 2000
 
-// searchVisibleWindow bounds an agent's search to its newest visible requests.
-const searchVisibleWindow = 5000
+// searchVisibleWindow is how many of an agent's visible requests one search
+// query covers; a search walks them in chunks of this size.
+var searchVisibleWindow = 5000
 const searchBackfillBatchSize = 500
 
 func (s *Store) migrateSearch() error {
@@ -99,26 +102,65 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 		limit = 20
 	}
 	limit = min(limit, 50)
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.trace_id, r.from_agent, r.to_agent, r.status, r.created_at,
- c.snippet, c.reply_snippet, r.attachments, COALESCE(p.attachments, '')
- FROM (
- SELECT rowid,
- CASE WHEN highlight(requests_fts, 2, '[', ']') != body THEN snippet(requests_fts, 2, '[', ']', '…', 24) ELSE '' END AS snippet,
- CASE WHEN highlight(requests_fts, 3, '[', ']') != reply_body THEN snippet(requests_fts, 3, '[', ']', '…', 24) ELSE '' END AS reply_snippet
- FROM requests_fts
- WHERE requests_fts MATCH ? AND (? = '' OR rowid IN (
-   -- An agent searches only its own chains, newest searchVisibleWindow
-   -- requests first. Every step here is indexed and proportional to the
-   -- agent's own history, so matches it cannot see are never examined.
-   SELECT r.rowid FROM requests r WHERE r.trace_id IN (
+	match := strings.Join(terms, " AND ")
+	if participant == "" {
+		// Admins search the whole index, newest searchCandidateLimit matches.
+		return s.searchRows(ctx, `SELECT rowid,`+searchExcerpts+` FROM requests_fts
+ WHERE requests_fts MATCH ? ORDER BY rowid DESC LIMIT ?`, limit, match, searchCandidateLimit)
+	}
+	// An agent searches only its own chains. Walk them newest first in
+	// chunks of searchVisibleWindow requests, one short query per chunk, so
+	// matches it cannot see are never examined, the store's single
+	// connection is released between chunks, and older matches are still
+	// reached when the newer chunks do not fill the limit.
+	below := int64(math.MaxInt64)
+	for {
+		var chunkLow int64
+		var chunkRows int
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MIN(rowid), 0), COUNT(*) FROM (
+ SELECT r.rowid FROM requests r WHERE r.rowid < ? AND r.trace_id IN (
+   SELECT trace_id FROM requests WHERE from_agent = ?
+   UNION SELECT trace_id FROM requests WHERE to_agent = ?
+ ) ORDER BY r.rowid DESC LIMIT ?)`, below, participant, participant, searchVisibleWindow).Scan(&chunkLow, &chunkRows); err != nil {
+			return nil, err
+		}
+		if chunkRows == 0 {
+			break
+		}
+		hits, err := s.searchRows(ctx, `SELECT rowid,`+searchExcerpts+` FROM requests_fts
+ WHERE requests_fts MATCH ? AND rowid >= ? AND rowid < ? AND rowid IN (
+   SELECT r.rowid FROM requests r WHERE r.rowid >= ? AND r.rowid < ? AND r.trace_id IN (
      SELECT trace_id FROM requests WHERE from_agent = ?
      UNION SELECT trace_id FROM requests WHERE to_agent = ?
-   ) ORDER BY r.rowid DESC LIMIT ?
- ))
- ORDER BY rowid DESC LIMIT ?
- ) c JOIN requests r ON r.rowid = c.rowid
+   ))
+ ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant, participant, limit-len(out))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, hits...)
+		if len(out) >= limit || chunkRows < searchVisibleWindow {
+			break
+		}
+		below = chunkLow
+	}
+	slices.SortStableFunc(out, func(a, b envelope.SearchResult) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	return out, nil
+}
+
+// searchExcerpts selects an excerpt of each body only when that body matched.
+const searchExcerpts = `
+ CASE WHEN highlight(requests_fts, 2, '[', ']') != body THEN snippet(requests_fts, 2, '[', ']', '…', 24) ELSE '' END AS snippet,
+ CASE WHEN highlight(requests_fts, 3, '[', ']') != reply_body THEN snippet(requests_fts, 3, '[', ']', '…', 24) ELSE '' END AS reply_snippet`
+
+// searchRows runs candidates (rowid, snippet, reply_snippet from requests_fts)
+// and returns at most limit results, newest request first.
+func (s *Store) searchRows(ctx context.Context, candidates string, limit int, args ...any) ([]envelope.SearchResult, error) {
+	out := []envelope.SearchResult{}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.trace_id, r.from_agent, r.to_agent, r.status, r.created_at,
+ c.snippet, c.reply_snippet, r.attachments, COALESCE(p.attachments, '')
+ FROM (`+candidates+`) c JOIN requests r ON r.rowid = c.rowid
  LEFT JOIN replies p ON p.request_id = r.id
- ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, strings.Join(terms, " AND "), participant, participant, participant, searchVisibleWindow, searchCandidateLimit, limit)
+ ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}

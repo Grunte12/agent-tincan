@@ -204,3 +204,30 @@ func TestSearchBackfillBatchFailureAndResume(t *testing.T) {
 		t.Fatalf("resumed checkpoint=%d count=%d", high, count)
 	}
 }
+
+// An agent's older chains are still searched when the newest chunk of its
+// visible requests has no match, and chains it cannot see never are.
+func TestSearchWalksOlderVisibleChunks(t *testing.T) {
+	old := searchVisibleWindow
+	searchVisibleWindow = 3
+	t.Cleanup(func() { searchVisibleWindow = old })
+	s, _ := open(t, ":memory:")
+	rare := ask(t, s, "visible", "b", "the rare zanzibar note")
+	for range 7 {
+		ask(t, s, "visible", "b", "common chatter")
+		ask(t, s, "other", "c", "zanzibar elsewhere")
+	}
+	hits, err := s.Search(t.Context(), "zanzibar", "visible", 20)
+	if err != nil || len(hits) != 1 || hits[0].RequestID != rare.ID {
+		t.Fatalf("older visible match = %+v, %v", hits, err)
+	}
+	hits, err = s.Search(t.Context(), "common", "visible", 5)
+	if err != nil || len(hits) != 5 {
+		t.Fatalf("limit across chunks = %d hits, %v", len(hits), err)
+	}
+	for i := 1; i < len(hits); i++ {
+		if hits[i].CreatedAt.After(hits[i-1].CreatedAt) {
+			t.Fatalf("not newest first: %+v", hits)
+		}
+	}
+}
