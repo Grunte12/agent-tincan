@@ -14,6 +14,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/relay"
 )
 
 func listenCmd() *cobra.Command {
@@ -91,7 +92,10 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			}
 			n--
 		}
-		if pingFailed && n <= 0 {
+		// A full page of pings can hide more pings in the total. Peek again
+		// after answering them before deciding whether ordinary work remains.
+		pingPage := len(w.Pending) == relay.MaxPeekPending && w.Total-n == len(w.Pending)
+		if pingFailed && (n <= 0 || pingPage) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -101,7 +105,7 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			continue
 		}
 		backoff = time.Second
-		if n <= 0 {
+		if n <= 0 || pingPage {
 			continue
 		}
 		if err := nudge(ctx, r, execCmd, n, once); err != nil {

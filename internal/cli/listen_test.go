@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -346,6 +347,57 @@ func TestInboxPingFailurePreservesWork(t *testing.T) {
 	in, err := waitForInbox(t.Context(), relay, time.Second, client.RepliesNone)
 	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "work" {
 		t.Fatalf("wait: %+v, %v", in, err)
+	}
+}
+
+func TestListenDrainsTruncatedPingBatchWithoutNudging(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var answered, peeks atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/poll":
+			if r.URL.Query().Get("hold") == "0" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			peeks.Add(1)
+			done := int(answered.Load())
+			waiting := client.Waiting{Total: 60 - done, Queued: 60 - done}
+			for i := done; i < min(done+relay.MaxPeekPending, 60); i++ {
+				waiting.Pending = append(waiting.Pending, envelope.Pending{ID: fmt.Sprintf("ping-%d", i), Kind: envelope.KindPing})
+			}
+			if err := json.NewEncoder(w).Encode(waiting); err != nil {
+				t.Errorf("encode peek: %v", err)
+			}
+			if done == 60 {
+				cancel()
+			}
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			fmt.Fprint(w, `{}`)
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			answered.Add(1)
+			fmt.Fprint(w, `{}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+	r, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "nudged")
+	err = listen(ctx, r, "touch "+marker, true)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("exec command ran or marker could not be checked: %v", statErr)
+	}
+	if err != context.Canceled {
+		t.Fatalf("listen = %v, want context.Canceled", err)
+	}
+	if answered.Load() != 60 || peeks.Load() != 3 {
+		t.Fatalf("answered=%d peeks=%d, want 60 answers and 3 peeks", answered.Load(), peeks.Load())
 	}
 }
 
