@@ -735,14 +735,15 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	}
 	wg.Wait()
 	r.groupsMu.Lock()
-	// Concurrent polls must not overwrite more advanced cached results.
+	// A finished result is final: a late poll that still saw it pending must
+	// not undo it. Unfinished states may move back (a lapsed lease requeues).
 	prev, _ := r.cachedGroupLocked(g.Group)
 	for i, res := range g.Results {
 		if res.Request.ID == "" {
 			continue
 		}
 		for _, cached := range prev.Results {
-			if cached.Request.ID == res.Request.ID && (res.Error != "" || groupProgress(cached.Result) > groupProgress(res.Result)) {
+			if cached.Request.ID == res.Request.ID && (res.Error != "" || (cached.Done() && !res.Done())) {
 				g.Results[i].Result = cached.Result
 				break
 			}
@@ -754,21 +755,4 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	r.cacheGroupLocked(cached)
 	r.groupsMu.Unlock()
 	return g, nil
-}
-
-// groupProgress orders observations so late polls cannot regress the cache.
-func groupProgress(r Result) int {
-	if r.Done() {
-		return 4
-	}
-	switch r.Status {
-	case envelope.StatusClaimed:
-		return 3
-	case envelope.StatusDelivered:
-		return 2
-	case envelope.StatusQueued:
-		return 1
-	default:
-		return 0
-	}
 }

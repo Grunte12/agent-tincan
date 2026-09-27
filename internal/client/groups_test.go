@@ -340,7 +340,7 @@ func TestGroupRecoversLostSendResponse(t *testing.T) {
 }
 
 func TestGroupConcurrentPollDoesNotRegress(t *testing.T) {
-	for _, advanced := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed, envelope.StatusAnswered} {
+	for _, advanced := range []envelope.Status{envelope.StatusAnswered, envelope.StatusFailed} {
 		t.Run(string(advanced), func(t *testing.T) {
 			started, release := make(chan struct{}), make(chan struct{})
 			var calls atomic.Int32
@@ -369,5 +369,30 @@ func TestGroupConcurrentPollDoesNotRegress(t *testing.T) {
 				t.Fatalf("new=%+v stale=%+v err=%v", newer, older, err)
 			}
 		})
+	}
+}
+
+// A lapsed lease sends a claimed request back to queued; a later poll must
+// show that, not the stale claim.
+func TestGroupPollFollowsRequeue(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status := envelope.StatusClaimed
+		if calls.Add(1) > 1 {
+			status = envelope.StatusQueued
+		}
+		_ = json.NewEncoder(w).Encode(client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: status})
+	}))
+	defer ts.Close()
+	c, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := client.GroupResult{Group: "group-requeue", Results: []client.GroupEntry{{Result: client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}}
+	if g, err = c.WaitGroup(t.Context(), g, 0); err != nil || g.Results[0].Status != envelope.StatusClaimed {
+		t.Fatalf("first poll = %+v %v", g, err)
+	}
+	if g, err = c.WaitGroup(t.Context(), g, 0); err != nil || g.Results[0].Status != envelope.StatusQueued {
+		t.Fatalf("requeued request shows %s, want queued", g.Results[0].Status)
 	}
 }
