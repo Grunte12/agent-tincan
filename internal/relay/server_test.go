@@ -640,3 +640,57 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
 	}
 }
+
+func TestProgressAuthorizationAndPrivacy(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := h.send(grokAddr, "muse", "work")
+	path := "/v1/requests/" + req.ID
+	h.do(museAddr, "POST", path+"/progress", `{"note":"working"}`, 409, nil)
+	h.do(museAddr, "POST", path+"/claim", "", 200, nil)
+	h.do(grokAddr, "POST", path+"/progress", `{"note":"working"}`, 409, nil)
+	h.do(instinctAddr, "POST", path+"/progress", `{"note":"working"}`, 409, nil)
+	h.do(museAddr, "POST", path+"/progress", `{"note":""}`, 400, nil)
+	h.do(museAddr, "POST", path+"/progress", `{"note":"`+strings.Repeat("é", 513)+`"}`, 413, nil)
+	note := strings.Repeat("é", 512)
+	wake := h.srv.hub.wait(requestKey(req.ID))
+	inboxWake := h.srv.hub.wait(inboxKey("grokbot"))
+	h.do(museAddr, "POST", path+"/progress", `{"note":"`+note+`","by":"grokbot"}`, 200, nil)
+	select {
+	case <-wake:
+		t.Fatal("progress woke held get")
+	default:
+	}
+	select {
+	case <-inboxWake:
+		t.Fatal("progress woke inbox")
+	default:
+	}
+	var res envelope.Result
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Progress == nil || res.Progress.Note != note || res.Progress.By != "muse" {
+		t.Fatalf("result: %+v", res)
+	}
+	h.do(museAddr, "POST", path+"/progress", `{"note":"latest"}`, 200, nil)
+	steps, err := h.st.Trace(context.Background(), req.TraceID)
+	if err != nil || len(steps) != 1 || steps[0].Progress.Note != "latest" {
+		t.Fatalf("trace: %+v %v", steps, err)
+	}
+	events, err := h.st.AuditForTrace(context.Background(), req.TraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if strings.Contains(event.Detail, note) || strings.Contains(event.Detail, "latest") {
+			t.Fatal("note leaked to audit")
+		}
+		if event.Event == "progress" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("progress events: %d", count)
+	}
+	h.do(museAddr, "POST", path+"/reply", `{"body":"done"}`, 200, nil)
+	h.do(museAddr, "POST", path+"/progress", `{"note":"late"}`, 409, nil)
+}

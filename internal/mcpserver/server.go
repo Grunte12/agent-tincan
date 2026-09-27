@@ -28,6 +28,7 @@ const MaxWait = client.MaxInlineWait
 const Instructions = `You are one agent in the owner's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from the owner, then call reply.
+- For work that takes more than a few minutes, post a progress note with progress when you start and at milestones.
 - list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, and which tincan build each runs.
 ` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
@@ -52,6 +53,7 @@ type Backend interface {
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
 	AckReplies(ctx context.Context, ids []string) error
 	Claim(ctx context.Context, id string) (envelope.Request, error)
+	Progress(ctx context.Context, id, note string) error
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
 	Cancel(ctx context.Context, id string) error
 	Agents(ctx context.Context) ([]client.AgentInfo, error)
@@ -85,7 +87,7 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
 
 type askIn struct {
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
@@ -258,6 +260,16 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Claimed.\n" + client.FormatRequest(req))
 		})
 
+	mcp.AddTool(s, &mcp.Tool{Name: "progress", Description: "Post a short progress note on a request you claimed and renew its lease. Does not wake the asker."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
+			RequestID string `json:"request_id" jsonschema:"the claimed request id"`
+			Note      string `json:"note" jsonschema:"progress note, at most 1024 bytes"`
+		}) (*mcp.CallToolResult, any, error) {
+			if err := b.Progress(ctx, in.RequestID, in.Note); err != nil {
+				return fail(err)
+			}
+			return text("Progress recorded.")
+		})
 	mcp.AddTool(s, &mcp.Tool{Name: "reply", Description: "Answer a request from a teammate."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, any, error) {
 			var rep envelope.Reply
@@ -344,6 +356,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			var out strings.Builder
 			for _, st := range tr.Steps {
 				fmt.Fprintf(&out, "hop %d: %s -> %s [%s]: %s\n", st.Request.Hop, st.Request.From, st.Request.To, st.Status, st.Request.Body)
+				if st.Progress != nil {
+					fmt.Fprintf(&out, "  %s\n", client.FormatProgress(st.Progress))
+				}
 				if st.Reply != nil {
 					fmt.Fprintf(&out, "  reply from %s: %s\n", st.Reply.From, st.Reply.Body)
 				}

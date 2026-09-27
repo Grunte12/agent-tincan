@@ -15,6 +15,9 @@ import (
 // DefaultMaxBody caps a request or reply body.
 const DefaultMaxBody = 256 << 10
 
+// MaxProgressNote caps a progress note in bytes.
+const MaxProgressNote = 1024
+
 // MaxAttachments caps how many attachments one request or reply carries.
 const MaxAttachments = 8
 
@@ -82,6 +85,8 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// Progress is store metadata; the wire exposes it on Result.
+	Progress *Progress `json:"-"`
 }
 
 // Pending names a queued request without its body, as a peek reports it.
@@ -100,12 +105,20 @@ type Reply struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 }
 
+// Progress is the latest note from the agent handling a request.
+type Progress struct {
+	Note string    `json:"note"`
+	At   time.Time `json:"at"`
+	By   string    `json:"by"`
+}
+
 // Result is a request with its current status and reply, if any. The relay
 // returns it for get-reply and for each step of a trace.
 type Result struct {
-	Request Request `json:"request"`
-	Status  Status  `json:"status"`
-	Reply   *Reply  `json:"reply,omitempty"`
+	Progress *Progress `json:"progress,omitempty"`
+	Request  Request   `json:"request"`
+	Status   Status    `json:"status"`
+	Reply    *Reply    `json:"reply,omitempty"`
 	// Parent is set on an unseen reply whose request was asked while the
 	// asker was handling another request addressed to it, so a fresh session
 	// woken by the reply knows which request to finish.

@@ -340,6 +340,18 @@ func (r *Relay) Claim(ctx context.Context, id string) (envelope.Request, error) 
 	return out, err
 }
 
+// Progress posts a note and renews this agent's claim lease.
+func (r *Relay) Progress(ctx context.Context, id, note string) error {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.Progress {
+		return errors.New("this relay does not support progress notes (upgrade the relay)")
+	}
+	return r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/progress", map[string]string{"note": note}, nil)
+}
+
 // Reply answers a request.
 func (r *Relay) Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error) {
 	var out envelope.Reply

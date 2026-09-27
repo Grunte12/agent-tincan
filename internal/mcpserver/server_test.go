@@ -109,6 +109,18 @@ func TestAskInboxReplyOverMCP(t *testing.T) {
 		t.Fatalf("inbox = %q", inbox)
 	}
 	id := between(inbox, "Request ", " from")
+	if got := call(t, muse, "progress", map[string]any{"request_id": id, "note": "calling now"}); !strings.Contains(got, "Progress recorded") {
+		t.Fatalf("progress = %q", got)
+	}
+	for _, tool := range []string{"get_reply", "trace"} {
+		args := map[string]any{"request_id": id}
+		if tool == "trace" {
+			args = map[string]any{"trace_id": id}
+		}
+		if got := call(t, inst, tool, args); !strings.Contains(got, "calling now") || !strings.Contains(got, "claimed by muse") {
+			t.Fatalf("%s = %q", tool, got)
+		}
+	}
 	if got := call(t, muse, "reply", map[string]any{"request_id": id, "message": "done, Tue 3pm"}); !strings.Contains(got, "Replied") {
 		t.Fatalf("reply = %q", got)
 	}
@@ -313,6 +325,8 @@ func (r *recorder) AckReplies(context.Context, []string) error {
 	r.calls = append(r.calls, "AckReplies")
 	return nil
 }
+
+func (r *recorder) Progress(context.Context, string, string) error { return nil }
 
 func (r *recorder) Claim(context.Context, string) (envelope.Request, error) {
 	r.calls = append(r.calls, "Claim")

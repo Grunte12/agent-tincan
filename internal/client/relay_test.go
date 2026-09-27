@@ -321,3 +321,58 @@ func TestKeepPresencePeeksUntilStoppedOrCapped(t *testing.T) {
 		t.Fatalf("cap log = %q", logged)
 	}
 }
+
+func TestProgressOldRelay(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusOK} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/capabilities" {
+					t.Errorf("unexpected call: %s", r.URL.Path)
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, "{}")
+			}))
+			defer srv.Close()
+			r, err := client.NewRelay(srv.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Progress(context.Background(), "r1", "working"); err == nil || !strings.Contains(err.Error(), "upgrade the relay") {
+				t.Fatalf("error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAskReturnsLatestProgress(t *testing.T) {
+	m := testrelay.New(t, relay.Config{MaxWait: time.Second})
+	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
+	done := make(chan error, 1)
+	go func() {
+		in, err := muse.Poll(context.Background(), 2*time.Second)
+		if err != nil {
+			done <- err
+			return
+		}
+		if len(in.Requests) != 1 {
+			done <- fmt.Errorf("requests: %d", len(in.Requests))
+			return
+		}
+		id := in.Requests[0].ID
+		if _, err = muse.Claim(context.Background(), id); err == nil {
+			time.Sleep(100 * time.Millisecond)
+			err = muse.Progress(context.Background(), id, "calling now")
+		}
+		done <- err
+	}()
+	res, err := grok.Ask(context.Background(), "muse", "call restaurant", "", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := client.FormatResult(res); !strings.Contains(got, "claimed by muse") || !strings.Contains(got, "calling now") {
+		t.Fatalf("ask: %s", got)
+	}
+}

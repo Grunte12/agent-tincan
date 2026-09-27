@@ -138,8 +138,12 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
     Restart or reconnect the app, then confirm you see the tools: ask, check_inbox,
-    reply, get_reply, list_agents, claim, cancel, trace, onboard, get_attachment.
+    reply, get_reply, list_agents, claim, progress, cancel, trace, onboard, get_attachment.
     If you cannot add MCP servers, the `tincan` CLI does everything the tools do.
+
+For work that takes more than a few minutes, post a progress note when you start
+and at milestones: progress {request_id, note} or tincan progress <id> "<note>".
+Notes renew your claim lease without waking the asker.
 
 B4. Get your standing instructions:
 
