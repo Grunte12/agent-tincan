@@ -13,6 +13,7 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `trace_id` | relay | Chain id, inherited from the parent or new. |
 | `hop` | relay | Position in the chain: 1 for a new request, parent hop plus 1 otherwise. |
 | `chain` | relay | Agents the request has passed through, oldest first. |
+| `urgent` | client | Optional boolean, default false. Urgent requests are delivered first, oldest first within each priority. Relay-side wakes bypass debounce and the online skip, within the hourly wake cap. |
 | `kind` | client | `ask` (expects a reply, the default) or `notify`. |
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
@@ -80,3 +81,5 @@ To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]
 Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
+
+Urgent sends have a separate per-sender rolling hourly limit (default 5, configured by `tincan relay --urgent-per-hour`). Exceeding it returns HTTP 429: `urgent limit reached; send without --urgent`. Ordinary sender limits still apply. Sender limits are in memory and reset on relay restart. The optional `urgent` field is also returned on pending request summaries, so channel notices can announce urgent requests. Old clients and relays can ignore this additive field.

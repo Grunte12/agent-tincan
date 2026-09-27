@@ -15,6 +15,9 @@ import (
 // sender and chain visible.
 func FormatRequest(req envelope.Request) string {
 	var b strings.Builder
+	if req.Urgent {
+		b.WriteString("URGENT ")
+	}
 	fmt.Fprintf(&b, "Request %s from %s (your teammate), via Agent Tincan.\n", req.ID, req.From)
 	if len(req.Chain) > 1 {
 		fmt.Fprintf(&b, "Chain so far: %s (hop %d).\n", strings.Join(req.Chain, " -> "), req.Hop)

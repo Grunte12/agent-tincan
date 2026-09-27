@@ -3,6 +3,8 @@ package policy
 import (
 	"context"
 	"errors"
+	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"net/http"
 	"testing"
 	"time"
 
@@ -190,5 +192,43 @@ func TestClaimedNotifyIsNotImplicitParent(t *testing.T) {
 	}
 	if req.Hop != 1 || req.ParentID != "" {
 		t.Fatalf("stale notify became the parent: %+v", req)
+	}
+}
+
+func TestUrgentLimit(t *testing.T) {
+	f := newFixture(t, Config{})
+	send := func(from string, urgent bool) error {
+		return f.pol.Prepare(t.Context(), &envelope.Request{From: from, To: "target", Urgent: urgent})
+	}
+	for range 5 {
+		if err := send("sender", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := send("sender", true); !errors.Is(err, ErrUrgentLimited) {
+		t.Fatalf("limit = %v", err)
+	} else if status, ok := errors.AsType[*relay.StatusError](err); !ok || status.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %v", err)
+	}
+	if err := send("sender", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := send("other", true); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(time.Hour)
+	if err := send("sender", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUrgentConfiguredLimit(t *testing.T) {
+	f := newFixture(t, Config{UrgentPerHour: 1})
+	req := envelope.Request{From: "sender", To: "target", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pol.Prepare(t.Context(), &req); !errors.Is(err, ErrUrgentLimited) {
+		t.Fatalf("limit = %v", err)
 	}
 }

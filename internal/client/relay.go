@@ -223,9 +223,10 @@ func (r *Relay) Base() string {
 }
 
 // Send queues a request. parent is the request this one continues, or "".
-func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error) {
+// The optional urgent flag prioritizes time-critical requests.
+func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent ...bool) (envelope.Request, error) {
 	var out envelope.Request
-	err := r.call(ctx, r.api, "POST", "/v1/send", map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent}, &out)
+	err := r.call(ctx, r.api, "POST", "/v1/send", map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": len(urgent) > 0 && urgent[0]}, &out)
 	return out, err
 }
 
@@ -242,8 +243,8 @@ func (r *Relay) Get(ctx context.Context, id string, wait time.Duration) (Result,
 
 // Ask sends a request and waits up to wait for the reply. If the reply is not
 // in yet, the returned Result has the request id and a non-final status.
-func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Duration) (Result, error) {
-	req, err := r.Send(ctx, to, body, envelope.KindAsk, parent)
+func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent ...bool) (Result, error) {
+	req, err := r.Send(ctx, to, body, envelope.KindAsk, parent, urgent...)
 	if err != nil {
 		return Result{}, err
 	}

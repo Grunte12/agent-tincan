@@ -46,8 +46,8 @@ var attachmentID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Backend is what the tools need from the relay client.
 type Backend interface {
-	Ask(ctx context.Context, to, body, parent string, wait time.Duration) (client.Result, error)
-	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error)
+	Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent ...bool) (client.Result, error)
+	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent ...bool) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
 	AckReplies(ctx context.Context, ids []string) error
@@ -62,8 +62,8 @@ type Backend interface {
 // implements it; a Backend without it can neither send nor show them.
 type Attacher interface {
 	UploadFiles(ctx context.Context, paths []string) ([]client.UploadedAttachment, error)
-	SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string) (envelope.Request, error)
-	AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration) (client.Result, error)
+	SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent ...bool) (envelope.Request, error)
+	AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent ...bool) (client.Result, error)
 	ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error)
 	FetchAttachment(ctx context.Context, id string) ([]byte, client.DownloadedAttachment, error)
 }
@@ -88,6 +88,7 @@ func LocalFiles(dir string) Option {
 var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
 
 type askIn struct {
+	Urgent      bool     `json:"urgent,omitempty" jsonschema:"true only for time-critical requests; wakes immediately and comes first"`
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
 	Message     string   `json:"message" jsonschema:"what you want them to do or answer"`
 	WaitSeconds int      `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the reply, 0 to 20 (default 20)"`
@@ -200,7 +201,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return f.askAttached(ctx, in)
 			}
 			if in.Notify {
-				req, err := b.Send(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID)
+				req, err := b.Send(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, in.Urgent)
 				if err != nil {
 					return fail(err)
 				}
@@ -210,7 +211,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			if in.WaitSeconds != 0 {
 				wait = clamp(in.WaitSeconds)
 			}
-			res, err := b.Ask(ctx, in.To, in.Message, in.ParentID, wait)
+			res, err := b.Ask(ctx, in.To, in.Message, in.ParentID, wait, in.Urgent)
 			if err != nil {
 				return fail(err)
 			}
@@ -387,7 +388,7 @@ func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, 
 		return fail(err)
 	}
 	if in.Notify {
-		req, err := f.att.SendAttached(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, ids)
+		req, err := f.att.SendAttached(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, ids, in.Urgent)
 		if err != nil {
 			return fail(err)
 		}
@@ -397,7 +398,7 @@ func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, 
 	if in.WaitSeconds != 0 {
 		wait = clamp(in.WaitSeconds)
 	}
-	res, err := f.att.AskAttached(ctx, in.To, in.Message, in.ParentID, ids, wait)
+	res, err := f.att.AskAttached(ctx, in.To, in.Message, in.ParentID, ids, wait, in.Urgent)
 	if err != nil {
 		return fail(err)
 	}

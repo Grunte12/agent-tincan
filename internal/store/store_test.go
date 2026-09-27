@@ -601,3 +601,40 @@ func TestNewInviteRetiresOlderCodeForSameName(t *testing.T) {
 		}
 	}
 }
+
+func TestUrgentMigrationAndOrdering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, c := open(t, path)
+	normal := ask(t, s, "a", "b", "normal")
+	if _, err := s.db.Exec(`ALTER TABLE requests DROP COLUMN urgent`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, c = open(t, path)
+	old, _, err := s.Request(t.Context(), normal.ID)
+	if err != nil || old.Urgent {
+		t.Fatalf("migrated = %+v, %v", old, err)
+	}
+	c.advance(time.Second)
+	urgent, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Body: "urgent", Urgent: true}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	later, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Body: "later", Urgent: true}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingRequests(t.Context(), "b", 2)
+	if err != nil || len(pending) != 2 || pending[0].ID != urgent.ID || !pending[0].Urgent || pending[1].ID != later.ID {
+		t.Fatalf("pending = %+v, %v", pending, err)
+	}
+	got, err := s.Deliver(t.Context(), "b", 2, time.Minute)
+	if err != nil || len(got) != 2 || got[0].ID != urgent.ID || !got[0].Urgent || got[1].ID != later.ID {
+		t.Fatalf("delivery = %+v, %v", got, err)
+	}
+	got, err = s.Deliver(t.Context(), "b", 2, time.Minute)
+	if err != nil || len(got) != 1 || got[0].ID != normal.ID {
+		t.Fatalf("remaining = %+v, %v", got, err)
+	}
+}

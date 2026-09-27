@@ -29,15 +29,16 @@ import (
 )
 
 type relayFlags struct {
-	listen      string
-	hostname    string
-	stateDir    string
-	port        int
-	admins      []string
-	adminLogins []string
-	noRebind    bool
-	replyGrace  time.Duration
-	dist        string
+	urgentPerHour int
+	listen        string
+	hostname      string
+	stateDir      string
+	port          int
+	admins        []string
+	adminLogins   []string
+	noRebind      bool
+	replyGrace    time.Duration
+	dist          string
 
 	gateway         bool
 	gatewayHostname string
@@ -83,6 +84,7 @@ arm64), plus checksums.txt and a VERSION file naming the release.`,
 	cmd.Flags().StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
 	cmd.Flags().StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
 	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
+	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
@@ -186,7 +188,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 			"Agents with tailscale find it again by themselves; proxy-only agents may need tincan rejoin. "+
 			"Without --listen the relay is its own tailnet node (%s) and keeps its name while --state-dir is kept.", f.hostname)
 	}
-	srv.SetPreparer(policy.New(st, policy.Config{}))
+	srv.SetPreparer(policy.New(st, policy.Config{UrgentPerHour: f.urgentPerHour}))
 	if f.dist != "" {
 		if fi, err := os.Stat(f.dist); err != nil || !fi.IsDir() {
 			return fmt.Errorf("--dist %s: not a directory", f.dist)

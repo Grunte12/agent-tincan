@@ -127,6 +127,7 @@ type notice struct {
 // only when some item is new, or all were announced over reannounceAfter ago.
 func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 	var keys, ids, from []string
+	urgent := 0
 	senders := map[string]bool{}
 	addFrom := func(name string) {
 		if name != "" && !senders[name] {
@@ -135,6 +136,9 @@ func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 		}
 	}
 	for _, p := range w.Pending {
+		if p.Urgent {
+			urgent++
+		}
 		keys, ids = append(keys, "q:"+p.ID), append(ids, p.ID)
 		addFrom(p.From)
 	}
@@ -167,8 +171,16 @@ func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 	case len(w.Replies) > 0:
 		kind = "reply"
 	}
+	content := channelNotice(count, from)
+	if urgent > 0 {
+		noun := "requests"
+		if urgent == 1 {
+			noun = "request"
+		}
+		content = fmt.Sprintf("%d urgent %s waiting. %s", urgent, noun, content)
+	}
 	return notice{
-		content: channelNotice(count, from),
+		content: content,
 		meta: map[string]string{
 			"kind":        kind,
 			"count":       strconv.Itoa(count),

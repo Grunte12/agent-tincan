@@ -289,12 +289,12 @@ type recorder struct {
 	calls []string
 }
 
-func (r *recorder) Ask(context.Context, string, string, string, time.Duration) (client.Result, error) {
+func (r *recorder) Ask(context.Context, string, string, string, time.Duration, ...bool) (client.Result, error) {
 	r.calls = append(r.calls, "Ask")
 	return client.Result{}, nil
 }
 
-func (r *recorder) Send(context.Context, string, string, envelope.Kind, string) (envelope.Request, error) {
+func (r *recorder) Send(context.Context, string, string, envelope.Kind, string, ...bool) (envelope.Request, error) {
 	r.calls = append(r.calls, "Send")
 	return envelope.Request{}, nil
 }
@@ -790,11 +790,11 @@ func (f *fetcher) UploadFiles(context.Context, []string) ([]client.UploadedAttac
 	return nil, nil
 }
 
-func (f *fetcher) SendAttached(context.Context, string, string, envelope.Kind, string, []string) (envelope.Request, error) {
+func (f *fetcher) SendAttached(context.Context, string, string, envelope.Kind, string, []string, ...bool) (envelope.Request, error) {
 	return envelope.Request{}, nil
 }
 
-func (f *fetcher) AskAttached(context.Context, string, string, string, []string, time.Duration) (client.Result, error) {
+func (f *fetcher) AskAttached(context.Context, string, string, string, []string, time.Duration, ...bool) (client.Result, error) {
 	return client.Result{}, nil
 }
 
@@ -861,5 +861,24 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 	out := call(t, connect(t, mcpserver.New(f, "test")), "check_inbox", nil)
 	if !strings.Contains(out, "could not fetch it") || !strings.Contains(out, `get_attachment with id "att_missing"`) {
 		t.Fatalf("check_inbox = %q", out)
+	}
+}
+
+func TestUrgentAsk(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	sender := session(t, m, "grokbot")
+	for range 5 {
+		out := call(t, sender, "ask", map[string]any{"to": "muse", "message": "time critical", "notify": true, "urgent": true})
+		if !strings.Contains(out, "Sent to muse") {
+			t.Fatal(out)
+		}
+	}
+	out := call(t, sender, "ask", map[string]any{"to": "muse", "message": "time critical", "notify": true, "urgent": true})
+	if !strings.Contains(out, "urgent limit reached") {
+		t.Fatal(out)
+	}
+	out = call(t, session(t, m, "muse"), "check_inbox", map[string]any{})
+	if !strings.Contains(out, "URGENT Request") {
+		t.Fatal(out)
 	}
 }

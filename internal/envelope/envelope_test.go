@@ -190,3 +190,21 @@ func TestAttachmentJSONShape(t *testing.T) {
 		t.Fatalf("json = %s", raw)
 	}
 }
+
+func TestParseSendUrgent(t *testing.T) {
+	for _, tc := range []struct {
+		raw    string
+		urgent bool
+	}{
+		{`{"to":"target","body":"x","urgent":true}`, true},
+		{`{"to":"target","body":"x"}`, false},
+	} {
+		req, err := ParseSend([]byte(tc.raw), "sender", DefaultMaxBody)
+		if err != nil || req.Urgent != tc.urgent {
+			t.Fatalf("request = %+v, %v", req, err)
+		}
+	}
+	if _, err := ParseSend([]byte(`{"to":"target","body":"x","urgent":"true"}`), "sender", DefaultMaxBody); err == nil {
+		t.Fatal("accepted non-boolean urgent")
+	}
+}

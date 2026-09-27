@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -133,5 +134,30 @@ func TestAttachmentDirIsPerAgent(t *testing.T) {
 		if filepath.Dir(got) != filepath.Join(base, "attachments") {
 			t.Fatalf("agent %q gave dir %s", bad, got)
 		}
+	}
+}
+
+func TestUrgentCLIAndChannel(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Server.SetAttachmentDir(t.TempDir())
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := run(t, askCmd(), "muse", "routine", "--wait", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, askCmd(), "muse", "urgent", "--urgent", "--attach", tempFile(t, "pic.png", cliPNG), "--wait", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := m.Store.PendingRequests(t.Context(), "muse", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := announcer{}
+	n, ok := a.next(client.Waiting{Total: 2, Queued: 2, Pending: pending}, time.Now())
+	if !ok || !strings.Contains(n.content, "1 urgent request waiting") {
+		t.Fatalf("notice = %+v", n)
+	}
+	in, err := m.Client(t, "muse").Poll(t.Context(), 0)
+	if err != nil || len(in.Requests) != 2 || !in.Requests[0].Urgent || in.Requests[1].Urgent || len(in.Requests[0].Attachments) != 1 {
+		t.Fatalf("inbox = %+v, %v", in, err)
 	}
 }
