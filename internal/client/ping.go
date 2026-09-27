@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -85,6 +86,22 @@ func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string)
 		}
 	}, first
 }
+
+// PongRetries runs deferred pong retries in the background, so they never
+// delay new work, and lets a process wait for them before it exits, so they
+// are never dropped.
+type PongRetries struct{ wg sync.WaitGroup }
+
+// Go starts retry in the background under RetryPongs' time bound.
+func (p *PongRetries) Go(ctx context.Context, retry func(context.Context)) {
+	if retry == nil {
+		return
+	}
+	p.wg.Go(func() { RetryPongs(ctx, retry) })
+}
+
+// Wait blocks until every started retry has finished or given up.
+func (p *PongRetries) Wait() { p.wg.Wait() }
 
 // RetryPongs runs deferred pong retries within a bounded background context.
 func RetryPongs(ctx context.Context, retry func(context.Context)) {

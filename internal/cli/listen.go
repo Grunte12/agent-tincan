@@ -63,12 +63,11 @@ var (
 
 func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) error {
 	backoff := time.Second
-	var retries []func(context.Context)
+	// Failed pongs retry in the background while the loop keeps peeking; the
+	// listener waits for them before it returns, --once included.
+	var retries client.PongRetries
+	defer retries.Wait()
 	for {
-		for _, retry := range retries {
-			retry(ctx)
-		}
-		retries = nil
 		w, err := r.Peek(ctx, client.DefaultPollHold)
 		n := w.Total - w.Pings
 		switch {
@@ -94,7 +93,7 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			if err != nil {
 				pingFailed = true
 			}
-			retries = append(retries, retry)
+			retries.Go(ctx, retry)
 		}
 		if pingFailed && n <= 0 {
 			select {

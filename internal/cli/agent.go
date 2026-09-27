@@ -598,12 +598,13 @@ flaky tailnet path does not end the wait.`,
 				ctx, cancel = context.WithTimeout(ctx, limit)
 				defer cancel()
 			}
-			in, retry, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			in, finish, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			// Print first; any pong still retrying finishes before exit.
+			defer finish(cmd.Context())
 			if err != nil {
 				return err
 			}
 			cmd.Print(formatWait(cmd.Context(), r, in))
-			retry(cmd.Context())
 			return nil
 		},
 	}
@@ -617,32 +618,33 @@ flaky tailnet path does not end the wait.`,
 // (for example, this machine is not a joined agent).
 func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, func(context.Context), error) {
 	backoff := time.Second
+	// Failed pongs retry in the background, so they never hold up the next
+	// poll or the work it brings; the returned func waits for them.
+	var retries client.PongRetries
+	finish := func(context.Context) { retries.Wait() }
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
 		pingFailed := false
-		var retry func(context.Context)
 		if err == nil {
+			var retry func(context.Context)
 			in, retry, err = client.AnswerPings(ctx, r, in, "wait")
 			pingFailed = err != nil
+			retries.Go(ctx, retry)
 		}
 		switch {
 		case (err == nil || pingFailed) && !in.Empty():
-			return in, retry, nil
+			return in, finish, nil
 		case err == nil:
-			retry(ctx)
 			backoff = time.Second
 			continue
 		case ctx.Err() != nil:
-			return client.Inbox{}, nil, ctx.Err()
+			return client.Inbox{}, finish, ctx.Err()
 		case client.IsStatus(err, 403) && !pingFailed:
-			return client.Inbox{}, nil, err
-		}
-		if retry != nil {
-			retry(ctx)
+			return client.Inbox{}, finish, err
 		}
 		select {
 		case <-ctx.Done():
-			return client.Inbox{}, nil, ctx.Err()
+			return client.Inbox{}, finish, ctx.Err()
 		case <-time.After(jitter(backoff)):
 		}
 		backoff = min(backoff*2, 30*time.Second)

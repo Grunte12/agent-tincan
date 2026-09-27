@@ -117,6 +117,9 @@ type Server struct {
 	// back whenever it changes.
 	versions     map[string]string
 	pollFeatures map[string]pollFeatures
+	// pollMu orders each poll-feature update with its store write, so two
+	// overlapping polls persist in the order they changed the state.
+	pollMu sync.Mutex
 	// storedVersion is the build last written to the store for each agent,
 	// and versionWritten when. The write is throttled like last-seen, so two
 	// builds running under one name (an old listen or MCP process next to an
@@ -370,6 +373,8 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 			}
 		}
 		now := s.cfg.Now()
+		s.pollMu.Lock()
+		defer s.pollMu.Unlock()
 		s.mu.Lock()
 		old := s.pollFeatures[res.Name]
 		state := old

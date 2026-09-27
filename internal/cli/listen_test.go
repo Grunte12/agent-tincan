@@ -435,3 +435,57 @@ func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
 		t.Fatalf("waiting=%q: %v", got, err)
 	}
 }
+
+// A pong that keeps failing retries in the background: work that arrives
+// meanwhile still runs the command at once, and --once waits for the retry
+// before returning instead of dropping it.
+func TestListenPongRetryNeitherDelaysWorkNorIsDropped(t *testing.T) {
+	fastListen(t, time.Second, time.Minute, time.Millisecond)
+	oldRetry := client.PongRetry
+	client.PongRetry = []time.Duration{300 * time.Millisecond}
+	t.Cleanup(func() { client.PongRetry = oldRetry })
+	var peeks, replies atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/poll":
+			if r.URL.Query().Get("hold") == "0" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if peeks.Add(1) == 1 {
+				fmt.Fprint(w, `{"waiting":2,"pings":1,"pending":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask"}]}`)
+			} else {
+				fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"work","kind":"ask"}]}`)
+			}
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			if replies.Add(1) == 1 {
+				http.Error(w, `{"error":"busy"}`, http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprint(w, `{}`)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "nudged")
+	start := time.Now()
+	nudged := make(chan time.Duration, 1)
+	go func() {
+		waitForFile(t, marker)
+		nudged <- time.Since(start)
+	}()
+	if err := listen(t.Context(), relay, "touch "+marker, true); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-nudged; d >= 300*time.Millisecond {
+		t.Fatalf("command ran after %s, behind the pong retry", d)
+	}
+	if replies.Load() != 2 {
+		t.Fatalf("pong replies = %d, want the retry to finish before listen returned", replies.Load())
+	}
+}
