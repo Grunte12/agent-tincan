@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,12 +129,14 @@ func (e *APIError) Error() string { return fmt.Sprintf("relay: %s (HTTP %d)", e.
 
 // Relay talks to a tincan relay.
 type Relay struct {
-	baseMu  sync.RWMutex
-	base    string
-	api     *http.Client
-	polls   *http.Client
-	agent   string // sent as AgentHeader when set
-	version string // sent as VersionHeader when set
+	groupsMu sync.Mutex
+	groups   map[string]GroupResult
+	baseMu   sync.RWMutex
+	base     string
+	api      *http.Client
+	polls    *http.Client
+	agent    string // sent as AgentHeader when set
+	version  string // sent as VersionHeader when set
 
 	// key is the relay key from the saved config. When the relay stops
 	// answering at base, the client looks for the peer that proves it
@@ -477,7 +480,11 @@ func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path strin
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	limit := int64(4 << 20)
+	if strings.HasPrefix(path, "/v1/groups/") {
+		limit = 8 << 20
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return err
 	}
@@ -516,4 +523,150 @@ func (r *Relay) headers(req *http.Request) {
 func IsStatus(err error, code int) bool {
 	var e *APIError
 	return errors.As(err, &e) && e.Code == code
+}
+
+// GroupResult is the combined view of independently sent requests.
+type GroupResult struct {
+	Outcome string   `json:"outcome"`
+	Group   string   `json:"group"`
+	Results []Result `json:"results"`
+}
+
+// ExitCode summarizes the group: pending takes precedence over failures.
+func (g GroupResult) ExitCode() int {
+	code := 0
+	for _, r := range g.Results {
+		if !r.Done() {
+			return 2
+		}
+		if r.Status != envelope.StatusAnswered {
+			code = 1
+		}
+	}
+	return code
+}
+
+func (g *GroupResult) summarize() {
+	g.Outcome = "answered"
+	switch g.ExitCode() {
+	case 1:
+		g.Outcome = "failed"
+	case 2:
+		g.Outcome = "pending"
+		for _, r := range g.Results {
+			if r.Done() {
+				g.Outcome = "partial"
+				break
+			}
+		}
+	}
+}
+
+// NormalizeTargets trims and deduplicates targets before any send or upload.
+func NormalizeTargets(targets []string, self string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if !safeAgent.MatchString(target) || target == self {
+			return nil, fmt.Errorf("invalid target %q (cannot ask yourself)", target)
+		}
+		if !seen[target] {
+			out = append(out, target)
+			seen[target] = true
+		}
+	}
+	if len(out) == 0 || len(out) > 8 {
+		return nil, errors.New("ask requires 1 to 8 distinct targets")
+	}
+	return out, nil
+}
+
+// SendGroup sends ordinary requests, uploading separate attachments per target.
+// Rejected sends remain visible as failed entries in this client's local record.
+func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, kind envelope.Kind, parent string, attachPaths []string) (GroupResult, error) {
+	targets, err := NormalizeTargets(targets, r.agent)
+	if err != nil {
+		return GroupResult{}, err
+	}
+	g := GroupResult{Group: "group-" + rand.Text()}
+	for _, target := range targets {
+		req := envelope.Request{To: target, Body: body, Kind: kind, ParentID: parent, Group: g.Group}
+		ups, err := r.UploadFiles(ctx, attachPaths)
+		if err == nil {
+			for _, up := range ups {
+				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
+			}
+			var sent envelope.Request
+			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
+			if err == nil {
+				req = sent
+			}
+		}
+		res := Result{Request: req, Status: envelope.StatusQueued}
+		if err != nil {
+			res.Status = envelope.StatusFailed
+			res.Reply = &envelope.Reply{From: target, Status: envelope.StatusFailed, Body: err.Error()}
+		}
+		g.Results = append(g.Results, res)
+	}
+	g.summarize()
+	r.groupsMu.Lock()
+	if r.groups == nil {
+		r.groups = map[string]GroupResult{}
+	}
+	r.groups[g.Group] = g
+	r.groupsMu.Unlock()
+	return g, nil
+}
+
+// GetGroup resolves a relay group, falling back to this client's local record
+// when talking to an older relay.
+func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (GroupResult, error) {
+	r.groupsMu.Lock()
+	g, local := r.groups[id]
+	r.groupsMu.Unlock()
+	if local {
+		g.Results = append([]Result(nil), g.Results...)
+	}
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return g, err
+	}
+	if caps.Groups {
+		var results []Result
+		err = r.call(ctx, r.api, "GET", "/v1/groups/"+url.PathEscape(id), nil, &results)
+		if err != nil && (!local || !IsStatus(err, http.StatusNotFound)) {
+			return g, err
+		}
+		if !local {
+			g = GroupResult{Group: id, Results: results}
+		}
+	} else if !local {
+		return g, errors.New("group unavailable: this older relay requires the original client process; use individual request ids")
+	}
+	return r.WaitGroup(ctx, g, wait)
+}
+
+// WaitGroup polls all requests concurrently within one shared wait budget.
+func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration) (GroupResult, error) {
+	g.Results = append([]Result(nil), g.Results...)
+	errs := make([]error, len(g.Results))
+	var wg sync.WaitGroup
+	for i, res := range g.Results {
+		if res.Request.ID == "" {
+			continue
+		}
+		wg.Go(func() {
+			next, err := r.Get(ctx, res.Request.ID, ClampWait(wait))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			g.Results[i] = next
+		})
+	}
+	wg.Wait()
+	g.summarize()
+	return g, errors.Join(errs...)
 }

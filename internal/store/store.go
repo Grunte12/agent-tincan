@@ -135,6 +135,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate reply seen: %w", err)
 	}
+	if err := s.migrateGroups(); err != nil {
+		s.Close()
+		return nil, err
+	}
 	if err := s.migrateAttachments(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate attachments: %w", err)
@@ -489,10 +493,10 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, group_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.Group)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -777,7 +781,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, group_id`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -785,7 +789,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
 	var chain, kind, status, atts string
 	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Group); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -830,4 +834,28 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func (s *Store) migrateGroups() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'group_id')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN group_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_group ON requests(from_agent, group_id)`)
+	return err
+}
+
+// RequestsByGroup lists only requests sent by sender in group.
+func (s *Store) RequestsByGroup(ctx context.Context, sender, group string) ([]envelope.Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE from_agent = ? AND group_id = ? ORDER BY created_at, id`, sender, group)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequests(rows)
 }

@@ -145,3 +145,13 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// FormatGroup labels every result and supplies the shared follow-up id.
+func FormatGroup(g GroupResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Group %s (%s). Check with get_reply or tincan get %s.\n", g.Group, g.Outcome, g.Group)
+	for _, r := range g.Results {
+		fmt.Fprintf(&b, "%s (%s):\n%s", r.Request.To, r.Status, FormatResult(r))
+	}
+	return b.String()
+}

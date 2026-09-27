@@ -80,3 +80,23 @@ To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]
 Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
+
+## Request groups
+
+A send may include an optional `group` string of 1–64 ASCII letters, digits,
+underscores or hyphens. The relay stores and echoes it on the request.
+Groups do not change identity, parent/chain checks, rate limits, wakes,
+allowlists, leases or attachment ownership: each target receives an ordinary
+request and requires its own uploads.
+
+`GET /v1/groups/{id}` returns an array of request results sent by the
+authenticated caller with that group tag. An unknown group, or a group with no
+requests sent by the caller, returns 404. Recipients and admins do not gain
+access to another sender's group through this endpoint.
+`GET /v1/capabilities` advertises `"groups": true`.
+
+Clients generate ids prefixed with `group-`, deduplicate targets and cap fan-out
+at 8. Older relays ignore the optional field. Clients retain the individual ids
+in memory so combined polling still works in the original client instance;
+across client restarts, use individual ids or upgrade the relay. Failed sends
+are local result entries and are not stored as requests on the relay.
