@@ -581,7 +581,7 @@ func waitCmd() *cobra.Command {
 		Long: `Block until a request arrives, claim and print it, then exit. A reply to
 one of your own requests also ends the wait: it prints a count and leaves the
 reply for check_inbox (or "tincan inbox") to show. An available relay upgrade
-also ends the wait and prints the upgrade instruction.
+is printed with that output; an upgrade alone does not end the wait.
 
 For agents that get a new turn when a background command finishes (like
 Muse): run "tincan wait &" and the arriving request or reply wakes you. Start
@@ -619,7 +619,7 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
 		switch {
-		case err == nil && (!in.Empty() || client.Newer(in.UpgradeAvailable, client.Version)):
+		case err == nil && !in.Empty():
 			return in, nil
 		case err == nil:
 			backoff = time.Second

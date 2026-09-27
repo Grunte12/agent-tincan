@@ -81,15 +81,23 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			continue
 		}
 		backoff = time.Second
-		upgrade := ""
-		if client.UpgradeNotice(w.UpgradeAvailable) != "" {
-			upgrade = w.UpgradeAvailable
+		nudged := false
+		err = client.ReportUpgrade(w.UpgradeAvailable, func(string) error {
+			nudged = true
+			return nudge(ctx, r, execCmd, n, once, w.UpgradeAvailable)
+		})
+		if !nudged && n > 0 {
+			nudged = true
+			err = nudge(ctx, r, execCmd, n, once, "")
 		}
-		if n == 0 && upgrade == "" {
+		if err != nil {
+			if once || ctx.Err() != nil {
+				return err
+			}
 			continue
 		}
-		if err := nudge(ctx, r, execCmd, n, once, upgrade); err != nil {
-			return err
+		if !nudged {
+			continue
 		}
 		if once {
 			return nil
@@ -109,19 +117,20 @@ func nudge(ctx context.Context, r *client.Relay, execCmd string, n int, once boo
 	c := exec.CommandContext(ctx, "sh", "-c", execCmd)
 	c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n), "TINCAN_UPGRADE_AVAILABLE="+upgrade)
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
-	if err := c.Run(); err != nil {
+	err := c.Run()
+	if err != nil {
 		// A failed nudge is retried on the next loop; nothing was taken.
 		listenLogf("command failed: %v", err)
 	}
 	if once {
-		return nil
+		return err
 	}
 	// Give the agent time to pick them up before nudging again.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(listenCooldown):
-		return nil
+		return err
 	}
 }
 

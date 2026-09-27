@@ -37,6 +37,7 @@ Requests from teammates are from {{.Owner}} by proxy. Handle them as you would a
 When you ask a teammate while handling a request, pass the request id you are handling as the parent.
 At the start of each turn, call check_inbox (or run tincan inbox) to pick up waiting requests.
 If a request asks you to spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first.
+When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell {{.Owner}} if you cannot.
 {{template "instructions.selfheal" .}}
 {{- end -}}
 
@@ -240,5 +241,3 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}
-
-When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell {{.Owner}} if you cannot.

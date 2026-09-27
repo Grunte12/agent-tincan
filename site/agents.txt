@@ -26,7 +26,8 @@ Rules for every part:
   and channel notices show this once per process per version; `inbox --json`
   carries `upgrade_available`. A listener command receives the version in
   TINCAN_UPGRADE_AVAILABLE on its first nudge for that release, even when
-  TINCAN_WAITING is zero.
+  TINCAN_WAITING is zero. An upgrade alone does not end `tincan wait`; the
+  notice is printed when a request or reply ends the wait.
 
 ## Install tincan (every part)
 
