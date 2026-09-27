@@ -24,8 +24,6 @@ type mcpConfigEntry struct {
 	Problems []string `json:"problems,omitempty"`
 	broken   bool     // a problem that stops the app from running tincan
 	unread   bool     // names tincan, but tincan could not read its command
-	advice   bool     // a problem that stops only an unattended wake
-	trusted  bool     // "trust": true (Gemini CLI skips tool confirmations)
 }
 
 // mcpConfigFiles are the MCP config files of the apps tincan agents run in.
@@ -44,7 +42,7 @@ func mcpConfigFiles(extra []string) []string {
 		filepath.Join(home, ".cursor", "mcp.json"),
 		filepath.Join(home, ".codex", "config.toml"),
 		filepath.Join(grokHome, "config.toml"),
-		geminiSettings(home),
+		filepath.Join(home, ".gemini", "settings.json"),
 		// Antigravity CLI (agy), the gemini-cli teammate's default engine.
 		// agy mcp add is reported to write here; the location comes from
 		// one secondary source, so the gemini-cli docs say to confirm it
@@ -75,13 +73,7 @@ func mcpConfigFiles(extra []string) []string {
 	return out
 }
 
-// geminiSettings is Gemini CLI's user settings file.
-func geminiSettings(home string) string {
-	return filepath.Join(home, ".gemini", "settings.json")
-}
-
 func findMCPConfigs(extra []string) []mcpConfigEntry {
-	home, _ := os.UserHomeDir()
 	var all []mcpConfigEntry
 	for _, f := range mcpConfigFiles(extra) {
 		raw, err := os.ReadFile(f)
@@ -101,17 +93,6 @@ func findMCPConfigs(extra []string) []mcpConfigEntry {
 				continue
 			}
 			jsonServers(v, "", &es)
-			if f == geminiSettings(home) {
-				// The gemini-cli wake runs Gemini CLI unattended; a tincan
-				// server without trust leaves its tool calls waiting for a
-				// confirmation nobody gives.
-				for i := range es {
-					if !es[i].trusted {
-						es[i].Problems = append(es[i].Problems, `no "trust": true; a gemini-cli wake's tincan tool calls wait for a confirmation nobody gives (gemini mcp add --trust, or add "trust": true)`)
-						es[i].advice = true
-					}
-				}
-			}
 		}
 		for i := range es {
 			es[i].File = f
@@ -215,7 +196,6 @@ func jsonEntry(name string, v any) (mcpConfigEntry, bool) {
 	if !mentionsTincan(e) {
 		return e, false
 	}
-	e.trusted, _ = m["trust"].(bool)
 	if d, _ := m["disabled"].(bool); d {
 		e.Problems = append(e.Problems, "disabled")
 		e.broken = true
@@ -421,7 +401,7 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 	if exe != "" {
 		self, _ = filepath.EvalSymlinks(exe)
 	}
-	broken, differs, unread, advice := 0, 0, 0, 0
+	broken, differs, unread := 0, 0, 0
 	for i := range es {
 		e := &es[i]
 		if e.unread {
@@ -455,8 +435,6 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 		}
 		if e.broken {
 			broken++
-		} else if e.advice {
-			advice++
 		}
 	}
 	switch {
@@ -466,8 +444,6 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 		return check{name, "warn", fmt.Sprintf("%d of %d tincan entries run a different tincan binary than this one", differs, len(es)), "Point them at " + self + ", or upgrade that binary too."}
 	case unread > 0:
 		return check{name, "warn", fmt.Sprintf("could not read %d of %d tincan entries (listed below)", unread, len(es)), "Check that each runs this tincan with args [\"mcp\"]."}
-	case advice > 0:
-		return check{name, "warn", fmt.Sprintf("%d of %d tincan entries start, but an unattended gemini-cli wake cannot use them as they are (listed below)", advice, len(es)), `In ~/.gemini/settings.json, set "trust": true on the tincan server (or re-add it with gemini mcp add --trust).`}
 	}
 	return check{name, "ok", fmt.Sprintf("%d tincan entr%s, each runs this binary with mcp", len(es), map[bool]string{true: "y", false: "ies"}[len(es) == 1]), ""}
 }

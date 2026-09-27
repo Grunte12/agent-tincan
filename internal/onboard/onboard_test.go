@@ -334,6 +334,7 @@ func TestRenderedOutputHygiene(t *testing.T) {
 		build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: append(matts(),
 			Member{Name: "hermes", Wake: "webhook"}, Member{Name: "openclaw", Wake: "webhook"},
 			Member{Name: "codex", Wake: "command"}, Member{Name: "chatgpt", Wake: "none"},
+			Member{Name: "gemini-cli", Wake: "command", Kind: KindGeminiCLI},
 			Member{Name: "zed", Wake: "command"}, Member{Name: "q", Wake: "none"},
 			Member{Name: "history", Wake: "wait", Kind: "history"})}),
 		build(t, Options{Offline: true}),

@@ -31,7 +31,7 @@ pwd -P > "$ARGV_DIR/cwd.$n"
 if [ -n "${FAKE_STDERR:-}" ]; then
   echo "$FAKE_STDERR" >&2
 fi
-echo '{"response":"done"}'
+echo "${FAKE_STDOUT:-{\"response\":\"done\"}}"
 exit "${FAKE_EXIT:-0}"
 `
 
@@ -212,9 +212,13 @@ func TestGeminiWakeAgyRefusesUnconfinedByDefault(t *testing.T) {
 
 // The Gemini CLI engine runs with an API key: yolo approval, JSON output,
 // its sandbox, only the tincan server allowed, and operator write roots as
-// include directories.
+// include directories, plus the attachments directory tincan mcp saves to
+// (attachments/<agent> beside TINCAN_CONFIG), made private.
 func TestGeminiWakeGeminiEngineArgv(t *testing.T) {
 	h := newGeminiHarness(t)
+	if err := os.WriteFile(h.config, []byte(`{"relay":"http://relay","agent":"gemini-cli"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	proj := filepath.Join(h.home, "code", "proj")
 	outside := filepath.Join(h.dir, "outside")
 	mkdirs(t, proj, outside)
@@ -240,8 +244,12 @@ func TestGeminiWakeGeminiEngineArgv(t *testing.T) {
 	if got := a.flagValues("--allowed-mcp-server-names"); strings.Join(got, ",") != "agent-tincan" {
 		t.Fatalf("--allowed-mcp-server-names = %q, want only the tincan server", got)
 	}
-	if got := a.flagValues("--include-directories"); strings.Join(got, ",") != canonical(t, proj) {
-		t.Fatalf("--include-directories = %q, want only %s\nstderr:\n%s", got, proj, r.stderr)
+	att := filepath.Join(filepath.Dir(h.config), "attachments", "gemini-cli")
+	if got := a.flagValues("--include-directories"); strings.Join(got, ",") != canonical(t, proj)+","+canonical(t, att) {
+		t.Fatalf("--include-directories = %q, want %s and %s\nstderr:\n%s", got, proj, att, r.stderr)
+	}
+	if fi, err := os.Stat(att); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("attachments dir %s: %v, mode %v; want 0700", att, err, fi)
 	}
 	if !strings.Contains(r.stderr, outside) {
 		t.Fatalf("refused write root not reported:\n%s", r.stderr)
@@ -377,5 +385,115 @@ func TestGeminiWakeUnknownEngine(t *testing.T) {
 	r := h.run("TINCAN_GEMINI_ENGINE=bard")
 	if r.err == nil || len(h.runs()) != 0 || !strings.Contains(r.stderr, "TINCAN_GEMINI_ENGINE") {
 		t.Fatalf("unknown engine: %v, runs %d\nstderr:\n%s", r.err, len(h.runs()), r.stderr)
+	}
+}
+
+// Each JSON reader finds the attachments directory the same way tincan does:
+// the config's agent name, or "default" when the config has none or names
+// something that is not a plain name.
+func TestGeminiWakeAttachmentDirAgentName(t *testing.T) {
+	for _, tool := range []string{"jq", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Logf("%s not on PATH; skipping", tool)
+			continue
+		}
+		for _, c := range []struct{ config, want string }{
+			{`{"agent":"gem-2"}`, "gem-2"},
+			{`{"relay":"http://relay"}`, "default"},
+			{`{"agent":"../escape"}`, "default"},
+			{"", "default"}, // no config file yet
+		} {
+			t.Run(tool+"/"+c.want, func(t *testing.T) {
+				h := newGeminiHarness(t)
+				if c.config != "" {
+					if err := os.WriteFile(h.config, []byte(c.config), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := h.run("TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy", "TINCAN_GEMINI_JSON_TOOL="+tool)
+				if r.err != nil || len(h.runs()) != 1 {
+					t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+				}
+				att := canonical(t, filepath.Join(filepath.Dir(h.config), "attachments", c.want))
+				if got := h.runs()[0].flagValues("--include-directories"); !slices.Contains(got, att) {
+					t.Fatalf("--include-directories = %q, want %s", got, att)
+				}
+			})
+		}
+	}
+}
+
+// The model's words go to stdout, so a login phrase there is not an auth
+// failure: a plain non-zero exit whose stdout says "not logged in" is only
+// counted, not an immediate backoff.
+func TestGeminiWakeAuthPhraseOnStdoutIsNotAuthFailure(t *testing.T) {
+	for _, engine := range []string{"agy", "gemini"} {
+		t.Run(engine, func(t *testing.T) {
+			h := newGeminiHarness(t)
+			r := h.run("TINCAN_GEMINI_ENGINE="+engine, "GEMINI_API_KEY=dummy", "TINCAN_GEMINI_ALLOW_UNCONFINED=1",
+				"FAKE_EXIT=1", `FAKE_STDOUT={"response":"The user is not logged in to the dashboard."}`)
+			if r.err == nil || len(h.runs()) != 1 {
+				t.Fatalf("wake: %v, runs %d\nstderr:\n%s", r.err, len(h.runs()), r.stderr)
+			}
+			if h.backoff() || h.noticeCount() != 0 {
+				t.Fatalf("stdout auth phrase backed off: backoff %v, notices %d\nstderr:\n%s", h.backoff(), h.noticeCount(), r.stderr)
+			}
+			if !strings.Contains(r.stdout, "not logged in") {
+				t.Fatalf("engine stdout not passed through:\n%s", r.stdout)
+			}
+		})
+	}
+}
+
+// With neither jq nor python3 on PATH the wake cannot read the MCP config,
+// so it refuses cleanly, naming both, before the engine runs.
+func TestGeminiWakeNoJSONToolRefuses(t *testing.T) {
+	h := newGeminiHarness(t)
+	bin := filepath.Join(h.dir, "bin")
+	mkdirs(t, bin)
+	for _, tool := range []string{"sh", "dirname", "basename", "mkdir", "chmod", "cat", "awk", "tr", "grep",
+		"date", "find", "rm", "mv", "head", "sleep", "ls", "perl", "pgrep", "setsid"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := h.run("PATH="+bin, "TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy")
+	if r.err == nil || len(h.runs()) != 0 {
+		t.Fatalf("engine ran with no JSON reader: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "jq or python3") || !h.backoff() || h.noticeCount() != 1 {
+		t.Fatalf("refusal: backoff %v, notices %d\nstderr:\n%s", h.backoff(), h.noticeCount(), r.stderr)
+	}
+}
+
+// --allowed-mcp-server-names names the tincan server the identity check
+// found, whatever it is called, and not an allowed server that only
+// mentions tincan in its arguments.
+func TestGeminiWakeAllowedServerNamesFollowTheTincanServer(t *testing.T) {
+	for _, tool := range []string{"jq", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Logf("%s not on PATH; skipping", tool)
+			continue
+		}
+		t.Run(tool, func(t *testing.T) {
+			h := newGeminiHarness(t)
+			bus := h.tincanEntry(h.config)
+			bus["command"] = "/usr/local/bin/tincan"
+			h.servers(h.geminiSettings, map[string]any{
+				"files":    map[string]any{"command": "npx", "args": []string{"server-filesystem", "/Users/x/code/agent-tincan"}},
+				"team-bus": bus,
+			})
+			r := h.run("TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy", "TINCAN_WAKE_ALLOWED_SERVERS=files", "TINCAN_GEMINI_JSON_TOOL="+tool)
+			if r.err != nil || len(h.runs()) != 1 {
+				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+			}
+			if got := h.runs()[0].flagValues("--allowed-mcp-server-names"); strings.Join(got, ",") != "team-bus,files" {
+				t.Fatalf("--allowed-mcp-server-names = %q, want team-bus then files", got)
+			}
+		})
 	}
 }

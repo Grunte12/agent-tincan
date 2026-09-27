@@ -616,11 +616,11 @@ TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan listen --exec ~/bin/
 The script takes a lock, refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's `TINCAN_CONFIG`, runs the engine with a drain-the-inbox prompt under a hard timeout, and backs off (telling `TINCAN_WAKE_OPERATOR` once) after repeated failures, an expired agy login, or a missing API key. Requests stay queued meanwhile.
 
 - agy: `agy --output-format json --dangerously-skip-permissions -p <prompt>`. agy documents no sandbox, so the wake runs it only with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes.
-- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`) and operator write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`).
+- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`) operator write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`), and the attachments directory beside `TINCAN_CONFIG`.
 
 #### How it sends and receives
 
-`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy, or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`trust: true` in `~/.gemini/settings.json`; `tincan doctor` warns without it).
+`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy, or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`--trust` spares you confirmations when you run Gemini CLI yourself; the wake's `--approval-mode=yolo` approves tincan tool calls either way).
 
 #### One-time setup
 

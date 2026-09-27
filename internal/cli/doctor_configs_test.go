@@ -345,8 +345,8 @@ func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 }
 
 // The gemini-cli teammate's engines keep their tincan entry in their own
-// JSON files: Gemini CLI in ~/.gemini/settings.json, where the wake needs
-// trust true on it, and Antigravity (agy) in ~/.gemini/config/mcp_config.json.
+// JSON files: Gemini CLI in ~/.gemini/settings.json and Antigravity (agy) in
+// ~/.gemini/config/mcp_config.json.
 func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "tincan")
@@ -387,27 +387,18 @@ func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 		t.Fatalf("agy entry: got %+v", c)
 	}
 
+	// Gemini CLI's settings: "trust" is optional (the wake runs with
+	// --approval-mode=yolo, which approves MCP calls), so an entry with or
+	// without it checks out.
 	settings := filepath.Join(home, ".gemini", "settings.json")
-	write(settings, entry(`,"trust":true`))
-	es = entriesIn(settings)
-	if len(es) != 1 || len(es[0].Problems) != 0 {
-		t.Fatalf("trusted gemini entry = %+v", es)
-	}
-	if c := configCheck(es, exe); c.Status != "ok" {
-		t.Fatalf("trusted gemini entry: got %+v", c)
-	}
-
-	write(settings, entry(""))
-	es = entriesIn(settings)
-	if len(es) != 1 || !strings.Contains(strings.Join(es[0].Problems, " "), "trust") {
-		t.Fatalf("untrusted gemini entry not flagged: %+v", es)
-	}
-	c := configCheck(es, exe)
-	if c.Status != "warn" || !strings.Contains(c.Detail+c.Fix, "trust") {
-		t.Fatalf("untrusted gemini entry: got %+v", c)
-	}
-	// trust is a Gemini CLI setting; other JSON configs do not need it.
-	if es := entriesIn(agy); len(es) != 1 || len(es[0].Problems) != 0 {
-		t.Fatalf("agy entry flagged for trust: %+v", es)
+	for _, extra := range []string{`,"trust":true`, ""} {
+		write(settings, entry(extra))
+		es = entriesIn(settings)
+		if len(es) != 1 || len(es[0].Problems) != 0 {
+			t.Fatalf("gemini entry %q = %+v", extra, es)
+		}
+		if c := configCheck(es, exe); c.Status != "ok" {
+			t.Fatalf("gemini entry %q: got %+v", extra, c)
+		}
 	}
 }

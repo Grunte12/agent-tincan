@@ -105,14 +105,26 @@ tincan_wake_check_binary "$BIN" "$VERSION_PATTERN"
 
 mkdir -p "$WORKDIR"
 
-# gemini_mcp_json FILE... prints the mcpServers of each JSON config that
-# exists as the library's listing lines: name, TINCAN_CONFIG, command.
-# It needs jq or python3; TINCAN_GEMINI_JSON_TOOL picks one.
-gemini_mcp_json() {
+# gemini_json_tool prints the JSON reader to use, jq or python3
+# (TINCAN_GEMINI_JSON_TOOL, else jq when on PATH), or nothing when that
+# tool is not on PATH.
+gemini_json_tool() {
   _tool=${TINCAN_GEMINI_JSON_TOOL:-}
   if [ -z "$_tool" ]; then
     if command -v jq >/dev/null 2>&1; then _tool=jq; else _tool=python3; fi
   fi
+  case $_tool in
+    jq | python3) command -v "$_tool" >/dev/null 2>&1 && echo "$_tool" ;;
+  esac
+  return 0
+}
+
+# gemini_mcp_json FILE... prints the mcpServers of each JSON config that
+# exists as the library's listing lines: name, TINCAN_CONFIG, command.
+# It needs jq or python3; TINCAN_GEMINI_JSON_TOOL picks one.
+# shellcheck disable=SC2329 # run through gemini_mcp_list
+gemini_mcp_json() {
+  _tool=$(gemini_json_tool) || _tool=
   for f in "$@"; do
     [ -e "$f" ] || continue
     if [ "$_tool" = jq ] && command -v jq >/dev/null 2>&1; then
@@ -140,6 +152,7 @@ for name, v in servers.items():
   done
 }
 
+# shellcheck disable=SC2329 # run by tincan_wake_check_identity
 gemini_mcp_list() {
   _old_ifs=$IFS
   IFS='
@@ -152,7 +165,34 @@ gemini_mcp_list() {
   gemini_mcp_json "$@"
 }
 
+if [ -z "$(gemini_json_tool)" ]; then
+  tincan_wake_refuse "reading the engine's MCP config needs jq or python3 on the listener's PATH (or TINCAN_GEMINI_JSON_TOOL names one that is missing)"
+fi
 tincan_wake_check_identity gemini_mcp_list
+
+# gemini_attachment_dir prints where "tincan mcp" saves the attachments this
+# teammate receives: attachments/<agent> beside TINCAN_CONFIG, with the
+# agent name read from the config ("default" when it is missing or not a
+# plain name, as tincan does).
+gemini_attachment_dir() {
+  _cfg=$TINCAN_CONFIG
+  # shellcheck disable=SC2088 # a literal ~/ prefix, which tincan expands
+  case $_cfg in "~/"*) _cfg=$HOME/${_cfg#"~/"} ;; esac
+  _agent=
+  if [ -r "$_cfg" ]; then
+    case $(gemini_json_tool) in
+      jq) _agent=$(jq -r '.agent // "" | tostring' "$_cfg" 2>/dev/null) || _agent= ;;
+      python3) _agent=$(python3 -c '
+import json, sys
+print(str(json.load(open(sys.argv[1])).get("agent") or ""))
+' "$_cfg" 2>/dev/null) || _agent= ;;
+    esac
+  fi
+  if ! printf '%s\n' "$_agent" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$' || [ "$_agent" = . ] || [ "$_agent" = .. ]; then
+    _agent=default
+  fi
+  printf '%s\n' "$(dirname -- "$_cfg")/attachments/$_agent"
+}
 
 PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan item(s) waiting: requests from teammates, or replies to requests you sent. Call check_inbox. It shows replies to your requests first, with what you asked: finish the work that was waiting on each one. Then, for each request, handle it the way you would handle a request from your owner, and call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask; it may return before the answer does, and you do not have to wait for it: you will be woken again when the reply arrives. You can read anywhere, but write only in your working directory and in write roots your operator has opened; if work needs to be written somewhere else, say so in your reply rather than writing there."
 
@@ -169,8 +209,7 @@ else
   # Only the vetted servers may start, whatever else a settings file or an
   # extension adds: the tincan server the identity check found, plus the
   # operator's allowed servers.
-  tincan_name=$(gemini_mcp_list | awk -F '\t' '$1 != "" && (tolower($1) ~ /tincan/ || $3 ~ /tincan/) { print $1; exit }')
-  set -- "$BIN" --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names "$tincan_name"
+  set -- "$BIN" --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names "$tincan_wake_server"
   for s in $(printf '%s' "${TINCAN_WAKE_ALLOWED_SERVERS:-}" | tr ',' ' '); do
     set -- "$@" --allowed-mcp-server-names "$s"
   done
@@ -180,10 +219,19 @@ else
   done <<EOF
 $roots
 EOF
+  # tincan mcp runs inside the sandbox too, and saves received attachments
+  # beside TINCAN_CONFIG, outside the workdir: open that one directory.
+  att=$(gemini_attachment_dir)
+  if { mkdir -p "$att" && chmod 700 "$att"; } 2>/dev/null && attc=$(tincan_wake_canonical_dir "$att"); then
+    set -- "$@" --include-directories "$attc"
+  else
+    tincan_wake_log "cannot create the attachments directory $att; received attachments will not be saved"
+  fi
 fi
 
 # The engine's output is kept in the wake's private state directory, so an
-# authentication failure can be told apart from other failures, then passed
+# authentication failure (exit 41 from Gemini CLI, or a login message on
+# the engine's stderr) can be told apart from other failures, then passed
 # on to the listener's log.
 state=$(CDPATH='' cd -P -- "$TINCAN_WAKE_STATE_DIR" && pwd -P)
 out=$state/out.$$
@@ -197,7 +245,9 @@ auth=
 if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
   if [ "$ENGINE" = gemini ] && [ "$status" -eq 41 ]; then
     auth=1
-  elif grep -Eiq 'authentication required|not authenticated|unauthenticated|not logged in|log ?in (is )?required|login (has )?expired|please (re-?)?log ?in|api key not valid|invalid api key|API_KEY_INVALID' "$out" "$err"; then
+  elif grep -Eiq 'authentication required|not authenticated|unauthenticated|not logged in|log ?in (is )?required|login (has )?expired|please (re-?)?log ?in|api key not valid|invalid api key|API_KEY_INVALID' "$err"; then
+    # Only the engine's own stderr: stdout carries the model's words, which
+    # can say anything.
     auth=1
   fi
 fi
