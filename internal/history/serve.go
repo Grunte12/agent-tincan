@@ -353,16 +353,20 @@ func runPolling(ctx context.Context, pollOnce func(context.Context) (int, error)
 // PollOnce waits up to Hold for requests, then handles each one serially.
 // It returns how many requests it handled.
 func (s *Service) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, s.Relay, s.Hold, s.handleSafely)
+	return pollAndHandle(ctx, s.Relay, s.Hold, "history-serve", s.handleSafely)
 }
 
 // pollAndHandle waits up to hold (client.DefaultPollHold when zero) for
 // requests, then handles each one serially.
-func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, handle func(context.Context, envelope.Request)) (int, error) {
+func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, surface string, handle func(context.Context, envelope.Request)) (int, error) {
 	if hold == 0 {
 		hold = client.DefaultPollHold
 	}
 	in, err := relay.PollReplies(ctx, hold, client.RepliesNone)
+	if err != nil {
+		return 0, err
+	}
+	in, err = client.AnswerPings(ctx, relay, in, surface)
 	if err != nil {
 		return 0, err
 	}

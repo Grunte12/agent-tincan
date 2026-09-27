@@ -127,6 +127,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent version: %w", err)
 	}
+	if err := s.migrateAgentFeatures(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent features: %w", err)
+	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
@@ -248,6 +252,18 @@ func (s *Store) migrateAgentVersion() error {
 	return err
 }
 
+func (s *Store) migrateAgentFeatures() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'features')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN features TEXT`)
+	return err
+}
+
 // migrateInvites adds the kind column to an invites table created before
 // invites could carry the agent's kind. It is a no-op on a current table.
 func (s *Store) migrateInvites() error {
@@ -298,16 +314,16 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// on either machine are untouched: a node may carry several names. The
 	// name's last activity and the build it last reported carry over.
 	var lastSeen sql.NullInt64
-	var version sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version)
+	var version, features sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -371,6 +387,32 @@ func (s *Store) SetAgentVersion(ctx context.Context, name, version string) error
 // every agent that has reported one.
 func (s *Store) AgentVersions(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT name, version FROM agents WHERE version IS NOT NULL AND version != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, v string
+		if err := rows.Scan(&name, &v); err != nil {
+			return nil, err
+		}
+		out[name] = v
+	}
+	return out, rows.Err()
+}
+
+// SetAgentFeatures records the client capabilities last called with; ""
+// stores NULL. It ignores names not in the directory.
+func (s *Store) SetAgentFeatures(ctx context.Context, name, features string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET features = ? WHERE name = ?`, nullable(features), name)
+	return err
+}
+
+// AgentFeatures returns the client capabilities each agent last called with, for
+// every agent that has reported one.
+func (s *Store) AgentFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, features FROM agents WHERE features IS NOT NULL AND features != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -534,7 +576,7 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 // PendingRequests names up to limit of agent's queued requests, oldest
 // first, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent FROM requests
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind FROM requests
 		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
 	if err != nil {
@@ -544,7 +586,7 @@ func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([
 	var out []envelope.Pending
 	for rows.Next() {
 		var p envelope.Pending
-		if err := rows.Scan(&p.ID, &p.From); err != nil {
+		if err := rows.Scan(&p.ID, &p.From, &p.Kind); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -594,9 +636,9 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END
 		WHERE id = ? AND status IN (?, ?, ?)`,
-		string(rep.Status), now.UnixMilli(), id,
+		string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
 	if err != nil {
 		return envelope.Reply{}, err

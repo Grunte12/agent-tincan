@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
 func listenCmd() *cobra.Command {
@@ -79,7 +80,21 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
+		answeredPing := false
+		for _, pending := range w.Pending {
+			if pending.Kind != envelope.KindPing {
+				continue
+			}
+			_, err := client.AnswerPings(ctx, r, client.Inbox{Requests: []envelope.Request{{ID: pending.ID, Kind: envelope.KindPing}}}, "listen")
+			if err != nil {
+				return err
+			}
+			answeredPing = true
+		}
 		backoff = time.Second
+		if answeredPing {
+			continue
+		}
 		if n == 0 {
 			continue
 		}

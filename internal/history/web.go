@@ -141,7 +141,7 @@ func (w *WebAgent) Run(ctx context.Context) error { return runPolling(ctx, w.Pol
 
 // PollOnce waits up to Hold for requests and handles each one serially.
 func (w *WebAgent) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, w.Relay, w.Hold, w.handleSafely)
+	return pollAndHandle(ctx, w.Relay, w.Hold, "web-serve", w.handleSafely)
 }
 
 func (w *WebAgent) handleSafely(ctx context.Context, req envelope.Request) {

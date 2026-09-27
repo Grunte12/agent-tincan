@@ -157,8 +157,8 @@ func (s *Store) Trace(ctx context.Context, traceID string) ([]TraceStep, error) 
 }
 
 // RecentTraces returns the newest chain ids with their first request.
-func (s *Store) RecentTraces(ctx context.Context, limit int) ([]TraceStep, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE hop = 1 ORDER BY created_at DESC LIMIT ?`, limit)
+func (s *Store) RecentTraces(ctx context.Context, limit int, excludePings bool) ([]TraceStep, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE hop = 1 AND (? = 0 OR kind != 'ping') ORDER BY created_at DESC LIMIT ?`, excludePings, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -461,6 +461,10 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 	if err != nil {
 		return err
 	}
+	in, err = client.AnswerPings(ctx, r, in, "inbox")
+	if err != nil {
+		return err
+	}
 	return printInboxJSON(ctx, r, in, out, errOut)
 }
 
@@ -497,6 +501,10 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 // failed ack is reported on errOut; the replies may show again.
 func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, errOut io.Writer) error {
 	in, err := r.Poll(ctx, wait)
+	if err != nil {
+		return err
+	}
+	in, err = client.AnswerPings(ctx, r, in, "inbox")
 	if err != nil {
 		return err
 	}
@@ -614,6 +622,9 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 	backoff := time.Second
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
+		if err == nil {
+			in, err = client.AnswerPings(ctx, r, in, "wait")
+		}
 		switch {
 		case err == nil && !in.Empty():
 			return in, nil

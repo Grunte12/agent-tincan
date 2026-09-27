@@ -863,3 +863,22 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 		t.Fatalf("check_inbox = %q", out)
 	}
 }
+
+func TestCheckInboxAutomaticallyAnswersPing(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	muse := session(t, m, "muse")
+	call(t, muse, "check_inbox", nil)
+	sender := m.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, muse, "check_inbox", nil)
+	if strings.Contains(got, req.ID) || strings.Contains(got, "pong") {
+		t.Fatalf("ping visible: %s", got)
+	}
+	result, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || result.Reply == nil || !strings.Contains(result.Reply.Body, "answered by check_inbox") {
+		t.Fatalf("pong: %+v %v", result, err)
+	}
+}

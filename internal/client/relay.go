@@ -26,6 +26,9 @@ const AgentHeader = "X-Tincan-Agent"
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
 
+// FeaturesHeader advertises capabilities supported by this client.
+const FeaturesHeader = "X-Tincan-Features"
+
 // Version is the tincan build this process runs, sent as VersionHeader by
 // every relay client made after it is set. main sets it from the link-time
 // version; it stays "" (and the header is left out) in other programs.
@@ -507,6 +510,7 @@ func (r *Relay) headers(req *http.Request) {
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
+	req.Header.Set(FeaturesHeader, "ping")
 	if r.version != "" {
 		req.Header.Set(VersionHeader, r.version)
 	}

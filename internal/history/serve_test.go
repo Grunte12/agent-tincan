@@ -1167,3 +1167,23 @@ func assertStructuredHelp(t *testing.T, body string) {
 		t.Errorf("reply is the free-text clarifying text: %q", body)
 	}
 }
+
+func TestHistoryAnswersPingWithoutHandling(t *testing.T) {
+	rig := newServeRig(t, false)
+	if _, err := rig.svc.Relay.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sender := rig.mesh.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "history", "", envelope.KindPing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := rig.svc.PollOnce(t.Context())
+	if err != nil || n != 0 {
+		t.Fatalf("handled ping as work: %d %v", n, err)
+	}
+	res, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || res.Reply == nil || !strings.Contains(res.Reply.Body, "history-serve") {
+		t.Fatalf("pong: %+v %v", res, err)
+	}
+}

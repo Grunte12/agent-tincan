@@ -62,6 +62,9 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if err != nil {
 		return err
 	}
+	if req.Kind == envelope.KindPing && ok {
+		return reject(http.StatusBadRequest, errors.New("ping cannot continue a request chain"))
+	}
 	if ok {
 		req.ParentID, req.TraceID, req.Hop = parent.ID, parent.TraceID, parent.Hop+1
 		req.Chain = append(slices.Clone(parent.Chain), req.From)

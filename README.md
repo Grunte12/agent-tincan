@@ -394,7 +394,7 @@ In `wake.json`: `{ "grokbot": { "method": "webhook", "url": "<Grok Bot webhook U
 
 #### The Agent Tincan operator role
 
-`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable, wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), telling agents to `tincan upgrade` when the relay serves a new release, routing history questions to the history agent, and summarizing agent traffic when asked.
+`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable (`tincan ping <agent> --wait 60s`), wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), telling agents to `tincan upgrade` when the relay serves a new release, routing history questions to the history agent, and summarizing agent traffic when asked.
 
 It follows a quiet rule. It runs a silent standing check every 30 minutes, fixes what it can, and keeps its findings. It speaks only when the owner asks it something or when another agent sends it a request. No scheduled reports, no "all clear" messages.
 
@@ -925,3 +925,15 @@ Always upload the `checksums.txt` written after signing; `make release-mac` rewr
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+### Reachability checks
+
+Run `tincan ping hermes --wait 60s` to check a teammate's wake and polling path without asking its model to reason about a health request. `--json` returns the request result and `round_trip_ms`. For example:
+
+```text
+hermes: pong (answered by check_inbox, tincan 0.5.5) in 38s
+```
+
+The receiving client claims and answers the ping automatically, hiding it from model inboxes. The answering surface is `check_inbox`, `inbox`, `wait`, `listen`, `history-serve`, or `web-serve`. A `wait` or `listen` answer proves the poller is alive; it does not prove a model ran. Both keep waiting after a ping, and `listen` does not run its exec command for it. Webhook or email wakes may still start a turn to poll, but no model reply is needed. History and web services answer without invoking their model or browser.
+
+A target must first advertise ping support through a relay call. Older clients are refused with a message to use `ask`. Pings cannot have a parent or be sent while handling a request chain, and use the normal send rate limit. A timeout leaves the request available for a later pong; its id appears in the error. Pong replies do not wake the sender or appear in its inbox. `tincan trace` hides ping chains by default; use `tincan trace --pings` (also with a trace id) to inspect them and their wake events. No MCP tool is added.

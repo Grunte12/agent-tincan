@@ -1063,7 +1063,7 @@ func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
 	}
 	// First delivery: the send goes through, then the agent dies before
 	// it replies (no handleSafely, so no failure reply either).
-	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, func(ctx context.Context, req envelope.Request) {
+	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, "web-serve", func(ctx context.Context, req envelope.Request) {
 		defer func() { _ = recover() }()
 		rig.agent.Handle(ctx, req)
 	})
@@ -1208,5 +1208,25 @@ func TestWebReadReplyUnparseable(t *testing.T) {
 	msg := rig.agent.waitFailure(err, "conv-1")
 	if !strings.Contains(msg, "the reply could not be read") || !strings.Contains(msg, "conv-1") || strings.Contains(msg, "empty") {
 		t.Fatalf("%q", msg)
+	}
+}
+
+func TestWebAnswersPingWithoutHandling(t *testing.T) {
+	rig := newWebRig(t)
+	if _, err := rig.agent.Relay.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sender := rig.mesh.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "chatgpt-web", "", envelope.KindPing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := rig.agent.PollOnce(t.Context())
+	if err != nil || n != 0 {
+		t.Fatalf("handled ping as work: %d %v", n, err)
+	}
+	res, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || res.Reply == nil || !strings.Contains(res.Reply.Body, "web-serve") {
+		t.Fatalf("pong: %+v %v", res, err)
 	}
 }

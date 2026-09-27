@@ -116,6 +116,7 @@ type Server struct {
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
 	versions map[string]string
+	features map[string]string
 	// storedVersion is the build last written to the store for each agent,
 	// and versionWritten when. The write is throttled like last-seen, so two
 	// builds running under one name (an old listen or MCP process next to an
@@ -134,6 +135,14 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}}
 	s.storedVersion = maps.Clone(s.versions)
+	var err error
+	s.features, err = st.AgentFeatures(context.Background())
+	if err != nil {
+		log.Printf("agent features: %v", err)
+	}
+	if s.features == nil {
+		s.features = map[string]string{}
+	}
 	return s
 }
 
@@ -336,6 +345,21 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 		}))
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
+	features := ""
+	for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
+		if strings.TrimSpace(f) == "ping" {
+			features = "ping"
+		}
+	}
+	s.mu.Lock()
+	if s.features[res.Name] != features {
+		if err := s.store.SetAgentFeatures(r.Context(), res.Name, features); err == nil {
+			s.features[res.Name] = features
+		} else {
+			log.Printf("agent features: %v", err)
+		}
+	}
+	s.mu.Unlock()
 	return res.Name
 }
 
@@ -426,6 +450,18 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !s.isAgent(r.Context(), req.To) {
 		writeErr(w, http.StatusNotFound, errors.New("no such agent: "+req.To))
 		return
+	}
+	if req.Kind == envelope.KindPing {
+		s.mu.Lock()
+		capable, version := s.features[req.To] == "ping", s.versions[req.To]
+		s.mu.Unlock()
+		if !capable {
+			if version == "" {
+				version = "unknown"
+			}
+			writeErr(w, http.StatusConflict, fmt.Errorf("%s runs tincan %s and has not advertised ping support; use ask", req.To, version))
+			return
+		}
 	}
 	if err := s.prep.Prepare(r.Context(), &req); err != nil {
 		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
@@ -688,7 +724,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	// once the waker's grace period shows it went unread.
 	if req, _, err := s.store.Request(r.Context(), id); err == nil {
 		s.hub.notify(inboxKey(req.From))
-		if rp, ok := s.events.(Replier); ok {
+		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
 			rp.Replied(r.Context(), req)
 		}
 	} else {
@@ -909,6 +945,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
 	delete(s.versions, in.Name)
+	delete(s.features, in.Name)
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()
@@ -1086,7 +1123,7 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 200 {
 		limit = n
 	}
-	steps, err := s.store.RecentTraces(r.Context(), limit)
+	steps, err := s.store.RecentTraces(r.Context(), limit, r.URL.Query().Get("exclude_pings") == "true")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
