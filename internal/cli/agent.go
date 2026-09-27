@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
@@ -135,7 +137,7 @@ func inviteCmd() *cobra.Command {
 			}
 			code, err := r.InviteKind(cmd.Context(), args[0], kind)
 			if err != nil {
-				return err
+				return olderRelayKind(err, args[0], kind)
 			}
 			valid := "valid 10 minutes"
 			if kind != "" {
@@ -164,6 +166,20 @@ func inviteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&kind, "kind", "", "the agent's runtime (hermes, codex, ...), recorded on join so tincan onboard tailors its block")
 	return cmd
+}
+
+// olderRelayKind turns a relay's "unknown kind" rejection of a kind this
+// client knows into an upgrade hint. The relay checks kinds against its own
+// list, so a relay older than this client refuses kinds added since, while
+// onboarding (which runs here) already knows them.
+func olderRelayKind(err error, name, kind string) error {
+	apiErr, ok := errors.AsType[*client.APIError](err)
+	if !ok || apiErr.Code != http.StatusBadRequest || !strings.Contains(apiErr.Message, "unknown kind") ||
+		kind == "" || !onboard.KnownKind(kind) {
+		return err
+	}
+	return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet: upgrade the relay to this release and restart it, "+
+		"or leave %s without a kind (tincan invite %s with no --kind) and tailor its block with tincan onboard --kind %s=%s", err, kind, name, name, name, kind)
 }
 
 // inviteRelayURL is the relay URL to print in an invite's join line: the

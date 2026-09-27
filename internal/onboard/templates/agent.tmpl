@@ -2,25 +2,27 @@
 Per-agent blocks. For each kind: join.<kind> (one line), instructions.<kind>
 (pasted into the agent's standing instructions after instructions.common),
 setup.<kind> (one step per line, for the owner) and title.<kind> (recipe
-title). Data: Name, Kind, Wake, RelayURL, Owner, OwnerPoss, Team.
+title). Data: Name, Kind, Wake, RelayURL, Owner, OwnerPoss, Team, OwnConfig,
+Service.
 
 Never print a secret value. Name the wake.json field that holds a secret and
 say to set it in the file only. Wake messages carry only the waiting counts.
-Fresh-session kinds (hermes, openclaw, codex) must carry instructions.fresh.
-They also commonly share a machine with another agent, so every tincan command
-in their join, setup and self-heal lines carries a per-agent TINCAN_CONFIG
-(template "cfg"), their MCP entries set that env, and their rejoin names the
-agent. claude-code and generic get one line saying when to add the prefix.
-history is a Go service, not a model: it carries TINCAN_CONFIG like the
-fresh-session kinds, but its path is always ~/.config/tincan/history.json (the
-service's default config), and its block has no standing instructions.
-The web agents (chatgpt-web, claude-web, grok-web) are Go services too: their config
-path is always ~/.config/tincan/<kind>.json, the one tincan web install's
-service definition sets.
+Fresh-session kinds (freshSession in onboard.go: hermes, openclaw, codex) must
+carry instructions.fresh. They also commonly share a machine with another
+agent, so every tincan command in their join, setup and self-heal lines
+carries a per-agent TINCAN_CONFIG (template "cfg"), their MCP entries set that
+env, and their rejoin names the agent; OwnConfig is set for them.
+claude-code and generic get one line saying when to add the prefix.
+Services (isService in onboard.go) are Go services, not models: they carry
+TINCAN_CONFIG like the fresh-session kinds, their blocks have no standing
+instructions, and their config path is always ~/.config/tincan/<kind>.json:
+history.json (the history service's default config), or the one tincan web
+install's service definition sets for the web agents (chatgpt-web,
+claude-web, grok-web).
 */ -}}
 
-{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else if or (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
-{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{if .Service}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
+{{- define "cfg"}}{{if .OwnConfig}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
 {{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
 {{- define "setup.cfghint" -}}
 If another agent already runs on this machine, prefix every tincan command (join, mcp, listen, rejoin) with TINCAN_CONFIG={{template "cfgpath" .}}.
@@ -49,7 +51,7 @@ If your Agent Tincan tools are missing or show 0 tools, or tincan cannot reach t
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}} --name {{.Name}}{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if .OwnConfig}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.

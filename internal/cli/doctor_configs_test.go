@@ -292,3 +292,54 @@ func TestYamlServersBooleansAndUnreadEntries(t *testing.T) {
 		t.Fatalf("unreadable entry should warn, got %+v", c)
 	}
 }
+
+// Grok Build keeps its MCP servers in ~/.grok/config.toml ($GROK_HOME when
+// set), in the same [mcp_servers.<name>] shape as Codex's config.toml.
+func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "tincan")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[mcp_servers.agent-tincan]\ncommand = \"" + exe + "\"\nargs = [\"mcp\"]\n\n[mcp_servers.agent-tincan.env]\nTINCAN_CONFIG = \"/Users/x/.config/tincan/grok-cli.json\"\n"
+	grokFile := func(home string) string {
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(home, "config.toml")
+		if err := os.WriteFile(f, []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	entriesIn := func(f string) []mcpConfigEntry {
+		var out []mcpConfigEntry
+		for _, e := range findMCPConfigs(nil) {
+			if e.File == f {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GROK_HOME", "")
+	f := grokFile(filepath.Join(home, ".grok"))
+	es := entriesIn(f)
+	if len(es) != 1 || es[0].Name != "agent-tincan" || es[0].Command != exe || strings.Join(es[0].Args, " ") != "mcp" {
+		t.Fatalf("~/.grok/config.toml entries = %+v", es)
+	}
+	if c := configCheck(es, exe); c.Status != "ok" {
+		t.Fatalf("grok entry: got %+v", c)
+	}
+
+	t.Setenv("GROK_HOME", filepath.Join(dir, "grok-home"))
+	g := grokFile(filepath.Join(dir, "grok-home"))
+	if es := entriesIn(g); len(es) != 1 {
+		t.Fatalf("$GROK_HOME/config.toml entries = %+v", es)
+	}
+	if es := entriesIn(f); len(es) != 0 {
+		t.Fatalf("~/.grok/config.toml read although GROK_HOME points elsewhere: %+v", es)
+	}
+}
