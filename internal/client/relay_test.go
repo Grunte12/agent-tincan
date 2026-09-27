@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -319,5 +320,24 @@ func TestKeepPresencePeeksUntilStoppedOrCapped(t *testing.T) {
 	defer logMu.Unlock()
 	if len(logged) != 1 || !strings.Contains(logged[0], "stopped keeping this agent online after 30ms") {
 		t.Fatalf("cap log = %q", logged)
+	}
+}
+
+func TestAskWithoutWaitReportsHeld(t *testing.T) {
+	for _, status := range []envelope.Status{envelope.StatusHeld, ""} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(envelope.Request{ID: "r1", To: "muse", Status: status})
+		}))
+		r, _ := client.NewRelay(srv.URL, "")
+		res, err := r.Ask(t.Context(), "muse", "call the restaurant", "", 0)
+		srv.Close()
+		want := envelope.StatusQueued
+		if status == envelope.StatusHeld {
+			want = envelope.StatusHeld
+		}
+		if err != nil || res.Status != want {
+			t.Fatalf("relay status %q: ask = %s, %v; want %s", status, res.Status, err, want)
+		}
 	}
 }

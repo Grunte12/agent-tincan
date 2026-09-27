@@ -96,6 +96,15 @@ func (a AgentInfo) LastSeen(now time.Time) string {
 	return fmt.Sprintf("last seen %dd ago", int(d/(24*time.Hour)))
 }
 
+// sentStatus is a fresh send's status: held when the relay is holding it for
+// the owner's approval, queued otherwise.
+func sentStatus(req envelope.Request) envelope.Status {
+	if req.Status == envelope.StatusHeld {
+		return envelope.StatusHeld
+	}
+	return envelope.StatusQueued
+}
+
 // DistManifest lists the release binaries a relay serves for tincan upgrade.
 type DistManifest struct {
 	Version string     `json:"version"`
@@ -248,7 +257,7 @@ func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Dura
 		return Result{}, err
 	}
 	if wait <= 0 {
-		return Result{Request: req, Status: envelope.StatusQueued}, nil
+		return Result{Request: req, Status: sentStatus(req)}, nil
 	}
 	return r.Get(ctx, req.ID, wait)
 }

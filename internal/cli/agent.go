@@ -324,9 +324,6 @@ func askCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if res.Request.Status == envelope.StatusHeld {
-				res.Status = envelope.StatusHeld
-			}
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)
 			}
