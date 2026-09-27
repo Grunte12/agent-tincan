@@ -52,7 +52,7 @@ func TestSecondAgentJoinKeepsFirstConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "")
+		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "", false)
 		if err != nil || req.From != want {
 			t.Fatalf("config %s sent as %q, %v; want %s", filepath.Base(path), req.From, err, want)
 		}

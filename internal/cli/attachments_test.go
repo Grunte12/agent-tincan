@@ -111,7 +111,7 @@ func TestAttachCLIMissingFile(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	m.Server.SetAttachmentDir(t.TempDir())
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
-	req, _ := m.Client(t, "muse").Send(context.Background(), "grokbot", "send it", envelope.KindAsk, "")
+	req, _ := m.Client(t, "muse").Send(context.Background(), "grokbot", "send it", envelope.KindAsk, "", false)
 	_, err := run(t, replyCmd(), req.ID, "here", "--attach", filepath.Join(t.TempDir(), "gone.txt"))
 	if err == nil || !strings.Contains(err.Error(), "gone.txt") {
 		t.Fatalf("err = %v", err)

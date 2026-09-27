@@ -178,7 +178,7 @@ func (r *serveRig) ask(t *testing.T, from, body string) client.Result {
 	t.Helper()
 	ctx := t.Context()
 	c := r.mesh.Client(t, from)
-	req, err := c.Send(ctx, "history", body, envelope.KindAsk, "")
+	req, err := c.Send(ctx, "history", body, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,14 +265,14 @@ func forwardViaCodex(t *testing.T, m *testrelay.Mesh, agent, question string) (*
 	t.Helper()
 	ctx := t.Context()
 	muse, codex := m.Client(t, "muse"), m.Client(t, "codex")
-	orig, err := muse.Send(ctx, "codex", "ask "+agent+" for me", envelope.KindAsk, "")
+	orig, err := muse.Send(ctx, "codex", "ask "+agent+" for me", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := codex.Claim(ctx, orig.ID); err != nil {
 		t.Fatal(err)
 	}
-	fwd, err := codex.Send(ctx, agent, question, envelope.KindAsk, orig.ID)
+	fwd, err := codex.Send(ctx, agent, question, envelope.KindAsk, orig.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestServeRunSurvivesBadRequestAndStopsOnCancel(t *testing.T) {
 	rig.chatgpt.mu.Lock()
 	rig.chatgpt.err = errors.New("disk on fire")
 	rig.chatgpt.mu.Unlock()
-	bad, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "")
+	bad, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestServeRunSurvivesBadRequestAndStopsOnCancel(t *testing.T) {
 	rig.chatgpt.mu.Lock()
 	rig.chatgpt.err = nil
 	rig.chatgpt.mu.Unlock()
-	good, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "")
+	good, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +926,7 @@ func TestServePresenceDuringSlowRequest(t *testing.T) {
 	)
 	rig.svc.Readers[SourceChatGPT] = hookReader{fakeReader: rig.chatgpt, before: func(ctx context.Context) {
 		start = time.Now()
-		q, err := codex.Send(ctx, "history", "a second question", envelope.KindAsk, "")
+		q, err := codex.Send(ctx, "history", "a second question", envelope.KindAsk, "", false)
 		if err != nil {
 			t.Error(err)
 		}

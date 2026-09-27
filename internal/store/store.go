@@ -723,6 +723,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 
 // Transition is one state change made by Sweep.
 type Transition struct {
+	Urgent  bool
 	ID      string
 	TraceID string
 	From    string
@@ -744,7 +745,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		for rows.Next() {
 			var t Transition
 			var st string
-			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st); err != nil {
+			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st, &t.Urgent); err != nil {
 				return err
 			}
 			t.Status = envelope.Status(st)
@@ -757,13 +758,13 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	// Deliver rejects.
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
 		WHERE (status IN (?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
-		RETURNING id, trace_id, from_agent, to_agent, status`,
+		RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered),
 		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
+		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
 		return nil, err
 	}

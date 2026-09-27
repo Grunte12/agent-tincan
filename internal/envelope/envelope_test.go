@@ -208,3 +208,20 @@ func TestParseSendUrgent(t *testing.T) {
 		t.Fatal("accepted non-boolean urgent")
 	}
 }
+
+func TestPendingUrgentJSONShape(t *testing.T) {
+	for _, urgent := range []bool{false, true} {
+		raw, err := json.Marshal(Pending{ID: "r1", From: "sender", Urgent: urgent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["urgent"]
+		if present != urgent || (urgent && value != true) {
+			t.Fatalf("urgent=%v: unexpected JSON %s", urgent, raw)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/identity/identitytest"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 const (
@@ -638,5 +639,48 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 	defer rec.mu.Unlock()
 	if len(rec.to) != 1 || len(rec.requeued) != 1 || rec.requeued[0] != "muse" {
 		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
+	}
+}
+
+func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		name := "delivery"
+		if claimed {
+			name = "claim"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, Config{})
+			var req envelope.Request
+			h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"urgent","urgent":true}`, http.StatusCreated, &req)
+			ctx := t.Context()
+			if claimed {
+				if _, err := h.st.Claim(ctx, req.ID, "muse", -time.Second); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				got, err := h.st.Deliver(ctx, "muse", 1, -time.Second)
+				if err != nil || len(got) != 1 {
+					t.Fatalf("deliver = %v, %v", got, err)
+				}
+			}
+			woken := make(chan struct{}, 1)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				woken <- struct{}{}
+			}))
+			defer ts.Close()
+			waker := wake.New(wake.Config{"muse": {Method: wake.Webhook, URL: ts.URL}}, h.st, wake.Options{Debounce: 2 * time.Second})
+			defer waker.Flush()
+			h.srv.SetEvents(waker)
+			h.srv.Sweep(ctx)
+			select {
+			case <-woken:
+			case <-time.After(time.Second):
+				t.Fatal("urgent requeue waited for debounce")
+			}
+			stored, status, err := h.st.Request(ctx, req.ID)
+			if err != nil || status != envelope.StatusQueued || !stored.Urgent {
+				t.Fatalf("requeued request = %+v, %s, %v", stored, status, err)
+			}
+		})
 	}
 }

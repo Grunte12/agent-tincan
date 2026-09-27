@@ -46,8 +46,8 @@ var attachmentID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Backend is what the tools need from the relay client.
 type Backend interface {
-	Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent ...bool) (client.Result, error)
-	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent ...bool) (envelope.Request, error)
+	Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent bool) (client.Result, error)
+	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent bool) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
 	AckReplies(ctx context.Context, ids []string) error
@@ -62,8 +62,8 @@ type Backend interface {
 // implements it; a Backend without it can neither send nor show them.
 type Attacher interface {
 	UploadFiles(ctx context.Context, paths []string) ([]client.UploadedAttachment, error)
-	SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent ...bool) (envelope.Request, error)
-	AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent ...bool) (client.Result, error)
+	SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent bool) (envelope.Request, error)
+	AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent bool) (client.Result, error)
 	ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error)
 	FetchAttachment(ctx context.Context, id string) ([]byte, client.DownloadedAttachment, error)
 }
