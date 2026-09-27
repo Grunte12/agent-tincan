@@ -89,8 +89,10 @@ Groups do not change identity, parent/chain checks, rate limits, wakes,
 allowlists, leases or attachment ownership: each target receives an ordinary
 request and requires its own uploads.
 
-`GET /v1/groups/{id}` returns an array of request results sent by the
-authenticated caller with that group tag. An unknown group, or a group with no
+`GET /v1/groups/{id}` returns only membership: an array of `{"id": "...", "to": "..."}`
+for requests sent by the authenticated caller with that group tag. It includes
+no bodies or replies and never marks replies seen. Fetch each result through
+`GET /v1/requests/{id}`. An unknown group, or a group with no
 requests sent by the caller, returns 404. Recipients and admins do not gain
 access to another sender's group through this endpoint.
 `GET /v1/capabilities` advertises `"groups": true`.
@@ -100,3 +102,6 @@ at 8. Older relays ignore the optional field. Clients retain the individual ids
 in memory so combined polling still works in the original client instance;
 across client restarts, use individual ids or upgrade the relay. Failed sends
 are local result entries and are not stored as requests on the relay.
+Per-target polling failures appear as `error` text on the combined result entry,
+preserving its request id and last known status alongside successful results.
+Group text output includes the group id and every accepted request id.

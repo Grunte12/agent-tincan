@@ -151,7 +151,10 @@ func FormatGroup(g GroupResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Group %s (%s). Check with get_reply or tincan get %s.\n", g.Group, g.Outcome, g.Group)
 	for _, r := range g.Results {
-		fmt.Fprintf(&b, "%s (%s):\n%s", r.Request.To, r.Status, FormatResult(r))
+		fmt.Fprintf(&b, "%s (%s), request %s:\n%s", r.Request.To, r.Status, r.Request.ID, FormatResult(r.Result))
+		if r.Error != "" {
+			fmt.Fprintf(&b, "Poll error: %s\n", r.Error)
+		}
 	}
 	return b.String()
 }

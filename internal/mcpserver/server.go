@@ -562,7 +562,7 @@ type groupBackend interface {
 func (f files) groupResult(ctx context.Context, g client.GroupResult) (*mcp.CallToolResult, any, error) {
 	var atts []envelope.Attachment
 	for _, r := range g.Results {
-		atts = append(atts, replyAttachments(r)...)
+		atts = append(atts, replyAttachments(r.Result)...)
 	}
 	return f.result(ctx, client.FormatGroup(g), atts)
 }

@@ -87,6 +87,12 @@ type Request struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 }
 
+// GroupMember identifies a request without fetching its result or marking replies seen.
+type GroupMember struct {
+	ID string `json:"id"`
+	To string `json:"to"`
+}
+
 // Pending names a queued request without its body, as a peek reports it.
 type Pending struct {
 	ID   string `json:"id"`

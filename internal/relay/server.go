@@ -1147,14 +1147,9 @@ func (s *Server) handleGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, store.ErrNotFound)
 		return
 	}
-	results := make([]envelope.Result, 0, len(reqs))
+	members := make([]envelope.GroupMember, 0, len(reqs))
 	for _, req := range reqs {
-		res, err := s.store.Get(r.Context(), req.ID, name)
-		if err != nil {
-			writeErr(w, statusFor(err), err)
-			return
-		}
-		results = append(results, res)
+		members = append(members, envelope.GroupMember{ID: req.ID, To: req.To})
 	}
-	writeJSON(w, http.StatusOK, results)
+	writeJSON(w, http.StatusOK, members)
 }

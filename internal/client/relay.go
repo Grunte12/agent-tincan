@@ -480,11 +480,7 @@ func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path strin
 		return err
 	}
 	defer resp.Body.Close()
-	limit := int64(4 << 20)
-	if strings.HasPrefix(path, "/v1/groups/") {
-		limit = 8 << 20
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err
 	}
@@ -527,9 +523,15 @@ func IsStatus(err error, code int) bool {
 
 // GroupResult is the combined view of independently sent requests.
 type GroupResult struct {
-	Outcome string   `json:"outcome"`
-	Group   string   `json:"group"`
-	Results []Result `json:"results"`
+	Outcome string       `json:"outcome"`
+	Group   string       `json:"group"`
+	Results []GroupEntry `json:"results"`
+}
+
+// GroupEntry retains a request's last known result and any polling error.
+type GroupEntry struct {
+	Result
+	Error string `json:"error,omitempty"`
 }
 
 // ExitCode summarizes the group: pending takes precedence over failures.
@@ -608,7 +610,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 			res.Status = envelope.StatusFailed
 			res.Reply = &envelope.Reply{From: target, Status: envelope.StatusFailed, Body: err.Error()}
 		}
-		g.Results = append(g.Results, res)
+		g.Results = append(g.Results, GroupEntry{Result: res})
 	}
 	g.summarize()
 	r.groupsMu.Lock()
@@ -627,20 +629,25 @@ func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (Gr
 	g, local := r.groups[id]
 	r.groupsMu.Unlock()
 	if local {
-		g.Results = append([]Result(nil), g.Results...)
+		g.Results = append([]GroupEntry(nil), g.Results...)
 	}
 	caps, err := r.Capabilities(ctx)
 	if err != nil {
 		return g, err
 	}
 	if caps.Groups {
-		var results []Result
-		err = r.call(ctx, r.api, "GET", "/v1/groups/"+url.PathEscape(id), nil, &results)
+		var members []envelope.GroupMember
+		err = r.call(ctx, r.api, "GET", "/v1/groups/"+url.PathEscape(id), nil, &members)
 		if err != nil && (!local || !IsStatus(err, http.StatusNotFound)) {
 			return g, err
 		}
 		if !local {
-			g = GroupResult{Group: id, Results: results}
+			g = GroupResult{Group: id}
+			for _, member := range members {
+				g.Results = append(g.Results, GroupEntry{Result: Result{
+					Request: envelope.Request{ID: member.ID, To: member.To},
+				}})
+			}
 		}
 	} else if !local {
 		return g, errors.New("group unavailable: this older relay requires the original client process; use individual request ids")
@@ -650,8 +657,7 @@ func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (Gr
 
 // WaitGroup polls all requests concurrently within one shared wait budget.
 func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration) (GroupResult, error) {
-	g.Results = append([]Result(nil), g.Results...)
-	errs := make([]error, len(g.Results))
+	g.Results = append([]GroupEntry(nil), g.Results...)
 	var wg sync.WaitGroup
 	for i, res := range g.Results {
 		if res.Request.ID == "" {
@@ -660,13 +666,13 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 		wg.Go(func() {
 			next, err := r.Get(ctx, res.Request.ID, ClampWait(wait))
 			if err != nil {
-				errs[i] = err
+				g.Results[i].Error = err.Error()
 				return
 			}
-			g.Results[i] = next
+			g.Results[i] = GroupEntry{Result: next}
 		})
 	}
 	wg.Wait()
 	g.summarize()
-	return g, errors.Join(errs...)
+	return g, nil
 }

@@ -224,7 +224,12 @@ Group text output uses the same exit codes. Rejected sends appear per target;
 successfully queued requests are still tracked. With an older relay, group
 lookup requires the original client instance (such as the same MCP server);
 a later CLI invocation must use the individual request ids. Send errors are
-retained only by that client instance; the relay group lists accepted requests.
+retained only by that client instance. `GET /v1/groups/{id}` lists only accepted
+request membership (`id` and `to`), without bodies or replies and without marking
+replies seen; clients fetch results individually. Poll failures appear as an
+`error` on the affected result, preserving its id and last known status alongside
+successful replies. Group text output includes the group id and every accepted
+request id for follow-up.
 
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 

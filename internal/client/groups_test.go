@@ -127,7 +127,7 @@ func TestGroupOutcomes(t *testing.T) {
 	} {
 		var g client.GroupResult
 		for _, s := range tc.statuses {
-			g.Results = append(g.Results, client.Result{Status: s})
+			g.Results = append(g.Results, client.GroupEntry{Result: client.Result{Status: s}})
 		}
 		if got := g.ExitCode(); got != tc.code {
 			t.Fatalf("%v: %d", tc.statuses, got)
@@ -157,8 +157,8 @@ func TestGroupWaitPollsConcurrently(t *testing.T) {
 	c, _ := client.NewRelay(ts.URL, "")
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	g, err := c.WaitGroup(ctx, client.GroupResult{Group: "group-test", Results: []client.Result{
-		{Request: envelope.Request{ID: "a"}}, {Request: envelope.Request{ID: "b"}},
+	g, err := c.WaitGroup(ctx, client.GroupResult{Group: "group-test", Results: []client.GroupEntry{
+		{Result: client.Result{Request: envelope.Request{ID: "a"}}}, {Result: client.Result{Request: envelope.Request{ID: "b"}}},
 	}}, time.Second)
 	if err != nil || g.Outcome != "partial" {
 		t.Fatalf("%+v %v", g, err)
@@ -173,7 +173,7 @@ func TestGroupMaximumBodies(t *testing.T) {
 	for i, name := range targets {
 		peers[i] = m.JoinOnMachineOf(t, "instinct", name)
 	}
-	body := strings.Repeat("x", envelope.DefaultMaxBody)
+	body := strings.Repeat("<", 128<<10)
 	g, err := c.SendGroup(t.Context(), targets, body, envelope.KindAsk, "", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -183,8 +183,72 @@ func TestGroupMaximumBodies(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	resp, err := http.Get(c.Base() + "/v1/groups/" + g.Group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var members []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&members); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || len(members) != 8 {
+		t.Fatalf("status=%d members=%v", resp.StatusCode, members)
+	}
+	for _, member := range members {
+		if len(member) != 2 || member["id"] == "" || member["to"] == "" {
+			t.Fatalf("unexpected membership: %v", member)
+		}
+	}
+	if n, err := m.Store.CountUnseenReplies(t.Context(), "grokbot"); err != nil || n != 8 {
+		t.Fatalf("unseen after membership lookup=%d err=%v", n, err)
+	}
 	got, err := m.Client(t, "grokbot").GetGroup(t.Context(), g.Group, 0)
 	if err != nil || got.Outcome != "answered" || len(got.Results) != 8 {
 		t.Fatalf("outcome=%s count=%d err=%v", got.Outcome, len(got.Results), err)
+	}
+	for _, res := range got.Results {
+		if res.Request.Body != body || res.Reply == nil || res.Reply.Body != body {
+			t.Fatalf("missing full bodies for %s", res.Request.ID)
+		}
+	}
+}
+
+func TestGroupPollErrorPreservesResults(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/failed") {
+			http.Error(w, "poll unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(client.Result{
+			Request: envelope.Request{ID: "success", To: "a"}, Status: envelope.StatusAnswered,
+			Reply: &envelope.Reply{From: "a", Status: envelope.StatusAnswered, Body: "saved answer"},
+		})
+	}))
+	defer ts.Close()
+	c, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := c.WaitGroup(t.Context(), client.GroupResult{Group: "group-errors", Results: []client.GroupEntry{
+		{Result: client.Result{Request: envelope.Request{ID: "success", To: "a"}, Status: envelope.StatusQueued}},
+		{Result: client.Result{Request: envelope.Request{ID: "failed", To: "b"}, Status: envelope.StatusQueued}},
+	}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Results[1].Status != envelope.StatusQueued || !strings.Contains(g.Results[1].Error, "poll unavailable") || g.Results[0].Reply == nil {
+		t.Fatalf("lost partial results: %+v", g)
+	}
+	encoded, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{client.FormatGroup(g), string(encoded)} {
+		for _, want := range []string{"group-errors", "success", "failed", "saved answer", "poll unavailable"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("missing %q in %s", want, output)
+			}
+		}
 	}
 }
