@@ -613,7 +613,8 @@ type webNode struct {
 	// images, but its endTurn still counts.
 	hidden bool
 	// endTurn: the site marks the whole turn over on this message
-	// (ChatGPT: end_turn true, or finish_details without end_turn false).
+	// (ChatGPT: end_turn true, or finish_details without end_turn false;
+	// grok.com: a finished response).
 	endTurn bool
 	// limited: the answer ended on the account's rate or plan limit
 	// (grok.com's stream errors).
