@@ -130,7 +130,7 @@ func (e *APIError) Error() string { return fmt.Sprintf("relay: %s (HTTP %d)", e.
 // Relay talks to a tincan relay.
 type Relay struct {
 	groupsMu sync.Mutex
-	groups   map[string]GroupResult
+	groups   map[string]cachedGroup
 	baseMu   sync.RWMutex
 	base     string
 	api      *http.Client
@@ -528,6 +528,56 @@ type GroupResult struct {
 	Results []GroupEntry `json:"results"`
 }
 
+// The local group record exists so a group can be followed up against a
+// relay without the groups route. It is bounded: at most maxCachedGroups
+// entries, each dropped once its requests would have expired on the relay.
+const (
+	maxCachedGroups = 64
+	groupCacheTTL   = 24 * time.Hour
+)
+
+type cachedGroup struct {
+	g  GroupResult
+	at time.Time
+}
+
+// cachedGroupLocked returns the cached group id; r.groupsMu must be held.
+func (r *Relay) cachedGroupLocked(id string) (GroupResult, bool) {
+	c, ok := r.groups[id]
+	if !ok || time.Since(c.at) > groupCacheTTL {
+		delete(r.groups, id)
+		return GroupResult{}, false
+	}
+	return c.g, true
+}
+
+// cacheGroupLocked stores g, dropping expired groups and then the oldest
+// ones past maxCachedGroups; r.groupsMu must be held.
+func (r *Relay) cacheGroupLocked(g GroupResult) {
+	if r.groups == nil {
+		r.groups = map[string]cachedGroup{}
+	}
+	at := time.Now()
+	if c, ok := r.groups[g.Group]; ok {
+		at = c.at // keep the send time; polls refresh the contents only
+	}
+	r.groups[g.Group] = cachedGroup{g: g, at: at}
+	for id, c := range r.groups {
+		if time.Since(c.at) > groupCacheTTL {
+			delete(r.groups, id)
+		}
+	}
+	for len(r.groups) > maxCachedGroups {
+		oldest := ""
+		for id, c := range r.groups {
+			if oldest == "" || c.at.Before(r.groups[oldest].at) {
+				oldest = id
+			}
+		}
+		delete(r.groups, oldest)
+	}
+}
+
 // GroupEntry retains a request's last known result and any polling error.
 type GroupEntry struct {
 	Result
@@ -614,10 +664,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 	}
 	g.summarize()
 	r.groupsMu.Lock()
-	if r.groups == nil {
-		r.groups = map[string]GroupResult{}
-	}
-	r.groups[g.Group] = g
+	r.cacheGroupLocked(g)
 	r.groupsMu.Unlock()
 	return g, nil
 }
@@ -626,7 +673,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 // when talking to an older relay.
 func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (GroupResult, error) {
 	r.groupsMu.Lock()
-	g, local := r.groups[id]
+	g, local := r.cachedGroupLocked(id)
 	r.groupsMu.Unlock()
 	if local {
 		g.Results = append([]GroupEntry(nil), g.Results...)
@@ -679,7 +726,8 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 		if res.Error == "" {
 			continue
 		}
-		for _, cached := range r.groups[g.Group].Results {
+		prev, _ := r.cachedGroupLocked(g.Group)
+		for _, cached := range prev.Results {
 			if cached.Request.ID == res.Request.ID {
 				g.Results[i].Result = cached.Result
 				break
@@ -687,12 +735,9 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 		}
 	}
 	g.summarize()
-	if r.groups == nil {
-		r.groups = map[string]GroupResult{}
-	}
 	cached := g
 	cached.Results = append([]GroupEntry(nil), g.Results...)
-	r.groups[g.Group] = cached
+	r.cacheGroupLocked(cached)
 	r.groupsMu.Unlock()
 	return g, nil
 }
