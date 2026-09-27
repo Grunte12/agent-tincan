@@ -25,6 +25,8 @@ var (
 	ErrNotFound = errors.New("request not found")
 	// ErrForbidden means the caller is not the agent allowed to do this.
 	ErrForbidden = errors.New("not allowed for this agent")
+	// ErrGroupFull means a sender has filled this group.
+	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
 	ErrWrongState = errors.New("request is not in a state that allows this")
 )
@@ -488,6 +490,15 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
+	if req.Group != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM requests WHERE from_agent = ? AND group_id = ? LIMIT ?)`, req.From, req.Group, MaxGroupRequests).Scan(&count); err != nil {
+			return envelope.Request{}, err
+		}
+		if count >= MaxGroupRequests {
+			return envelope.Request{}, ErrGroupFull
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
@@ -850,12 +861,23 @@ func (s *Store) migrateGroups() error {
 	return err
 }
 
-// RequestsByGroup lists only requests sent by sender in group.
-func (s *Store) RequestsByGroup(ctx context.Context, sender, group string) ([]envelope.Request, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE from_agent = ? AND group_id = ? ORDER BY created_at, id`, sender, group)
+// MaxGroupRequests bounds membership per sender and group tag.
+const MaxGroupRequests = 8
+
+// RequestsByGroup lists only ids and targets sent by sender in group.
+func (s *Store) RequestsByGroup(ctx context.Context, sender, group string) ([]envelope.GroupMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, to_agent FROM requests WHERE from_agent = ? AND group_id = ? ORDER BY created_at, id LIMIT ?`, sender, group, MaxGroupRequests)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanRequests(rows)
+	var members []envelope.GroupMember
+	for rows.Next() {
+		var member envelope.GroupMember
+		if err := rows.Scan(&member.ID, &member.To); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
 }

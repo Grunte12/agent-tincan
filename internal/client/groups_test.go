@@ -301,3 +301,73 @@ func TestGroupPollErrorPreservesResults(t *testing.T) {
 		}
 	}
 }
+
+func TestGroupRecoversLostSendResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"groups":true}`))
+		case "/v1/send":
+			var req envelope.Request
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.To == "a" {
+				// Accepted by the relay, but the response body was lost.
+				w.WriteHeader(http.StatusCreated)
+			} else {
+				http.Error(w, `{"error":"rejected"}`, http.StatusBadRequest)
+			}
+		case "/v1/requests/accepted":
+			_ = json.NewEncoder(w).Encode(client.Result{Request: envelope.Request{ID: "accepted", To: "a"}, Status: envelope.StatusAnswered, Reply: &envelope.Reply{Body: "recovered", Status: envelope.StatusAnswered}})
+		default:
+			_ = json.NewEncoder(w).Encode([]envelope.GroupMember{{ID: "accepted", To: "a"}})
+		}
+	}))
+	defer ts.Close()
+	c, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := c.SendGroup(t.Context(), []string{"a", "b"}, "hello", envelope.KindAsk, "", nil)
+	if err != nil || g.Results[0].Status != envelope.StatusFailed || g.Results[0].Request.ID != "" {
+		t.Fatalf("%+v %v", g, err)
+	}
+	for range 2 {
+		g, err = c.GetGroup(t.Context(), g.Group, 0)
+		if err != nil || len(g.Results) != 2 || g.Results[0].Request.ID != "accepted" || g.Results[0].Reply.Body != "recovered" || g.Results[1].Status != envelope.StatusFailed || g.Results[1].Request.ID != "" {
+			t.Fatalf("%+v %v", g, err)
+		}
+	}
+}
+
+func TestGroupConcurrentPollDoesNotRegress(t *testing.T) {
+	for _, advanced := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed, envelope.StatusAnswered} {
+		t.Run(string(advanced), func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := advanced
+				if calls.Add(1) == 1 {
+					close(started)
+					<-release
+					status = envelope.StatusQueued
+				}
+				_ = json.NewEncoder(w).Encode(client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: status})
+			}))
+			defer ts.Close()
+			c, err := client.NewRelay(ts.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := client.GroupResult{Group: "group-r", Results: []client.GroupEntry{{Result: client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}}
+			done := make(chan client.GroupResult, 1)
+			go func() { result, _ := c.WaitGroup(t.Context(), g, 0); done <- result }()
+			<-started
+			newer, err := c.WaitGroup(t.Context(), g, 0)
+			close(release)
+			older := <-done
+			if err != nil || newer.Results[0].Status != advanced || older.Results[0].Status != advanced {
+				t.Fatalf("new=%+v stale=%+v err=%v", newer, older, err)
+			}
+		})
+	}
+}

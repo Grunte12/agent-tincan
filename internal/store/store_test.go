@@ -638,3 +638,23 @@ func TestGroupMigrationPreservesRequests(t *testing.T) {
 		t.Fatalf("%+v %v", rows, err)
 	}
 }
+
+func TestGroupMembershipOnlyReadsBoundedMetadata(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	for range MaxGroupRequests + 2 {
+		req := ask(t, s, "a", "b", "large body")
+		// Simulate legacy oversized groups and malformed payload metadata.
+		if _, err := s.db.Exec(`UPDATE requests SET group_id = 'group-old', chain = 'invalid', attachments = 'invalid' WHERE id = ?`, req.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members, err := s.RequestsByGroup(t.Context(), "a", "group-old")
+	if err != nil || len(members) != MaxGroupRequests {
+		t.Fatalf("%+v %v", members, err)
+	}
+	for _, member := range members {
+		if member.ID == "" || member.To != "b" {
+			t.Fatalf("%+v", member)
+		}
+	}
+}

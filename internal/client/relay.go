@@ -688,12 +688,26 @@ func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (Gr
 		if err != nil && (!local || !IsStatus(err, http.StatusNotFound)) {
 			return g, err
 		}
-		if !local {
-			g = GroupResult{Group: id}
-			for _, member := range members {
-				g.Results = append(g.Results, GroupEntry{Result: Result{
-					Request: envelope.Request{ID: member.ID, To: member.To},
-				}})
+		g.Group = id
+		for _, member := range members {
+			found, replace := false, -1
+			for i, entry := range g.Results {
+				if entry.Request.ID == member.ID {
+					found = true
+					break
+				}
+				if entry.Request.To == member.To && entry.Request.ID == "" && entry.Status == envelope.StatusFailed {
+					replace = i
+				}
+			}
+			if found {
+				continue
+			}
+			entry := GroupEntry{Result: Result{Request: envelope.Request{ID: member.ID, To: member.To}}}
+			if replace >= 0 {
+				g.Results[replace] = entry
+			} else {
+				g.Results = append(g.Results, entry)
 			}
 		}
 	} else if !local {
@@ -721,14 +735,14 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	}
 	wg.Wait()
 	r.groupsMu.Lock()
-	// A concurrent poll may have retrieved a newer result while this one failed.
+	// Concurrent polls must not overwrite more advanced cached results.
+	prev, _ := r.cachedGroupLocked(g.Group)
 	for i, res := range g.Results {
-		if res.Error == "" {
+		if res.Request.ID == "" {
 			continue
 		}
-		prev, _ := r.cachedGroupLocked(g.Group)
 		for _, cached := range prev.Results {
-			if cached.Request.ID == res.Request.ID {
+			if cached.Request.ID == res.Request.ID && (res.Error != "" || groupProgress(cached.Result) > groupProgress(res.Result)) {
 				g.Results[i].Result = cached.Result
 				break
 			}
@@ -740,4 +754,21 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	r.cacheGroupLocked(cached)
 	r.groupsMu.Unlock()
 	return g, nil
+}
+
+// groupProgress orders observations so late polls cannot regress the cache.
+func groupProgress(r Result) int {
+	if r.Done() {
+		return 4
+	}
+	switch r.Status {
+	case envelope.StatusClaimed:
+		return 3
+	case envelope.StatusDelivered:
+		return 2
+	case envelope.StatusQueued:
+		return 1
+	default:
+		return 0
+	}
 }

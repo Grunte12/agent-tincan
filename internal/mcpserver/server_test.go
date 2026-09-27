@@ -880,3 +880,12 @@ func TestAskGroupAndGetReply(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestNotifyGroupSendFailureIsToolError(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	out := call(t, cs, "ask", map[string]any{"to": "instinct", "also": []string{"unknown"}, "message": "hello", "notify": true})
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "instinct") || !strings.Contains(out, "unknown") || !strings.Contains(out, "no such agent") {
+		t.Fatal(out)
+	}
+}

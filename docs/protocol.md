@@ -104,4 +104,12 @@ across client restarts, use individual ids or upgrade the relay. Failed sends
 are local result entries and are not stored as requests on the relay.
 Per-target polling failures appear as `error` text on the combined result entry,
 preserving its request id and last known status alongside successful results.
+The relay accepts at most 8 requests per sender and group tag; further sends
+return HTTP 400. Membership lookups return at most 8 ids and targets.
+Clients reconcile relay membership with local send errors, recovering requests
+whose send response was lost while retaining errors for targets absent from the
+relay. Concurrent group polls preserve the most advanced cached status and replies.
+A multi-target MCP notification returns a tool error if any upload or send fails,
+with the per-target results included in its content.
+
 Group text output includes the group id and every accepted request id.

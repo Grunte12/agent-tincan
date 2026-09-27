@@ -231,7 +231,11 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 						}
 					}
 				}
-				return f.groupResult(ctx, g)
+				result, data, err := f.groupResult(ctx, g)
+				if result != nil && in.Notify && g.Outcome == "failed" {
+					result.IsError = true
+				}
+				return result, data, err
 			}
 			if len(in.Attach) > 0 {
 				return f.askAttached(ctx, in)

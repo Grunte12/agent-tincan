@@ -640,3 +640,23 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
 	}
 }
+
+func TestGroupSendLimit(t *testing.T) {
+	h := newHarness(t, Config{})
+	body := `{"to":"muse","body":"hello","group":"group-limit"}`
+	for range store.MaxGroupRequests {
+		h.do(grokAddr, "POST", "/v1/send", body, http.StatusCreated, nil)
+	}
+	rec := h.do(grokAddr, "POST", "/v1/send", body, http.StatusBadRequest, nil)
+	if !strings.Contains(rec.Body.String(), "group already has 8 requests from this sender") {
+		t.Fatal(rec.Body.String())
+	}
+	// A different sender has a separate bound; ungrouped sends stay additive.
+	h.do(instinctAddr, "POST", "/v1/send", body, http.StatusCreated, nil)
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"hello"}`, http.StatusCreated, nil)
+	var members []envelope.GroupMember
+	h.do(grokAddr, "GET", "/v1/groups/group-limit", "", http.StatusOK, &members)
+	if len(members) != store.MaxGroupRequests {
+		t.Fatalf("%+v", members)
+	}
+}

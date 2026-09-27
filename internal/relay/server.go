@@ -435,6 +435,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err = s.store.Enqueue(r.Context(), req, s.cfg.RequestTTL)
 	if err != nil {
+		if errors.Is(err, store.ErrGroupFull) {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
 		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
 		return
 	}

@@ -231,6 +231,14 @@ replies seen; clients fetch results individually. Poll failures appear as an
 successful replies. Group text output includes the group id and every accepted
 request id for follow-up.
 
+The relay accepts at most 8 requests per sender and group tag; further sends
+return HTTP 400. Membership lookups return at most 8 ids and targets.
+Clients reconcile relay membership with local send errors, recovering requests
+whose send response was lost while retaining errors for targets absent from the
+relay. Concurrent group polls preserve the most advanced cached status and replies.
+A multi-target MCP notification returns a tool error if any upload or send fails,
+with the per-target results included in its content.
+
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 
 - Single-target `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
