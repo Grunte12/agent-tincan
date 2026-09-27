@@ -286,6 +286,17 @@ func (in Inbox) ReplyIDs() []string {
 	return ids
 }
 
+// ReplyAcks identifies the exact reply generations returned by this poll.
+func (in Inbox) ReplyAcks() []envelope.ReplyAck {
+	acks := make([]envelope.ReplyAck, 0, len(in.Replies))
+	for _, r := range in.Replies {
+		if r.Reply != nil {
+			acks = append(acks, envelope.ReplyAck{ID: r.Request.ID, Generation: r.Reply.Generation})
+		}
+	}
+	return acks
+}
+
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
 	Total   int      `json:"waiting"` // queued requests plus unseen replies
@@ -299,7 +310,7 @@ type Waiting struct {
 // Poll waits up to hold for requests addressed to this agent or unseen
 // replies to its own requests. It takes the requests. The replies stay
 // unseen until the caller, having shown them to its agent, passes
-// in.ReplyIDs() to AckReplies. An empty Inbox means nothing arrived in time.
+// in.ReplyAcks() to AckReplies. An empty Inbox means nothing arrived in time.
 func (r *Relay) Poll(ctx context.Context, hold time.Duration) (Inbox, error) {
 	return r.PollReplies(ctx, hold, RepliesTake)
 }
@@ -315,12 +326,13 @@ func (r *Relay) PollReplies(ctx context.Context, hold time.Duration, replies str
 
 // AckReplies marks the replies to the requests in ids as seen, once the
 // agent has been shown them. The relay ignores ids that are not this
-// agent's own requests. An empty ids makes no call.
-func (r *Relay) AckReplies(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+// agent's own requests. Generation acknowledgements only mark the matching
+// reply seen. Empty ids and acks make no call.
+func (r *Relay) AckReplies(ctx context.Context, ids []string, acks ...envelope.ReplyAck) error {
+	if len(ids) == 0 && len(acks) == 0 {
 		return nil
 	}
-	return r.call(ctx, r.api, "POST", "/v1/replies/ack", map[string][]string{"ids": ids}, nil)
+	return r.call(ctx, r.api, "POST", "/v1/replies/ack", map[string]any{"ids": ids, "acks": acks}, nil)
 }
 
 // Peek waits up to hold for requests or unseen replies without taking

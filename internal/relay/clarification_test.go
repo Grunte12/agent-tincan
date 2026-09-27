@@ -92,3 +92,39 @@ func TestClarificationHTTPGuardsAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGenerationAckHTTP(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := h.send(grokAddr, "muse", "dinner")
+	base := "/v1/requests/" + req.ID
+	h.do(museAddr, "POST", base+"/claim", "", http.StatusOK, nil)
+	h.do(museAddr, "POST", base+"/reply", `{"status":"needs_input","body":"where?"}`, http.StatusOK, nil)
+	var in struct {
+		Replies []envelope.Result `json:"replies"`
+	}
+	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &in)
+	if len(in.Replies) != 1 || in.Replies[0].Reply.Generation == 0 {
+		t.Fatalf("poll = %+v", in)
+	}
+	old := in.Replies[0].Reply.Generation
+	h.do(grokAddr, "POST", base+"/answer", `{"body":"here"}`, http.StatusOK, nil)
+	h.do(museAddr, "POST", base+"/claim", "", http.StatusOK, nil)
+	h.do(museAddr, "POST", base+"/reply", `{"body":"booked"}`, http.StatusOK, nil)
+	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &in)
+	current := in.Replies[0].Reply.Generation
+	legacy := h.send(grokAddr, "muse", "legacy request")
+	h.answer(museAddr, legacy, "done")
+	for _, tc := range []struct {
+		generation int64
+		want       int
+	}{{old, 1}, {current, 0}} {
+		raw, err := json.Marshal(map[string]any{"ids": []string{legacy.ID}, "acks": []envelope.ReplyAck{{ID: req.ID, Generation: tc.generation}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.do(grokAddr, "POST", "/v1/replies/ack", string(raw), http.StatusNoContent, nil)
+		if n := h.srv.UnseenReplies("grokbot"); n != tc.want {
+			t.Fatalf("unseen = %d, want %d", n, tc.want)
+		}
+	}
+}

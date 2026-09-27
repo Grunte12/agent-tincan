@@ -99,8 +99,15 @@ type Pending struct {
 	From string `json:"from"`
 }
 
+// ReplyAck identifies a specific reply generation for acknowledgement.
+type ReplyAck struct {
+	ID         string `json:"id"`
+	Generation int64  `json:"generation"`
+}
+
 // Reply is the target's answer to a request.
 type Reply struct {
+	Generation  int64        `json:"generation"`
 	RequestID   string       `json:"request_id,omitempty"`
 	From        string       `json:"from,omitempty"`
 	Status      Status       `json:"status,omitempty"`

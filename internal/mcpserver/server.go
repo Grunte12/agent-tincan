@@ -51,7 +51,7 @@ type Backend interface {
 	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
-	AckReplies(ctx context.Context, ids []string) error
+	AckReplies(ctx context.Context, ids []string, acks ...envelope.ReplyAck) error
 	Claim(ctx context.Context, id string) (envelope.Request, error)
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
 	Cancel(ctx context.Context, id string) error
@@ -254,7 +254,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			res, _, _ := f.result(ctx, out, atts)
 			// Replies count as seen only once the result is built for the
 			// agent; a poll that never gets this far leaves them unseen.
-			if err := b.AckReplies(ctx, inbox.ReplyIDs()); err != nil {
+			if err := b.AckReplies(ctx, nil, inbox.ReplyAcks()...); err != nil {
 				res.Content = append(res.Content, &mcp.TextContent{Text: fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)})
 			}
 			return res, nil, nil

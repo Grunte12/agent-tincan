@@ -57,7 +57,7 @@ const ParentPreviewChars = 1000
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(args, MaxUnseenReplies)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments,
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments, q.reply_generation,
 		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), COALESCE(substr(par.body, 1, ?), ''), COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
 		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
@@ -74,7 +74,7 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 		var repCreated int64
 		var par envelope.Parent
 		var parStatus, repAtts string
-		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &repAtts, &par.ID, &par.From, &par.Body, &parStatus}})
+		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &repAtts, &rep.Generation, &par.ID, &par.From, &par.Body, &parStatus}})
 		if err != nil {
 			return nil, err
 		}
@@ -122,8 +122,15 @@ func (s *Store) AgentsWithUnseenReplies(ctx context.Context) ([]string, error) {
 }
 
 // MarkRepliesSeen records that agent has seen the replies to the requests in
-// ids. Ids agent did not send, or that have no reply yet, are left alone.
-func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string) error {
+// ids, or to the matching generations in acks. Ids agent did not send,
+// or that have no reply yet, are left alone.
+func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string, acks ...envelope.ReplyAck) error {
+	for _, ack := range acks {
+		_, err := s.db.ExecContext(ctx, `UPDATE requests SET reply_seen_at = ? WHERE from_agent = ? AND id = ? AND reply_generation = ? AND reply_seen_at = 0 AND `+replyStatusIn, append([]any{s.now().UnixMilli(), agent, ack.ID, ack.Generation}, replyStatuses...)...)
+		if err != nil {
+			return err
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}

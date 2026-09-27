@@ -601,7 +601,7 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0, reply_generation = reply_generation + 1
 		WHERE id = ? AND status IN (?, ?, ?)`,
 		string(rep.Status), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
@@ -610,6 +610,9 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return envelope.Reply{}, ErrWrongState
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT reply_generation FROM requests WHERE id = ?`, id).Scan(&rep.Generation); err != nil {
+		return envelope.Reply{}, err
 	}
 	rep.RequestID, rep.From, rep.CreatedAt = id, agent, now.UTC().Truncate(time.Millisecond)
 	var atts string
@@ -641,7 +644,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 		return Result{}, err
 	}
 	if rep != nil && req.From == agent {
-		if err := s.MarkRepliesSeen(ctx, agent, []string{id}); err != nil {
+		if err := s.MarkRepliesSeen(ctx, agent, nil, envelope.ReplyAck{ID: id, Generation: rep.Generation}); err != nil {
 			return Result{}, err
 		}
 	}
@@ -653,9 +656,9 @@ func (s *Store) replyFor(ctx context.Context, id string) (*envelope.Reply, error
 	var rep envelope.Reply
 	var created int64
 	var st, atts string
-	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at, attachments FROM replies WHERE request_id = ?
+	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at, attachments, (SELECT reply_generation FROM requests WHERE id = request_id) FROM replies WHERE request_id = ?
 		AND (status != 'needs_input' OR EXISTS (SELECT 1 FROM requests WHERE id = request_id AND status = 'needs_input'))`, id).
-		Scan(&rep.From, &st, &rep.Body, &created, &atts)
+		Scan(&rep.From, &st, &rep.Body, &created, &atts, &rep.Generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

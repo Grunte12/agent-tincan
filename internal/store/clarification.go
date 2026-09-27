@@ -10,6 +10,7 @@ import (
 
 func (s *Store) migrateClarification() error {
 	for _, col := range []struct{ name, definition string }{
+		{"reply_generation", "INTEGER NOT NULL DEFAULT 0"},
 		{"exchanges", "TEXT NOT NULL DEFAULT '[]'"},
 		{"lease_paused", "INTEGER NOT NULL DEFAULT 0"},
 		{"resumed", "INTEGER NOT NULL DEFAULT 0"},
@@ -55,13 +56,16 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 	if err != nil {
 		return envelope.Reply{}, err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 1, lease_until = 0, updated_at = ?, reply_seen_at = 0
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 1, lease_until = 0, updated_at = ?, reply_seen_at = 0, reply_generation = reply_generation + 1
 		WHERE id = ? AND status = ? AND expires_at > ? AND lease_until > ?`, envelope.StatusNeedsInput, string(exchanges), now.UnixMilli(), id, envelope.StatusClaimed, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return envelope.Reply{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return envelope.Reply{}, ErrWrongState
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT reply_generation FROM requests WHERE id = ?`, id).Scan(&rep.Generation); err != nil {
+		return envelope.Reply{}, err
 	}
 	rep.RequestID, rep.From, rep.CreatedAt = id, agent, now.UTC().Truncate(time.Millisecond)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at) VALUES (?, ?, ?, ?, ?)`, id, agent, rep.Status, rep.Body, now.UnixMilli()); err != nil {

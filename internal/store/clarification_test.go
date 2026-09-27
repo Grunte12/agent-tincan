@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -226,5 +227,56 @@ func TestClarificationMigrationAndRestart(t *testing.T) {
 	}
 	if req, err := s.Answer(ctx, req.ID, "asker", "Nopa"); err != nil || len(req.Exchanges) != 1 || req.Exchanges[0].Question != "where?" {
 		t.Fatalf("restart answer: %+v %v", req, err)
+	}
+}
+
+// A fixed clock ensures generations cannot alias within one millisecond.
+func TestReplyGenerationAcknowledgements(t *testing.T) {
+	for _, final := range []bool{false, true} {
+		t.Run(fmt.Sprintf("final=%t", final), func(t *testing.T) {
+			s, _ := open(t, ":memory:")
+			ctx := t.Context()
+			req := ask(t, s, "asker", "handler", "dinner")
+			reply := func(status envelope.Status) int64 {
+				t.Helper()
+				if _, err := s.Claim(ctx, req.ID, "handler", time.Minute); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.Reply(ctx, req.ID, "handler", envelope.Reply{Status: status, Body: "detail"}); err != nil {
+					t.Fatal(err)
+				}
+				in, err := s.UnseenReplies(ctx, "asker")
+				if err != nil || len(in) != 1 {
+					t.Fatalf("unseen: %+v, %v", in, err)
+				}
+				return in[0].Reply.Generation
+			}
+			old := reply(envelope.StatusNeedsInput)
+			if _, err := s.Answer(ctx, req.ID, "asker", "here"); err != nil {
+				t.Fatal(err)
+			}
+			status := envelope.StatusNeedsInput
+			if final {
+				status = envelope.StatusAnswered
+			}
+			current := reply(status)
+			if current <= old {
+				t.Fatalf("generation did not advance: %d -> %d", old, current)
+			}
+			for _, ack := range []struct {
+				agent      string
+				generation int64
+				want       int
+			}{
+				{"asker", old, 1}, {"handler", current, 1}, {"asker", current, 0},
+			} {
+				if err := s.MarkRepliesSeen(ctx, ack.agent, nil, envelope.ReplyAck{ID: req.ID, Generation: ack.generation}); err != nil {
+					t.Fatal(err)
+				}
+				if n, err := s.CountUnseenReplies(ctx, "asker"); err != nil || n != ack.want {
+					t.Fatalf("unseen = %d, %v; want %d", n, err, ack.want)
+				}
+			}
+		})
 	}
 }

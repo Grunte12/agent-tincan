@@ -102,3 +102,20 @@ func TestFormatReplyNamesClosedParent(t *testing.T) {
 		t.Fatalf("reply without parent mentions one:\n%s", got)
 	}
 }
+
+func TestClarificationReplyIncludesParent(t *testing.T) {
+	for _, status := range []envelope.Status{envelope.StatusClaimed, envelope.StatusAnswered} {
+		r := client.Result{
+			Request: envelope.Request{ID: "child", To: "muse", Body: "book dinner"},
+			Status:  envelope.StatusNeedsInput,
+			Reply:   &envelope.Reply{Body: "where?"},
+			Parent:  &envelope.Parent{ID: "parent", From: "upstream", Body: "arrange team dinner", Status: status},
+		}
+		got := client.FormatReply(r)
+		for _, want := range []string{"where?", "tincan answer child", "request parent from upstream", "arrange team dinner", string(status)} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q in %s", want, got)
+			}
+		}
+	}
+}

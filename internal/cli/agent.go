@@ -485,7 +485,7 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 	if err := writeJSON(out, doc); err != nil {
 		return err
 	}
-	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+	if err := r.AckReplies(ctx, nil, in.ReplyAcks()...); err != nil {
 		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
 	}
 	return nil
@@ -503,7 +503,7 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
 		return err
 	}
-	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+	if err := r.AckReplies(ctx, nil, in.ReplyAcks()...); err != nil {
 		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
 	}
 	return nil

@@ -621,17 +621,18 @@ func (s *Server) handleAckReplies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		IDs []string `json:"ids"`
+		IDs  []string            `json:"ids"`
+		Acks []envelope.ReplyAck `json:"acks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("body must be {\"ids\": [...]}: %w", err))
 		return
 	}
-	if len(in.IDs) > maxAckIDs {
+	if len(in.IDs)+len(in.Acks) > maxAckIDs {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("at most %d ids per ack", maxAckIDs))
 		return
 	}
-	if err := s.store.MarkRepliesSeen(r.Context(), name, in.IDs); err != nil {
+	if err := s.store.MarkRepliesSeen(r.Context(), name, in.IDs, in.Acks...); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}

@@ -55,6 +55,7 @@ func FormatReply(r Result) string {
 	var b strings.Builder
 	if r.Status == envelope.StatusNeedsInput && r.Reply != nil {
 		fmt.Fprintf(&b, "%s needs more information for your request %s: %s\nYou asked: %s\nAnswer with answer (or `tincan answer %s \"...\"`).\n", r.Request.To, r.Request.ID, r.Reply.Body, truncate(r.Request.Body, 300), r.Request.ID)
+		b.WriteString(formatParent(r.Parent))
 		b.WriteString(formatExchanges(r.Exchanges))
 		return b.String()
 	}
@@ -65,14 +66,7 @@ func FormatReply(r Result) string {
 	}
 	fmt.Fprintf(&b, "Request %s to %s: %s replied (%s).\n", r.Request.ID, r.Request.To, from, status)
 	fmt.Fprintf(&b, "You asked: %s\n", truncate(r.Request.Body, 300))
-	if p := r.Parent; p != nil {
-		fmt.Fprintf(&b, "This answers the question you asked while handling request %s from %s: %s.", p.ID, p.From, truncate(p.Body, 300))
-		if parentOpen(p.Status) {
-			fmt.Fprintf(&b, " That request is still open (status %s). When you have what you need, reply to it with `tincan reply %s \"...\"` (or the reply tool).\n", p.Status, p.ID)
-		} else {
-			fmt.Fprintf(&b, " That request is already closed (status %s), so there is nothing left to reply to.\n", p.Status)
-		}
-	}
+	b.WriteString(formatParent(r.Parent))
 	b.WriteString("Finish the work that was waiting on this reply.\n")
 	b.WriteString("---\n")
 	b.WriteString(body)
@@ -167,4 +161,17 @@ func truncate(s string, n int) string {
 		n--
 	}
 	return s[:n] + "..."
+}
+
+func formatParent(p *envelope.Parent) string {
+	var b strings.Builder
+	if p != nil {
+		fmt.Fprintf(&b, "This answers the question you asked while handling request %s from %s: %s.", p.ID, p.From, truncate(p.Body, 300))
+		if parentOpen(p.Status) {
+			fmt.Fprintf(&b, " That request is still open (status %s). When you have what you need, reply to it with `tincan reply %s \"...\"` (or the reply tool).\n", p.Status, p.ID)
+		} else {
+			fmt.Fprintf(&b, " That request is already closed (status %s), so there is nothing left to reply to.\n", p.Status)
+		}
+	}
+	return b.String()
 }
