@@ -450,6 +450,7 @@ type inboxRequestJSON struct {
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
+	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
 	Requests         []inboxRequestJSON `json:"requests"`
 	Replies          []client.Result    `json:"replies"`
 	RepliesRemaining int                `json:"replies_remaining,omitempty"`
@@ -468,6 +469,7 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 // only then acknowledges the replies, as checkInbox does.
 func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
 	doc := inboxJSON{
+		UpgradeAvailable: in.UpgradeAvailable,
 		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
 		Replies:          in.Replies,
 		RepliesRemaining: in.RepliesRemaining,
@@ -519,6 +521,7 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	if len(in.Replies) > 0 {
 		b.WriteString(wake.WaitingMessage(0, len(in.Replies)) + "\n")
 	}
+	b.WriteString(client.UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
 }
 
@@ -577,7 +580,8 @@ func waitCmd() *cobra.Command {
 		Short: "Block until a teammate's request or a reply to your own request arrives, print it, and exit",
 		Long: `Block until a request arrives, claim and print it, then exit. A reply to
 one of your own requests also ends the wait: it prints a count and leaves the
-reply for check_inbox (or "tincan inbox") to show.
+reply for check_inbox (or "tincan inbox") to show. An available relay upgrade
+also ends the wait and prints the upgrade instruction.
 
 For agents that get a new turn when a background command finishes (like
 Muse): run "tincan wait &" and the arriving request or reply wakes you. Start
@@ -615,7 +619,7 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
 		switch {
-		case err == nil && !in.Empty():
+		case err == nil && (!in.Empty() || client.Newer(in.UpgradeAvailable, client.Version)):
 			return in, nil
 		case err == nil:
 			backoff = time.Second

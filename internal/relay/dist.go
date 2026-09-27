@@ -32,7 +32,9 @@ const distDownloadTimeout = 10 * time.Minute
 
 // dist serves release files from an operator-managed directory.
 type dist struct {
-	dir string
+	dir         string
+	versionInfo os.FileInfo
+	version     string
 
 	mu   sync.Mutex
 	sums map[string]distSum // cached sha256 per file, keyed by name
@@ -75,9 +77,7 @@ func (s *Server) handleDistManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	d := s.dist
 	m := client.DistManifest{Files: []client.DistFile{}}
-	if raw, err := os.ReadFile(filepath.Join(d.dir, "VERSION")); err == nil {
-		m.Version = strings.TrimSpace(string(raw))
-	}
+	m.Version = d.release()
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -159,4 +159,35 @@ func (d *dist) sum(name string) (string, error) {
 	d.sums[name] = c
 	d.mu.Unlock()
 	return c.sum, nil
+}
+
+func (d *dist) release() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	path := filepath.Join(d.dir, "VERSION")
+	fi, err := os.Stat(path)
+	if err != nil {
+		d.versionInfo = nil
+		return ""
+	}
+	if d.versionInfo != nil && os.SameFile(fi, d.versionInfo) && fi.ModTime().Equal(d.versionInfo.ModTime()) && fi.Size() == d.versionInfo.Size() {
+		return d.version
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		d.versionInfo = nil
+		return ""
+	}
+	d.versionInfo, d.version = fi, strings.TrimSpace(string(raw))
+	return d.version
+}
+
+func (s *Server) upgradeFor(version string) string {
+	if s.dist != nil {
+		available := s.dist.release()
+		if client.Newer(available, version) {
+			return strings.TrimPrefix(available, "v")
+		}
+	}
+	return ""
 }
