@@ -11,11 +11,11 @@ import (
 // MaxUnseenReplies bounds how many unseen replies one call returns.
 const MaxUnseenReplies = 50
 
-// replyStatuses are the terminal statuses a reply sets; only these requests
-// carry a reply the asker can see.
-var replyStatuses = []any{string(envelope.StatusAnswered), string(envelope.StatusFailed), string(envelope.StatusDeclined)}
+// replyStatuses are the states that carry a reply the asker can see,
+// including an interim clarification question.
+var replyStatuses = []any{string(envelope.StatusAnswered), string(envelope.StatusFailed), string(envelope.StatusDeclined), string(envelope.StatusNeedsInput)}
 
-const replyStatusIn = `status IN (?, ?, ?)`
+const replyStatusIn = `status IN (?, ?, ?, ?)`
 
 // migrateReplySeen adds reply_seen_at to a requests table created before
 // replies were tracked as seen by the asker. Replies already stored are
@@ -82,7 +82,7 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 			return nil, err
 		}
 		rep.RequestID, rep.Status, rep.CreatedAt = req.ID, envelope.Status(repStatus), time.UnixMilli(repCreated).UTC()
-		res := envelope.Result{Request: req, Status: st, Reply: &rep}
+		res := envelope.Result{Request: req, Status: st, Reply: &rep, Exchanges: req.Exchanges}
 		if par.ID != "" {
 			par.Status = envelope.Status(parStatus)
 			res.Parent = &par

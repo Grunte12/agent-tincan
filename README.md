@@ -208,7 +208,8 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
 | `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. `--json` prints JSON. |
 | `claim` | (done by `inbox`) | Mark a delivered request as yours. `check_inbox` already does this. |
-| `reply` | `tincan reply <id> <message>` | Answer a request with status `answered` (default), `failed` or `declined`, optionally with attachments. |
+| `reply` | `tincan reply <id> <message>` | Answer with status `answered` (default), `failed` or `declined`, optionally with attachments. Use status `needs_input` (`--needs-input`) to ask a clarifying question. |
+| `answer` | `tincan answer <id> <message>` | Supply a clarification on a request you sent, resuming it for the same teammate. |
 | `cancel` | `tincan cancel <id>` | Withdraw a request nobody has picked up yet. |
 | `list_agents` | `tincan agents` | The roster: online or not, wake method, kind, when each agent last called the relay, and which tincan build each runs. |
 | `trace` | `tincan trace [trace-id]` | Show a request chain step by step. Agents see chains they took part in; admins see every chain. |
@@ -231,6 +232,19 @@ Two more CLI commands keep an agent awake without a person: `tincan wait` and `t
 A request carries a target, a body (up to 256 KB), an optional kind (`ask` or `notify`), and optional attachments. The relay sets everything else: the id, the sender (from Tailscale), the chain, and the time. A reply carries a status and a body (up to 256 KB).
 
 A request moves through `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled` or `expired`. A claimed request whose 30 minute lease runs out goes back to `queued`. Unanswered requests expire after 24 hours. The wire format is in [docs/protocol.md](docs/protocol.md).
+
+If a teammate needs a detail only the asker has, it can reply with `needs_input`. The request stays open, its lease pauses, and the question reaches the asker through the usual reply inbox and wake. For example:
+
+```sh
+# Muse, after claiming the dinner request:
+tincan reply <id> --needs-input "Which restaurant and how many people?"
+# The original asker:
+tincan answer <id> "Nopa, 2 people"
+```
+
+The same request returns to Muse's inbox marked `resumed`, with its original body and the question and answer. Muse claims it and replies normally when done. The original 24-hour expiry keeps running. Each request allows three clarification rounds, with 16 KB per question or answer and no clarification attachments. MCP uses `reply` with `status: needs_input`, then `answer` with `request_id` and `message`. A request waiting for input is still `pending` in CLI JSON output (exit 2).
+
+The relay must advertise clarification support; new clients refuse these operations against an older relay. An older asker may display the question under the unfamiliar `needs_input` status: upgrade it to use `answer`.
 
 ### Chains and loop protection
 

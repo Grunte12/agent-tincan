@@ -9,6 +9,7 @@
 - Each sender is rate-limited (30 new requests per minute by default).
 - Every send, delivery, claim, reply, rejection, wake, join, rebind, and removal is written to an append-only, hash-chained log. `tincan audit-verify` detects edits.
 - Wake nudges carry only a count and an instruction, never request text.
+- Clarification does not add a trust boundary: only a request's claimed target can ask for input, and only its original sender can answer. Questions and answers stay on the same request, with the same chain and hop rules. They are bodies like other messages: readable by the relay, absent from wake messages, and represented only by byte lengths in clarification audit details.
 
 ## Rebuilt machines
 

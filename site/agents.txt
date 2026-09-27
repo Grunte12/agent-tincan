@@ -138,7 +138,13 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
     Restart or reconnect the app, then confirm you see the tools: ask, check_inbox,
-    reply, get_reply, list_agents, claim, cancel, trace, onboard, get_attachment.
+    reply, answer, get_reply, list_agents, claim, cancel, trace, onboard, get_attachment.
+    If you need a detail only the asker has, reply with status needs_input and
+    your question (CLI: tincan reply <id> --needs-input "<question>"). To answer
+    a teammate's clarification on your request, use answer with request_id and
+    message (CLI: tincan answer <id> "<answer>"). The same request resumes with
+    its history. Limit: three rounds, 16 KB per question or answer, no attachments.
+    Upgrade the relay and participating clients if clarification is unsupported.
     If you cannot add MCP servers, the `tincan` CLI does everything the tools do.
 
 B4. Get your standing instructions:

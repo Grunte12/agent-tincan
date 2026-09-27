@@ -17,6 +17,8 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
+| `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
+| `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
 
 ## Reply
 
@@ -24,7 +26,7 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 |---|---|---|
 | `request_id` | relay | The request this answers. |
 | `from` | relay | Replying agent, resolved from the tailnet node. |
-| `status` | client | `answered` (default), `failed`, or `declined`. |
+| `status` | client | `answered` (default), `failed`, `declined`, or non-terminal `needs_input`. |
 | `body` | client | The reply text. Capped at 256 KB. |
 | `attachments` | client names ids, relay fills the rest | As on a request. |
 | `created_at` | relay | When the relay stored it. |
@@ -32,6 +34,20 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 ## Request states
 
 `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled`, or `expired`. A claimed request whose lease expires goes back to `queued`.
+
+### Clarifying a request
+
+For an `ask` with a live claim, its target may `POST /v1/requests/{id}/reply` with `{"status":"needs_input","body":"Which restaurant?"}`. Only the target that claimed the request may ask; a queued, delivered, expired-lease, or already waiting request returns 409. A different agent returns 403. Notifies cannot request input.
+
+The response is a normal reply with status `needs_input` (200). This status is non-terminal. The relay appends a clarification exchange, pauses the claim lease, and marks the question unseen. The question ends a held get-reply wait and follows the same poll, acknowledgement, and reply-wake path as a final reply. While waiting, no lease can requeue it; the original request expiry still runs (24 hours by default), and removing either participant cancels it.
+
+Only the original sender may `POST /v1/requests/{id}/answer` with `{"body":"Nopa, 2 people"}`. A different agent returns 403. The request must still be `needs_input` and unexpired, otherwise 409. The relay records the answer, removes the interim reply, and returns the request (200), now `queued` with `resumed: true`. It wakes the same target through the request-wake path. The target polls and claims normally, receiving the original body and full exchange history. The id, target, parent, trace, chain, hop, creation time, and expiry are unchanged. A duplicate answer returns 409.
+
+Each question and answer must contain non-whitespace text and is capped at 16,384 UTF-8 bytes (400 for empty or oversized input). Clarifications carry text only; attachments on a `needs_input` reply return 400. At most three question/answer rounds are allowed per request; a fourth question returns 409, leaving the claim available for a final reply. A final reply uses the existing reply statuses and limits.
+
+Get-reply, unseen replies, and trace steps include an optional top-level `exchanges` list as well as the history on their `request`. On expiry or cancellation, history is retained but the question is no longer returned as a live reply or counted as unseen. Audit events `needs_input` and `answered_input` record only question or answer byte lengths in their detail, never the text. Wake messages contain counts and instructions only.
+
+Relays advertise `"needs_input": true` in `GET /v1/capabilities`. New clients refuse to send `needs_input` or an answer when this flag is missing or false (including a 404 capabilities endpoint), with an instruction to upgrade the relay. Existing ordinary replies work against older relays. An older asker can read the question as the reply body with an unfamiliar `needs_input` status; upgrade that client to answer using `tincan answer <id> "text"` or MCP `answer`. Older handlers never produce the new status. All new fields are optional.
 
 ## Replies the asker has not seen
 

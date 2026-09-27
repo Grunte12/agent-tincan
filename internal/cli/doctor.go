@@ -244,7 +244,7 @@ func probeCheck(ctx context.Context, exe string, framed, joined bool) check {
 	if len(missing) > 0 {
 		return check{name, "fail", fmt.Sprintf("tincan mcp listed %d tools, missing %s", len(tools), strings.Join(missing, ", ")), "Run tincan upgrade."}
 	}
-	return check{name, "ok", fmt.Sprintf("%s mcp lists all %d tools", exe, len(tools)), ""}
+	return check{name, "ok", fmt.Sprintf("%s mcp lists all %d tools", exe, len(mcpserver.ToolNames)), ""}
 }
 
 // probeMCP runs initialize and tools/list against exe mcp and returns the

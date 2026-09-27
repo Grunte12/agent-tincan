@@ -342,9 +342,7 @@ func (r *Relay) Claim(ctx context.Context, id string) (envelope.Request, error) 
 
 // Reply answers a request.
 func (r *Relay) Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error) {
-	var out envelope.Reply
-	err := r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/reply", map[string]any{"body": body, "status": status}, &out)
-	return out, err
+	return r.ReplyAttached(ctx, id, body, status, nil)
 }
 
 // Cancel withdraws a request this agent sent.

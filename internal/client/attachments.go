@@ -33,6 +33,7 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // Capabilities is what a relay says it supports, from GET /v1/capabilities.
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
+	NeedsInput         bool  `json:"needs_input,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
@@ -193,6 +194,17 @@ func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attach
 
 // ReplyAttached is Reply with attachments; see SendAttached.
 func (r *Relay) ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error) {
+	if status == envelope.StatusNeedsInput {
+		if err := r.requireNeedsInput(ctx); err != nil {
+			return envelope.Reply{}, err
+		}
+		if err := envelope.ValidateInput(body); err != nil {
+			return envelope.Reply{}, err
+		}
+		if len(attachments) != 0 {
+			return envelope.Reply{}, errors.New("clarifications do not accept attachments")
+		}
+	}
 	in := map[string]any{"body": body, "status": status}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
 		return envelope.Reply{}, err

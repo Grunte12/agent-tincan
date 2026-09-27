@@ -24,14 +24,20 @@ func FormatRequest(req envelope.Request) string {
 	b.WriteString(req.Body)
 	b.WriteString("\n---\n")
 	b.WriteString(FormatAttachments(req.Attachments))
+	if req.Resumed {
+		b.WriteString("Resumed with clarification from the asker.\n")
+	}
+	b.WriteString(formatExchanges(req.Exchanges))
 	return b.String()
 }
 
 // FormatResult renders the state of a request this agent sent.
 func FormatResult(r Result) string {
 	switch {
+	case r.Status == envelope.StatusNeedsInput:
+		return FormatReply(r)
 	case r.Reply != nil:
-		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body) + FormatAttachments(r.Reply.Attachments)
+		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body) + FormatAttachments(r.Reply.Attachments) + formatExchanges(r.Exchanges)
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
@@ -47,6 +53,11 @@ const RepliesHeading = "Replies to your requests:\n"
 // asked, since a fresh session may not remember.
 func FormatReply(r Result) string {
 	var b strings.Builder
+	if r.Status == envelope.StatusNeedsInput && r.Reply != nil {
+		fmt.Fprintf(&b, "%s needs more information for your request %s: %s\nYou asked: %s\nAnswer with answer (or `tincan answer %s \"...\"`).\n", r.Request.To, r.Request.ID, r.Reply.Body, truncate(r.Request.Body, 300), r.Request.ID)
+		b.WriteString(formatExchanges(r.Exchanges))
+		return b.String()
+	}
 	from, status, body := r.Request.To, r.Status, ""
 	var atts []envelope.Attachment
 	if r.Reply != nil {
@@ -67,6 +78,18 @@ func FormatReply(r Result) string {
 	b.WriteString(body)
 	b.WriteString("\n---\n")
 	b.WriteString(FormatAttachments(atts))
+	b.WriteString(formatExchanges(r.Exchanges))
+	return b.String()
+}
+
+func formatExchanges(exchanges []envelope.Exchange) string {
+	var b strings.Builder
+	for i, ex := range exchanges {
+		fmt.Fprintf(&b, "Clarification %d:\nQuestion: %s\n", i+1, ex.Question)
+		if ex.Answer != "" {
+			fmt.Fprintf(&b, "Answer: %s\n", ex.Answer)
+		}
+	}
 	return b.String()
 }
 
@@ -87,7 +110,7 @@ func FormatAttachments(atts []envelope.Attachment) string {
 
 // parentOpen reports whether a parent request still expects a reply.
 func parentOpen(s envelope.Status) bool {
-	return s == envelope.StatusQueued || s == envelope.StatusDelivered || s == envelope.StatusClaimed
+	return s == envelope.StatusQueued || s == envelope.StatusDelivered || s == envelope.StatusClaimed || s == envelope.StatusNeedsInput
 }
 
 // Claimer claims a delivered request for this agent.

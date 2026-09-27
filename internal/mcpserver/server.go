@@ -28,6 +28,7 @@ const MaxWait = client.MaxInlineWait
 const Instructions = `You are one agent in the owner's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from the owner, then call reply.
+- If you cannot proceed without a detail only the asker has, reply with status needs_input and your question rather than guessing. When a teammate needs input on your request, use answer to supply it. The same request resumes with the exchange attached.
 - list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, and which tincan build each runs.
 ` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
@@ -85,7 +86,17 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
+
+// Answerer supplies clarification input through backends that support it.
+type Answerer interface {
+	Answer(context.Context, string, string) (envelope.Request, error)
+}
+
+type answerIn struct {
+	RequestID string `json:"request_id" jsonschema:"the request you sent that needs input"`
+	Message   string `json:"message" jsonschema:"your answer to the clarification question (up to 16 KB)"`
+}
 
 type askIn struct {
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
@@ -112,7 +123,7 @@ type inboxIn struct {
 type replyIn struct {
 	RequestID string   `json:"request_id" jsonschema:"the request you are answering"`
 	Message   string   `json:"message" jsonschema:"your answer or result"`
-	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, or declined"`
+	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, declined, or needs_input (a clarification question, up to 16 KB, no attachments)"`
 	Attach    []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
@@ -260,6 +271,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 
 	mcp.AddTool(s, &mcp.Tool{Name: "reply", Description: "Answer a request from a teammate."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, any, error) {
+			if envelope.Status(in.Status) == envelope.StatusNeedsInput && len(in.Attach) > 0 {
+				return fail(errors.New("clarifications do not accept attachments"))
+			}
 			var rep envelope.Reply
 			var err error
 			if len(in.Attach) > 0 {
@@ -274,6 +288,18 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return fail(err)
 			}
 			return text(fmt.Sprintf("Replied to %s (%s).", in.RequestID, rep.Status))
+		})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "answer", Description: "Supply input requested by a teammate on a request you sent; resumes the same request."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in answerIn) (*mcp.CallToolResult, any, error) {
+			a, ok := b.(Answerer)
+			if !ok {
+				return fail(client.ErrNeedsInputUnsupported)
+			}
+			if _, err := a.Answer(ctx, in.RequestID, in.Message); err != nil {
+				return fail(err)
+			}
+			return text("Answered clarification; resumed " + in.RequestID + ".")
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "cancel", Description: "Withdraw a request you sent that nobody has picked up yet."},

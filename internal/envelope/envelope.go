@@ -15,6 +15,12 @@ import (
 // DefaultMaxBody caps a request or reply body.
 const DefaultMaxBody = 256 << 10
 
+// MaxInputBody caps each clarification question and answer in bytes.
+const MaxInputBody = 16 << 10
+
+// MaxExchanges caps clarification rounds per request.
+const MaxExchanges = 3
+
 // MaxAttachments caps how many attachments one request or reply carries.
 const MaxAttachments = 8
 
@@ -51,14 +57,15 @@ const (
 type Status string
 
 const (
-	StatusQueued    Status = "queued"
-	StatusDelivered Status = "delivered"
-	StatusClaimed   Status = "claimed"
-	StatusAnswered  Status = "answered"
-	StatusFailed    Status = "failed"
-	StatusDeclined  Status = "declined"
-	StatusCancelled Status = "cancelled"
-	StatusExpired   Status = "expired"
+	StatusQueued     Status = "queued"
+	StatusDelivered  Status = "delivered"
+	StatusClaimed    Status = "claimed"
+	StatusNeedsInput Status = "needs_input"
+	StatusAnswered   Status = "answered"
+	StatusFailed     Status = "failed"
+	StatusDeclined   Status = "declined"
+	StatusCancelled  Status = "cancelled"
+	StatusExpired    Status = "expired"
 )
 
 // Terminal reports whether s is a final reply status an agent may set.
@@ -68,15 +75,17 @@ func (s Status) Terminal() bool {
 
 // Request is one agent asking another to do something.
 type Request struct {
-	ID       string   `json:"id,omitempty"`
-	From     string   `json:"from,omitempty"`
-	To       string   `json:"to"`
-	ParentID string   `json:"parent_id,omitempty"`
-	TraceID  string   `json:"trace_id,omitempty"`
-	Hop      int      `json:"hop,omitempty"`
-	Chain    []string `json:"chain,omitempty"`
-	Kind     Kind     `json:"kind,omitempty"`
-	Body     string   `json:"body"`
+	Exchanges []Exchange `json:"exchanges,omitempty"`
+	Resumed   bool       `json:"resumed,omitempty"`
+	ID        string     `json:"id,omitempty"`
+	From      string     `json:"from,omitempty"`
+	To        string     `json:"to"`
+	ParentID  string     `json:"parent_id,omitempty"`
+	TraceID   string     `json:"trace_id,omitempty"`
+	Hop       int        `json:"hop,omitempty"`
+	Chain     []string   `json:"chain,omitempty"`
+	Kind      Kind       `json:"kind,omitempty"`
+	Body      string     `json:"body"`
 	// Attachments are files stored on the relay. A relay that predates
 	// attachments ignores the field, so clients send it only when the relay
 	// advertises support.
@@ -103,13 +112,32 @@ type Reply struct {
 // Result is a request with its current status and reply, if any. The relay
 // returns it for get-reply and for each step of a trace.
 type Result struct {
-	Request Request `json:"request"`
-	Status  Status  `json:"status"`
-	Reply   *Reply  `json:"reply,omitempty"`
+	Exchanges []Exchange `json:"exchanges,omitempty"`
+	Request   Request    `json:"request"`
+	Status    Status     `json:"status"`
+	Reply     *Reply     `json:"reply,omitempty"`
 	// Parent is set on an unseen reply whose request was asked while the
 	// asker was handling another request addressed to it, so a fresh session
 	// woken by the reply knows which request to finish.
 	Parent *Parent `json:"parent,omitempty"`
+}
+
+// Exchange is one clarification round; At is when the question was asked.
+type Exchange struct {
+	Question string    `json:"question"`
+	Answer   string    `json:"answer,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+// ValidateInput checks a clarification body before it is stored.
+func ValidateInput(body string) error {
+	if strings.TrimSpace(body) == "" {
+		return errors.New("clarification body is required")
+	}
+	if len(body) > MaxInputBody {
+		return ErrBodyTooLarge
+	}
+	return nil
 }
 
 // Parent summarizes the request an ask was made while handling: who sent
@@ -212,8 +240,15 @@ func ParseReply(raw []byte, maxBody int) (Reply, error) {
 	if in.Status == "" {
 		in.Status = StatusAnswered
 	}
-	if !in.Status.Terminal() {
-		return Reply{}, fmt.Errorf("reply: status %q is not answered, failed, or declined", in.Status)
+	if in.Status == StatusNeedsInput {
+		if err := ValidateInput(in.Body); err != nil {
+			return Reply{}, err
+		}
+		if len(in.Attachments) != 0 {
+			return Reply{}, errors.New("clarifications do not accept attachments")
+		}
+	} else if !in.Status.Terminal() {
+		return Reply{}, fmt.Errorf("reply: status %q is not answered, failed, declined, or needs_input", in.Status)
 	}
 	atts, err := attachmentIDs(in.Attachments)
 	if err != nil {

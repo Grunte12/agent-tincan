@@ -204,6 +204,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/replies/ack", s.handleAckReplies)
 	mux.HandleFunc("POST /v1/requests/{id}/claim", s.handleClaim)
 	mux.HandleFunc("POST /v1/requests/{id}/reply", s.handleReply)
+	mux.HandleFunc("POST /v1/requests/{id}/answer", s.handleAnswer)
 	mux.HandleFunc("GET /v1/requests/{id}", s.handleGet)
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
@@ -583,6 +584,12 @@ func (s *Server) unseenReplies(ctx context.Context, agent string) ([]envelope.Re
 	size := 0
 	for i, rep := range reps {
 		n := len(rep.Request.Body)
+		for _, ex := range rep.Exchanges {
+			n += len(ex.Question) + len(ex.Answer)
+		}
+		for _, ex := range rep.Request.Exchanges {
+			n += len(ex.Question) + len(ex.Answer)
+		}
 		if rep.Reply != nil {
 			n += len(rep.Reply.Body)
 		}
@@ -683,7 +690,13 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.notify(requestKey(id))
-	s.record(r.Context(), "replied", id, "", name, store.DetailJSON(map[string]any{"status": rep.Status}))
+	event := "replied"
+	detail := map[string]any{"status": rep.Status}
+	if rep.Status == envelope.StatusNeedsInput {
+		event = "needs_input"
+		detail = map[string]any{"question_bytes": len(rep.Body)}
+	}
+	s.record(r.Context(), event, id, "", name, store.DetailJSON(detail))
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
 	if req, _, err := s.store.Request(r.Context(), id); err == nil {
@@ -713,7 +726,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, statusFor(err), err)
 			return
 		}
-		if res.Done() || wait == 0 {
+		if res.Done() || res.Status == envelope.StatusNeedsInput || wait == 0 {
 			writeJSON(w, http.StatusOK, res)
 			return
 		}

@@ -68,7 +68,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -524,12 +524,19 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 
 func replyCmd() *cobra.Command {
 	var status string
+	var needsInput bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "reply <request-id> <message...>",
 		Short: "Answer a request from a teammate",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if needsInput {
+				status = string(envelope.StatusNeedsInput)
+			}
+			if status == string(envelope.StatusNeedsInput) && len(attach) > 0 {
+				return errors.New("clarifications do not accept attachments")
+			}
 			r, _, err := connect()
 			if err != nil {
 				return err
@@ -546,9 +553,30 @@ func replyCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "answered", "answered, failed, or declined")
+	cmd.Flags().StringVar(&status, "status", "answered", "answered, failed, declined, or needs_input")
+	cmd.Flags().BoolVar(&needsInput, "needs-input", false, "ask the sender a clarifying question (up to 16 KB)")
+	cmd.MarkFlagsMutuallyExclusive("status", "needs-input")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	return cmd
+}
+
+func answerCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "answer <request-id> <message...>",
+		Short: "Answer a teammate's clarification question on your request",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, _, err := connect()
+			if err != nil {
+				return err
+			}
+			if _, err := r.Answer(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
+				return err
+			}
+			cmd.Printf("Answered clarification; resumed %s.\n", args[0])
+			return nil
+		},
+	}
 }
 
 func cancelCmd() *cobra.Command {

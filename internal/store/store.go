@@ -139,6 +139,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate attachments: %w", err)
 	}
+	if err := s.migrateClarification(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate clarification: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
@@ -578,8 +582,8 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 	return req, err
 }
 
-// Reply stores the target's answer and closes the request. The reply starts
-// unseen by the asker.
+// Reply stores the target's reply, closing the request or pausing its lease
+// for needs_input. The reply starts unseen by the asker.
 func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
@@ -587,6 +591,9 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 	}
 	if req.To != agent {
 		return envelope.Reply{}, ErrForbidden
+	}
+	if rep.Status == envelope.StatusNeedsInput {
+		return s.needsInput(ctx, id, agent, rep)
 	}
 	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -638,7 +645,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{Request: req, Status: status, Reply: rep}, nil
+	return Result{Request: req, Status: status, Reply: rep, Exchanges: req.Exchanges}, nil
 }
 
 // replyFor returns the stored reply for a request, or nil if none yet.
@@ -646,7 +653,8 @@ func (s *Store) replyFor(ctx context.Context, id string) (*envelope.Reply, error
 	var rep envelope.Reply
 	var created int64
 	var st, atts string
-	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at, attachments FROM replies WHERE request_id = ?`, id).
+	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at, attachments FROM replies WHERE request_id = ?
+		AND (status != 'needs_input' OR EXISTS (SELECT 1 FROM requests WHERE id = request_id AND status = 'needs_input'))`, id).
 		Scan(&rep.From, &st, &rep.Body, &created, &atts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -686,9 +694,9 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 // the cancelled ids.
 func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?) RETURNING id`,
+		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?) RETURNING id`,
 		string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput))
 	if err != nil {
 		return nil, err
 	}
@@ -739,14 +747,14 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	// back to the queue, where it would only wake the agent for a request
 	// Deliver rejects.
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (status IN (?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
+		WHERE (status IN (?, ?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
 		RETURNING id, trace_id, from_agent, to_agent, status`,
-		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered),
+		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusNeedsInput),
 		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
+		WHERE status IN (?, ?) AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
 		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
 		return nil, err
 	}
@@ -777,18 +785,21 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
-	var chain, kind, status, atts string
+	var chain, kind, status, atts, exchanges string
 	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
+		return envelope.Request{}, "", err
+	}
+	if err := json.Unmarshal([]byte(exchanges), &r.Exchanges); err != nil {
 		return envelope.Request{}, "", err
 	}
 	var err error
