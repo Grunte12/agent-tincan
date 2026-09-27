@@ -765,6 +765,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		// The in-memory times still answer for this run of the relay.
 		log.Printf("agents last seen: %v", err)
 	}
+	stats, err := s.store.QueueStats(r.Context())
+	if err != nil {
+		log.Printf("agents queue stats: %v", err)
+	}
 	now := s.cfg.Now()
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
@@ -775,6 +779,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 			active = p
 		}
 		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, Version: s.versions[a.Name]}
+		stat := stats[a.Name]
+		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
 		if s.wake != nil {
 			info.Wake = s.wake.WakeMethod(a.Name)
 		}

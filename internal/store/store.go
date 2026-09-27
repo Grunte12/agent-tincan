@@ -531,6 +531,44 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+type QueueStat struct {
+	Queued       int
+	OldestQueued time.Time
+	Claimed      int
+}
+
+func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
+	now := s.now().UnixMilli()
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
+		AND (status != 'claimed' OR lease_until > ?) GROUP BY to_agent, status`, now, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]QueueStat)
+	for rows.Next() {
+		var agent, status string
+		var count int
+		var oldest int64
+		if err := rows.Scan(&agent, &status, &count, &oldest); err != nil {
+			return nil, err
+		}
+		stat := out[agent]
+		if status == string(envelope.StatusClaimed) {
+			stat.Claimed += count
+		} else {
+			stat.Queued += count
+			at := time.UnixMilli(oldest)
+			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
+				stat.OldestQueued = at
+			}
+		}
+		out[agent] = stat
+	}
+	return out, rows.Err()
+}
+
 // PendingRequests names up to limit of agent's queued requests, oldest
 // first, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {

@@ -53,7 +53,10 @@ type AgentInfo struct {
 	// Version is the tincan build the agent last called the relay with,
 	// empty when it has not called since the relay learned to record it,
 	// or runs a client that predates the version header.
-	Version string `json:"version,omitempty"`
+	Version      string    `json:"version,omitempty"`
+	Queued       int       `json:"queued,omitempty"`
+	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
+	Claimed      int       `json:"claimed,omitempty"`
 }
 
 // Roster is the relay's agent list with what the relay says about itself.
@@ -94,6 +97,28 @@ func (a AgentInfo) LastSeen(now time.Time) string {
 		return fmt.Sprintf("last seen %dh ago", int(d/time.Hour))
 	}
 	return fmt.Sprintf("last seen %dd ago", int(d/(24*time.Hour)))
+}
+
+func (a AgentInfo) Backlog(now time.Time) string {
+	var parts []string
+	if a.Queued > 0 {
+		queued := fmt.Sprintf("%d queued", a.Queued)
+		if !a.OldestQueued.IsZero() {
+			d := max(now.Sub(a.OldestQueued), 0)
+			age := fmt.Sprintf("%dm", int(d/time.Minute))
+			if d >= 48*time.Hour {
+				age = fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+			} else if d >= time.Hour {
+				age = fmt.Sprintf("%dh", int(d/time.Hour))
+			}
+			queued += " (oldest " + age + ")"
+		}
+		parts = append(parts, queued)
+	}
+	if a.Claimed > 0 {
+		parts = append(parts, fmt.Sprintf("%d claimed", a.Claimed))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // DistManifest lists the release binaries a relay serves for tincan upgrade.
