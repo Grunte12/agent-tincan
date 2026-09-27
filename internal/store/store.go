@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS requests (
   attachments TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
+-- QueueStats groups open requests across every agent; leading with status
+-- keeps it to the open rows instead of the whole request history.
+CREATE INDEX IF NOT EXISTS requests_status_to ON requests(status, to_agent);
 CREATE TABLE IF NOT EXISTS replies (
   request_id TEXT PRIMARY KEY REFERENCES requests(id),
   from_agent TEXT NOT NULL,
@@ -531,12 +534,16 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+// QueueStat is one agent's backlog: requests waiting to be claimed, the
+// creation time of the oldest of them, and claims whose lease is still live.
 type QueueStat struct {
 	Queued       int
 	OldestQueued time.Time
 	Claimed      int
 }
 
+// QueueStats returns every agent's backlog in one grouped query. Expired and
+// finished requests, and claims whose lease ran out, are not counted.
 func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	now := s.now().UnixMilli()
 	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)

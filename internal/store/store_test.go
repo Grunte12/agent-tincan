@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -643,5 +644,28 @@ func TestQueueStats(t *testing.T) {
 	}
 	if len(stats) != 2 || stats["instinct"].Queued != 1 {
 		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestQueueStatsUsesStatusIndex(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > 0
+		AND (status != 'claimed' OR lease_until > 0) GROUP BY to_agent, status`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "requests_status_to") {
+		t.Fatalf("plan does not use requests_status_to:\n%s", strings.Join(plan, "\n"))
 	}
 }
