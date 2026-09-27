@@ -33,8 +33,15 @@ type grokBrowser struct {
 	// fetch with that code.
 	image    []byte
 	imageErr string
-	// streamErr is put in every answer's streamErrors.
-	streamErr string
+	// images is how many images each answer generates (default 1 when
+	// image is set); imageErrSuffix fails only the fetches whose file id
+	// ends with it.
+	images         int
+	imageErrSuffix string
+	// streamErr is put in every answer's streamErrors; with blankAnswer
+	// the answer carries no text (the limit took its place).
+	streamErr   string
+	blankAnswer bool
 	// sendErr fails every send with that code; detailErr every detail
 	// read.
 	sendErr, detailErr string
@@ -125,7 +132,7 @@ func (g *grokBrowser) Exchange(ctx context.Context, req NativeRequest, recv func
 		return err
 	case OpGrokFile:
 		g.files = append(g.files, req.Args)
-		if g.imageErr != "" {
+		if g.imageErr != "" && (g.imageErrSuffix == "" || strings.HasSuffix(req.Args.FileID, g.imageErrSuffix)) {
 			return fail(g.imageErr, 0)
 		}
 		for _, fr := range chunkFrames(g.image, "image/png", 1<<10) {
@@ -168,10 +175,17 @@ func (g *grokBrowser) render(id string, turns []*grokTurn) json.RawMessage {
 		default:
 			a["message"], a["partial"] = t.answer, false
 			if t.image {
-				a["generatedImageUrls"] = []string{"users/00000000-0000-4000-8000-0000000000aa/generated/" + t.answerID + "/image.png"}
+				urls := []string{}
+				for i := range max(g.images, 1) {
+					urls = append(urls, fmt.Sprintf("users/00000000-0000-4000-8000-0000000000aa/generated/%s/image%d.png", t.answerID, i))
+				}
+				a["generatedImageUrls"] = urls
 			}
 			if g.streamErr != "" {
 				a["streamErrors"] = []any{map[string]any{"message": g.streamErr}}
+			}
+			if g.blankAnswer {
+				a["message"] = ""
 			}
 		}
 		nodes = append(nodes, map[string]any{"responseId": t.answerID, "sender": "assistant", "parentResponseId": t.humanID})
@@ -256,6 +270,21 @@ func TestGrokWebImageFetchFailureAddsNote(t *testing.T) {
 	}
 }
 
+// With two generated images and one failing to download, the other is
+// attached and the reply says how many are missing.
+func TestGrokWebPartialImageFailureNote(t *testing.T) {
+	rig, g := grokRig(t)
+	g.image, g.images, g.imageErr, g.imageErrSuffix = fakePNG(100), 2, "http_error", "_1"
+	res := rig.ask(t, "grokbot", "Draw two foxes")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "Grok says: Draw two foxes") || !strings.Contains(body, "1 of the images could not be attached.") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+	if len(res.Reply.Attachments) != 1 || len(g.files) != 2 {
+		t.Fatalf("attachments %+v, file reads %+v", res.Reply.Attachments, g.files)
+	}
+}
+
 // Threading lines and per-asker conversations, with grok.com URLs.
 func TestGrokWebThreading(t *testing.T) {
 	rig, g := grokRig(t)
@@ -326,6 +355,7 @@ func TestGrokWebPlanLimitSetsGrokCooldown(t *testing.T) {
 	cd := &SiteCooldown{}
 	rig.agent.Native.Cooldown = cd
 	g.streamErr = "You have reached your usage limit. Upgrade for more."
+	g.blankAnswer = true
 	res := rig.ask(t, "grokbot", "hello")
 	body := res.Reply.Body
 	if res.Status != envelope.StatusFailed || !strings.Contains(body, "Grok is rate-limiting this account") || !strings.Contains(body, "The message was sent to Grok") || strings.Contains(body, "Grok says") {
@@ -336,6 +366,22 @@ func TestGrokWebPlanLimitSetsGrokCooldown(t *testing.T) {
 	}
 	if got := g.closed(); len(got) != 1 {
 		t.Fatalf("closes %v", got)
+	}
+}
+
+// A finished answer that also carries a limit stream error is delivered
+// as the reply: the limit is not the answer, and Grok is not held back.
+func TestGrokWebAnswerWithStrayLimitErrorIsDelivered(t *testing.T) {
+	rig, g := grokRig(t)
+	cd := &SiteCooldown{}
+	rig.agent.Native.Cooldown = cd
+	g.streamErr = "You have reached your usage limit. Upgrade for more."
+	res := rig.ask(t, "grokbot", "hello")
+	if res.Status != envelope.StatusAnswered || strings.Contains(res.Reply.Body, "rate-limiting") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if left := cd.Remaining(SourceGrok); left != 0 {
+		t.Fatalf("grok cooldown %s after a delivered answer", left)
 	}
 }
 

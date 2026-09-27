@@ -87,7 +87,7 @@ const CLAUDE = 'https://claude.ai';
 const GROK = 'https://grok.com';
 const GROK_ASSETS = 'https://assets.grok.com/';
 // grok.list reads at most GROK_MAX_PAGES pages of the conversation list.
-const GROK_MAX_PAGES = 5;
+export const GROK_MAX_PAGES = 5;
 // A grok.file id is <response id>_<index in generatedImageUrls>.
 const GROK_FILE_RE = /^([A-Za-z0-9][A-Za-z0-9-]{0,99})_(0|[1-9][0-9]?)$/;
 
@@ -483,7 +483,14 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
 
   // grokSession fails not_logged_in unless the conversation list answers
   // for a signed-in account; grok.com otherwise lets a logged-out page
-  // chat anonymously, so the send never opens a tab without it.
+  // chat anonymously, so the send never opens a tab without it. It is the
+  // first of two gates: the assumption is that grok.com refuses the list
+  // (401) without a session, but a 200 with an empty list carries no
+  // account signal of its own, so it is not taken as proof of a sign-in.
+  // The send tab's login probe (the sign-in link or /sign-in address in
+  // send.js's grok selectors) is the second gate and runs before anything
+  // is typed, so a signed-out page that still answered the list is
+  // refused there.
   async function grokSession() {
     const r = await grokJSON(`${GROK}/rest/app-chat/conversations?pageSize=1`, {});
     if (!r || !Array.isArray(r.conversations)) throw new OpError('not_logged_in', 'no grok.com session');

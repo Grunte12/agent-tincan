@@ -33,7 +33,7 @@ Reads are plain JSON requests from the extension's service worker with your cook
 
 ### Grok: grant it first
 
-grok.com is an optional site: the extension has no access to it until you grant it. Open `chrome://extensions` > Agent Tincan History > Details > Extension options and click Grant for Grok; Chrome asks for grok.com and its image host, assets.grok.com, together. Until then every grok-web request is answered with that step, and `tincan web serve --site grok` refuses to start while the extension is connected. grok.com also lets a logged-out browser chat anonymously, so before opening a tab the extension reads your conversation list; a logged-out browser fails there and never sends.
+grok.com is an optional site: the extension has no access to it until you grant it. Open `chrome://extensions` > Agent Tincan History > Details > Extension options and click Grant for Grok; Chrome asks for grok.com and its image host, assets.grok.com, together. Chrome takes the grant only from that click, so it is a step for you, not for an agent. Until then every grok-web request is answered with that step, and while the extension is connected `tincan web serve --site grok` waits for the grant, checking again every minute (see the grant reply below). grok.com also lets a logged-out browser chat anonymously, so before opening a tab the extension reads your conversation list, and the send tab then checks the page for grok.com's sign-in link or `/sign-in` address before typing; a logged-out browser fails at one of the two and never sends.
 
 ## Allowlist
 

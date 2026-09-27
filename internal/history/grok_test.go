@@ -251,13 +251,35 @@ func TestGrokNodesFinishedMarker(t *testing.T) {
 	if !nodes[1].limited {
 		t.Fatal("a rate-limit stream error is not marked limited")
 	}
-	nodes, _ = grokNodes(detail(false, "[]", `[{"code":13,"message":"internal"}]`))
-	if nodes[1].limited {
-		t.Fatal("another stream error is marked limited")
+	for _, limit := range []string{`[{"code":"RESOURCE_EXHAUSTED","message":"x"}]`, `[{"code":429}]`, `["You have reached your message limit"]`} {
+		if nodes, _ := grokNodes(detail(false, "[]", limit)); !nodes[1].limited {
+			t.Errorf("%s is not marked limited", limit)
+		}
+	}
+	// Only the decoded code and message count: limit words elsewhere in
+	// the error (a stack, a trace id) do not.
+	for _, other := range []string{`[{"code":13,"message":"internal"}]`, `[{"code":13,"message":"internal","details":"retry quota 429"}]`, `[{"code":8.5}]`} {
+		if nodes, _ := grokNodes(detail(false, "[]", other)); nodes[1].limited {
+			t.Errorf("%s is marked limited", other)
+		}
 	}
 	for _, bad := range []string{`{}`, `{"responseNodes":[]}`, `[]`} {
 		if _, err := grokNodes(json.RawMessage(bad)); err == nil {
 			t.Errorf("%s parsed", bad)
 		}
+	}
+}
+
+// A turn is a plan limit only when it has no answer to deliver: a limit
+// error beside a finished answer leaves the answer as the reply.
+func TestGrokLimitOnlyWithoutAnswer(t *testing.T) {
+	a := replyAnchor{bound: "h1"}
+	withText := []webNode{{id: "h1", user: true, text: "hi"}, {id: "a1", reply: true, text: "hello", finished: true, limited: true}}
+	if p := progressOf(withText, a); p.limited || !p.finished || !p.found {
+		t.Fatalf("answer with a stray limit error: %+v", p)
+	}
+	blank := []webNode{{id: "h1", user: true, text: "hi"}, {id: "a1", reply: true, text: " ", finished: true, limited: true}}
+	if p := progressOf(blank, a); !p.limited || p.found {
+		t.Fatalf("limit with no answer: %+v", p)
 	}
 }

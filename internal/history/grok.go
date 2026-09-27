@@ -132,14 +132,45 @@ func (r *grokResponse) text() string {
 	return r.Query
 }
 
-// grokLimitText marks a stream error that is the account's rate or plan
-// limit rather than a failure of this one answer.
-var grokLimitText = regexp.MustCompile(`(?i)rate.?limit|too many requests|usage limit|limit reached|reached (?:your|the) [a-z ]*limit|quota|\b429\b`)
+// grokLimitText marks a stream error message that is the account's rate
+// or plan limit rather than a failure of this one answer.
+var grokLimitText = regexp.MustCompile(`(?i)rate.?limit|too many requests|usage limit|message limit|limit reached|reached (?:your|the) [a-z ]*limit|quota|resource.?exhausted|\b429\b`)
 
-// limited reports whether the response ended on a rate or plan limit.
+// grokStreamError is one entry of a response's streamErrors: an object
+// with a gRPC-style code and a message, or a bare string.
+type grokStreamError struct {
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
+}
+
+// grokLimitCode is a stream error code meaning a rate or plan limit:
+// gRPC RESOURCE_EXHAUSTED (8, by number or name) or HTTP 429.
+func grokLimitCode(raw json.RawMessage) bool {
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		return n == "8" || n == "429"
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s == "8" || s == "429" || strings.EqualFold(s, "RESOURCE_EXHAUSTED") || grokLimitText.MatchString(s)
+	}
+	return false
+}
+
+// limited reports whether the response ended on a rate or plan limit:
+// one of its stream errors has a limit code or a limit message. Only the
+// decoded code and message count, never other fields of the error.
 func (r *grokResponse) limited() bool {
-	for _, e := range r.StreamErrors {
-		if grokLimitText.Match(e) {
+	for _, raw := range r.StreamErrors {
+		var e grokStreamError
+		if json.Unmarshal(raw, &e) != nil {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				continue
+			}
+			e.Message = s
+		}
+		if grokLimitCode(e.Code) || grokLimitText.MatchString(e.Message) {
 			return true
 		}
 	}

@@ -632,7 +632,9 @@ type replyProgress struct {
 	// nothing between them, so no reply to it will come.
 	orphaned bool
 	// limited: a message in this request's turn ended on the account's
-	// rate or plan limit.
+	// rate or plan limit and the turn has no usable reply (no answer text
+	// and no images). A finished answer that also carries a limit error is
+	// delivered as any other answer.
 	limited bool
 	// sig fingerprints the reply, for the stability check.
 	sig string
@@ -691,11 +693,11 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 	}
 	var leaf, answer *webNode
-	images, ended := 0, false
+	images, ended, limited := 0, false, false
 	for i := b + 1; i < end; i++ {
 		n := &nodes[i]
 		ended = ended || n.endTurn
-		p.limited = p.limited || n.limited
+		limited = limited || n.limited
 		if n.hidden {
 			continue
 		}
@@ -707,6 +709,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 	}
 	if leaf == nil && !ended {
 		p.orphaned = later
+		p.limited = limited
 		return p
 	}
 	var id, text string
@@ -714,6 +717,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		id, text = answer.id, answer.text
 	}
 	p.found = text != "" || images > 0
+	p.limited = limited && !p.found
 	p.sig = fmt.Sprintf("%s\n%d\n%s", id, images, text)
 	p.finished = ended || (p.found && leaf.reply && leaf.finished)
 	return p

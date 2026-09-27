@@ -370,16 +370,24 @@ export function createSender({
     try {
       // 1. Page load, then a composer (or a login page).
       const loadBy = Math.min(deadline, start + loadMs);
+      // An anti-bot interstitial can be transient (a challenge that passes
+      // by itself and reloads the page), so a blocked page is polled like a
+      // loading one and is an error only if it is still blocked when the
+      // load time runs out.
+      const blockedErr = () => new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
       let page = null;
+      let blocked = false;
       for (;;) {
         const t = await tabURL(tab.id);
+        blocked = false;
         if (t.status === 'complete') {
           page = cleanProbe(await inject(tab.id, pageProbe, [sel]));
-          if (page.blocked) throw new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
-          if (page.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
-          if (page.composer) break;
+          blocked = page.blocked;
+          if (!blocked && page.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
+          if (!blocked && page.composer) break;
         }
         if (now() >= loadBy) {
+          if (blocked) throw blockedErr();
           if (late()) throw new OpError('timeout', 'the page did not load in time');
           throw new OpError('composer_not_found', 'no message box on the page');
         }
@@ -419,6 +427,7 @@ export function createSender({
         if (existing && (await urlId()) !== existing) throw new OpError('not_found', 'conversation not found');
         base = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (base.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
+        if (base.blocked) throw blockedErr();
         if (base.generating) throw answering();
         submittedAt = now();
         const r = await inject(tab.id, pageSubmit, [sel]);
@@ -432,6 +441,7 @@ export function createSender({
         if (!existing && (await urlId())) break;
         const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (p.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
+        if (p.blocked) throw blockedErr();
         if (p.userCount > base.userCount || p.generating || p.assistantCount > base.assistantCount) break;
         if (now() >= confirmBy) throw new OpError('send_failed', 'the page did not take the message');
       }

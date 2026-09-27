@@ -124,7 +124,11 @@ class FakeSite {
         if (this.opts.loggedOut) els.push(new El(this, 'A'));
         break;
       case 'blocked':
-        if (this.opts.challenge) els.push(new El(this, 'FORM'));
+        // challengeFromTick / challengeUntilTick: the challenge appears
+        // after the page loaded, or passes by itself at that tick.
+        if (this.opts.challenge || (this.opts.challengeFromTick && this.ticks >= this.opts.challengeFromTick) || (this.opts.challengeUntilTick && this.ticks < this.opts.challengeUntilTick)) {
+          els.push(new El(this, 'FORM'));
+        }
         break;
       case 'assistant':
       case 'user':
@@ -723,6 +727,37 @@ test('grok page showing an anti-bot challenge is blocked: nothing typed, tab clo
   assert.deepEqual(fc.log.removed, [100]);
 });
 
+test('grok challenge that passes by itself during load: the send goes ahead', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challengeUntilTick: 4 })));
+  const r = await sender(fc, { loadMs: 10000 }).send('grok', { message: 'after the check' });
+  assert.deepEqual(page.submitted, ['after the check']);
+  assert.equal(r.conversation_id, page.newID);
+});
+
+test('grok challenge still showing when the load time runs out: blocked, nothing typed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challenge: true })));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.ok(fc.log.scripts.filter((x) => x.func === pageProbe).length > 1, 'the challenge was polled, not refused at once');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok challenge appearing after the composer loaded: blocked, not send_failed', async () => {
+  // While the send button is still disabled (the submit loop).
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { sendDisabled: true, challengeFromTick: 2 })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+  // After the click, while waiting for the page to take the message.
+  const fc2 = fakeChrome((url) => new FakeSite('grok', url, { ignoreSubmit: true, challengeFromTick: 2 }));
+  await assert.rejects(sender(fc2).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.deepEqual(fc2.log.removed, [100]);
+});
+
 test('grok logged-out page (sign-in link or /sign-in): not_logged_in, nothing typed, tab closed', async () => {
   let page;
   const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { loggedOut: true })));
@@ -747,6 +782,17 @@ test('runner: grok.send checks the grok.com session first; logged out or blocked
     await assert.rejects(r.run('grok.send', { message: 'x' }, () => {}), (e) => e.code === code, name);
     assert.deepEqual(calls, [LIST], name);
     assert.equal(fc.log.created.length, 0, `${name}: no tab`);
+  }
+  // An empty list is not proof of a sign-in: a tab that opens on the
+  // sign-in page is still refused before anything is typed.
+  {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { loggedOut: true })));
+    const r = createRunner({ fetch: async () => jsonResponse({ conversations: [] }), sender: sender(fc) });
+    await assert.rejects(r.run('grok.send', { message: 'x' }, () => {}), (e) => e.code === 'not_logged_in', 'empty list, signed-out tab');
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(page.submitted, []);
+    assert.deepEqual(fc.log.removed, [100]);
   }
   const fc = fakeChrome((url) => new FakeSite('grok', url, { neverFinish: true }));
   const s = sender(fc);

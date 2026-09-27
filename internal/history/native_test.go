@@ -812,7 +812,7 @@ func TestNativeHostExtensionStatus(t *testing.T) {
 		t.Fatalf("old extension grants: %+v", st)
 	}
 	// Grok is an optional site: an older extension never has it, and web
-	// serve --site grok refuses to start against it.
+	// serve --site grok waits for the grant against it.
 	if st.granted(SourceGrok) {
 		t.Fatalf("old extension grants grok: %+v", st)
 	}

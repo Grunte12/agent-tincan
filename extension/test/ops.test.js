@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, errorFrame, grantedSites, helloMessage, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
+import { validate, createRunner, errorFrame, grantedSites, helloMessage, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -584,6 +584,19 @@ test('grok.list reads the conversation list with the session cookies and pages t
   // Not a list: the API changed.
   const bad = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ items: [] }) });
   await assert.rejects(run(createRunner({ fetch: bad }), 'grok.list', { count: 1 }), (e) => e.code === 'endpoint_changed');
+});
+
+test('grok.list stops after GROK_MAX_PAGES pages even while the site keeps offering more', async () => {
+  const [c1] = fixture('grok/conversations.json').conversations;
+  const calls = [];
+  const f = async (url) => {
+    calls.push(String(url));
+    return jsonResponse({ conversations: [{ ...c1, conversationId: `0e1d0000-0000-4000-8000-${String(calls.length).padStart(12, '0')}` }], nextPageToken: `tok${calls.length}` });
+  };
+  const frames = await run(createRunner({ fetch: f }), 'grok.list', { count: 50 });
+  assert.equal(GROK_MAX_PAGES, 5);
+  assert.equal(calls.length, GROK_MAX_PAGES);
+  assert.equal(frames[0].result.conversations.length, GROK_MAX_PAGES);
 });
 
 test('grok.detail combines response-node and load-responses (POST JSON) into one result', async () => {

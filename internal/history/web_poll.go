@@ -171,9 +171,11 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 				return nil, a.bound, errOrphaned
 			}
 			if p.limited {
-				// The answer ended on the account's rate or plan limit:
-				// the site is left alone for a while, and the asker is
-				// told the message went through.
+				// The turn ended on the account's rate or plan limit with
+				// no answer to deliver (progressOf sets limited only then;
+				// an answer that carries a stray limit error is returned
+				// as usual): the site is left alone for a while, and the
+				// asker is told the message went through.
 				after := w.site().planLimitCooldown
 				if after <= 0 {
 					after = RateLimitBackoffMax
