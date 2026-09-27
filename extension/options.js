@@ -1,6 +1,8 @@
 // Agent Tincan History options page: lists each site in SITE_ACCESS, says
 // whether Chrome has granted the extension its origins, and offers a Grant
-// button for a site that is not granted.
+// button for a site that is not granted. A site whose pages are granted
+// but not every origin (ChatGPT without its file host) shows as granted
+// with files needing more access, and keeps a button for the rest.
 //
 // Chrome shows its own prompt for a grant and accepts a request only
 // during a user gesture, so the button's click handler calls
@@ -13,16 +15,27 @@
 
 import { SITE_ACCESS, siteGranted } from './ops.js';
 
-// siteStates lists every site with whether all its origins are granted;
-// a site missing any (ChatGPT's file host withheld) keeps its Grant
-// button, which asks for all of them.
+// siteStates lists every site with whether all its origins are granted,
+// and partial when only its page origins are (its operations work, but
+// not the fetches to its other origins, such as ChatGPT's file host). A
+// site not fully granted keeps its Grant button, which asks for all of
+// them.
 export async function siteStates(permissions) {
   const out = [];
   for (const [site, s] of Object.entries(SITE_ACCESS)) {
-    out.push({ site, label: s.label, granted: await siteGranted(permissions, site, { all: true }) });
+    const granted = await siteGranted(permissions, site, { all: true });
+    const partial = !granted && (await siteGranted(permissions, site));
+    out.push({ site, label: s.label, granted, partial });
   }
   return out;
 }
+
+// STATUS is the text, status class and button label for each state.
+const STATUS = {
+  granted: { text: 'Granted', className: 'status granted', button: 'Grant' },
+  partial: { text: 'Granted (images and files need file access)', className: 'status partial', button: 'Grant file access' },
+  none: { text: 'Not granted', className: 'status', button: 'Grant' },
+};
 
 // renderOptions fills the page's #sites list and keeps it current. It
 // returns {ready}, a promise for the first render.
@@ -66,8 +79,10 @@ export function renderOptions({ document, permissions }) {
         r = row(s.site, s.label);
         rows.set(s.site, r);
       }
-      r.status.textContent = s.granted ? 'Granted' : 'Not granted';
-      r.status.className = s.granted ? 'status granted' : 'status';
+      const st = STATUS[s.granted ? 'granted' : s.partial ? 'partial' : 'none'];
+      r.status.textContent = st.text;
+      r.status.className = st.className;
+      r.button.textContent = st.button;
       r.button.hidden = s.granted;
     }
     list.replaceChildren(...[...rows.values()].map((r) => r.li));

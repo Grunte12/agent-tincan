@@ -128,3 +128,36 @@ test('background connects to the native host and answers only valid requests', a
   listeners.startup.forEach((fn) => fn());
   assert.equal(state.connects.length, 2);
 });
+
+// A hello built before a later grant change must not reach the host after
+// the later one: the host keeps the last hello it gets, so an older one
+// arriving last would leave it reporting a revoked site as granted.
+test('an older hello that finishes last is dropped', async () => {
+  const { listeners, state } = fakeChrome();
+  // contains answers from the grants as they are when it is called, after
+  // state.delay ms (a slow permissions query).
+  state.delay = 0;
+  globalThis.chrome.permissions.contains = ({ origins }) => {
+    const answer = origins.every((o) => state.granted.has(o));
+    return new Promise((r) => setTimeout(() => r(answer), state.delay));
+  };
+  globalThis.fetch = async (url) => new Response('file ' + url);
+  await import('../background.js?stale-hello');
+  await settle();
+  assert.deepEqual(state.posted.filter((m) => m.hello).map((m) => m.hello.granted), [['claudeai']]);
+
+  // ChatGPT is granted; that hello's permissions query is slow.
+  state.granted.add('https://chatgpt.com/*');
+  state.delay = 60;
+  listeners.permAdded.forEach((fn) => fn({ origins: ['https://chatgpt.com/*'] }));
+  await new Promise((r) => setTimeout(r, 10));
+  // Then it is revoked, and this hello's query is fast.
+  state.granted.delete('https://chatgpt.com/*');
+  state.delay = 0;
+  listeners.permRemoved.forEach((fn) => fn({ origins: ['https://chatgpt.com/*'] }));
+  await new Promise((r) => setTimeout(r, 200));
+
+  const hellos = state.posted.filter((m) => m.hello).map((m) => m.hello.granted);
+  assert.deepEqual(hellos.at(-1), ['claudeai'], `last hello the host saw: ${JSON.stringify(hellos)}`);
+  assert.ok(!hellos.slice(1).some((g) => g.includes('chatgpt')), 'the stale hello was not sent');
+});
