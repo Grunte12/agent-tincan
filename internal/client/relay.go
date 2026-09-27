@@ -329,10 +329,25 @@ func (r *Relay) PollReplies(ctx context.Context, hold time.Duration, replies str
 // agent's own requests. Generation acknowledgements only mark the matching
 // reply seen. Empty ids and acks make no call.
 func (r *Relay) AckReplies(ctx context.Context, ids []string, acks ...envelope.ReplyAck) error {
-	if len(ids) == 0 && len(acks) == 0 {
+	// A reply with no generation came from a relay that predates generations
+	// (or was stored before it learned them). Acknowledge it by id, which
+	// every relay understands; an older relay ignores the acks field.
+	var gen []envelope.ReplyAck
+	for _, ack := range acks {
+		if ack.Generation == 0 {
+			ids = append(ids, ack.ID)
+		} else {
+			gen = append(gen, ack)
+		}
+	}
+	if len(ids) == 0 && len(gen) == 0 {
 		return nil
 	}
-	return r.call(ctx, r.api, "POST", "/v1/replies/ack", map[string]any{"ids": ids, "acks": acks}, nil)
+	body := map[string]any{"ids": ids}
+	if len(gen) > 0 {
+		body["acks"] = gen
+	}
+	return r.call(ctx, r.api, "POST", "/v1/replies/ack", body, nil)
 }
 
 // Peek waits up to hold for requests or unseen replies without taking
