@@ -597,6 +597,7 @@ test('grok.list stops after GROK_MAX_PAGES pages even while the site keeps offer
   assert.equal(GROK_MAX_PAGES, 5);
   assert.equal(calls.length, GROK_MAX_PAGES);
   assert.equal(frames[0].result.conversations.length, GROK_MAX_PAGES);
+  assert.equal(frames[0].result.more, true, 'a list cut short at the page cap says more exist');
 });
 
 test('grok.detail combines response-node and load-responses (POST JSON) into one result', async () => {

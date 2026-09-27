@@ -46,6 +46,7 @@ func (r *Grok) live() *live {
 		listOp:      OpGrokList,
 		detailOp:    OpGrokDetail,
 		parseList:   parseGrokList,
+		listMore:    grokListMore,
 		parseDetail: parseGrokDetail,
 		fileArgs:    grokFileArgs,
 	}
@@ -62,12 +63,22 @@ func (r *Grok) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 }
 
 type grokList struct {
+	// More is set by the extension when it stopped at its page cap while
+	// grok.com still offered another page.
+	More          bool `json:"more"`
 	Conversations []struct {
 		ConversationID string   `json:"conversationId"`
 		Title          string   `json:"title"`
 		CreateTime     flexTime `json:"createTime"`
 		ModifyTime     flexTime `json:"modifyTime"`
 	} `json:"conversations"`
+}
+
+// grokListMore reports whether the extension cut the list short at its
+// page cap with older conversations still on grok.com.
+func grokListMore(raw json.RawMessage) bool {
+	var l grokList
+	return json.Unmarshal(raw, &l) == nil && l.More
 }
 
 func parseGrokList(raw json.RawMessage) ([]Conversation, error) {
@@ -324,7 +335,10 @@ func parseGrokDetail(id string, raw json.RawMessage) (thread, error) {
 // grokNodes reads the current branch for the reply wait. grok.com marks a
 // finished answer explicitly: an assistant response is finished when its
 // partial flag is false and the conversation has no in-flight response.
-// A response that ended on a rate or plan limit is marked limited.
+// A finished response also ends the turn, so a blank one (no text, no
+// images) is delivered as an empty reply rather than waited on. A
+// finished response that ended on a rate or plan limit is marked limited;
+// a limit error on a response still streaming is not final.
 func grokNodes(raw json.RawMessage) ([]webNode, error) {
 	d, err := decodeGrokDetail(raw)
 	if err != nil {
@@ -341,7 +355,8 @@ func grokNodes(raw json.RawMessage) ([]webNode, error) {
 			n.reply = true
 			n.images = len(r.images())
 			n.finished = !r.Partial && idle
-			n.limited = r.limited()
+			n.endTurn = n.finished
+			n.limited = n.finished && r.limited()
 		default:
 			continue
 		}

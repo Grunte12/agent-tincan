@@ -568,7 +568,9 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       return undefined;
     },
     // grok.com: the list pages through nextPageToken until count
-    // conversations are in hand.
+    // conversations are in hand. Stopping at GROK_MAX_PAGES short of count
+    // while grok.com still offers a page sets more, so the reader does not
+    // take the short list as complete.
     async 'grok.list'(a) {
       const out = [];
       let token = '';
@@ -581,7 +583,9 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
         token = typeof r.nextPageToken === 'string' ? r.nextPageToken : '';
         if (!token || r.conversations.length === 0) break;
       }
-      return { conversations: out.slice(0, a.count) };
+      const result = { conversations: out.slice(0, a.count) };
+      if (token && out.length < a.count) result.more = true;
+      return result;
     },
     // The detail is response-node's tree and in-flight list plus
     // load-responses' bodies for every node, as one result.

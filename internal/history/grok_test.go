@@ -251,6 +251,16 @@ func TestGrokNodesFinishedMarker(t *testing.T) {
 	if !nodes[1].limited {
 		t.Fatal("a rate-limit stream error is not marked limited")
 	}
+	// A limit error on a response still streaming (partial, or listed in
+	// flight) is not final: the answer may yet arrive.
+	for _, c := range []struct {
+		partial  bool
+		inflight string
+	}{{true, `[]`}, {true, `[{"responseId":"a1"}]`}, {false, `[{"responseId":"a1"}]`}} {
+		if nodes, _ := grokNodes(detail(c.partial, c.inflight, `[{"code":8,"message":"Too many requests"}]`)); nodes[1].limited {
+			t.Errorf("partial %v inflight %s: an unfinished response is marked limited", c.partial, c.inflight)
+		}
+	}
 	for _, limit := range []string{`[{"code":"RESOURCE_EXHAUSTED","message":"x"}]`, `[{"code":429}]`, `["You have reached your message limit"]`} {
 		if nodes, _ := grokNodes(detail(false, "[]", limit)); !nodes[1].limited {
 			t.Errorf("%s is not marked limited", limit)
@@ -281,5 +291,76 @@ func TestGrokLimitOnlyWithoutAnswer(t *testing.T) {
 	blank := []webNode{{id: "h1", user: true, text: "hi"}, {id: "a1", reply: true, text: " ", finished: true, limited: true}}
 	if p := progressOf(blank, a); !p.limited || p.found {
 		t.Fatalf("limit with no answer: %+v", p)
+	}
+}
+
+// A finished response with no text, no images and no limit error ends the
+// turn, so the wait returns (and the asker gets the empty-reply note)
+// instead of polling until the request times out. A blank response still
+// streaming does not.
+func TestGrokBlankFinishedReplyEndsTurn(t *testing.T) {
+	detail := func(partial bool) json.RawMessage {
+		return json.RawMessage(`{"conversationId":"c1","responseNodes":[{"responseId":"h1","sender":"human"},{"responseId":"a1","sender":"assistant","parentResponseId":"h1"}],"inflightResponses":[],"responses":[` +
+			`{"responseId":"h1","message":"hi","sender":"human","createTime":"2026-09-22T10:00:00Z","partial":false},` +
+			`{"responseId":"a1","message":"","sender":"assistant","createTime":"2026-09-22T10:00:01Z","parentResponseId":"h1","partial":` + map[bool]string{true: "true", false: "false"}[partial] + `}]}`)
+	}
+	a := replyAnchor{bound: "h1"}
+	nodes, err := grokNodes(detail(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := progressOf(nodes, a); !p.finished || p.found || p.limited {
+		t.Fatalf("blank finished reply: %+v", p)
+	}
+	nodes, _ = grokNodes(detail(true))
+	if p := progressOf(nodes, a); p.finished {
+		t.Fatalf("blank partial reply is finished: %+v", p)
+	}
+}
+
+// A list the extension cut short at its page cap says more exist, so a
+// read that finds nothing reports the window limited rather than
+// complete.
+func TestGrokListMoreMarksPageLimited(t *testing.T) {
+	var l map[string]any
+	if err := json.Unmarshal(fixture(t, "grok/conversations.json"), &l); err != nil {
+		t.Fatal(err)
+	}
+	all := l["conversations"].([]any)
+	recent := []any{}
+	for _, c := range all {
+		if id := c.(map[string]any)["conversationId"]; id == grokConv1 || id == grokConv2 {
+			recent = append(recent, c)
+		}
+	}
+	for _, more := range []bool{false, true} {
+		list, _ := json.Marshal(map[string]any{"conversations": recent, "more": more})
+		fake := grokFake(t)
+		inner := fake.handle
+		fake.handle = func(req NativeRequest) ([]NativeResponse, error) {
+			if req.Op == OpGrokList {
+				return []NativeResponse{{OK: true, Result: list}}, nil
+			}
+			return inner(req)
+		}
+		r := newTestGrok(fake)
+		want := LimitNone
+		if more {
+			want = LimitCount
+		}
+		page, err := r.Read(context.Background(), Query{Source: SourceGrok, Mode: ModeSearch, Terms: []string{"nothing-matches-this"}}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Limited != want {
+			t.Errorf("more %v: search limited %q, want %q", more, page.Limited, want)
+		}
+		page, err = r.List(context.Background(), 10, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Conversations) != 2 || page.Limited != want {
+			t.Errorf("more %v: list %d conversations limited %q, want %q", more, len(page.Conversations), page.Limited, want)
+		}
 	}
 }
