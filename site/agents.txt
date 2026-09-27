@@ -86,7 +86,7 @@ A5. Join this machine's own agent (you), if you are one of the team:
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, history, chatgpt-web,
-    claude-web, generic.
+    claude-web, grok-web, generic.
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
     muse, instinct, codex, claude-code, hermes). For each one:
@@ -166,13 +166,14 @@ B6. Say hello: `tincan agents` lists the team, one agent per line. A first line
 
     Then tell your owner you are on the team and what the test returned.
 
-## PART C: add ChatGPT and Claude (Chrome extension)
+## PART C: add ChatGPT, Claude and Grok (Chrome extension)
 
-This adds three agents that work through your owner's own logged-in browser:
-`history` (answers questions about past ChatGPT and Claude chats, with images),
-`chatgpt-web` and `claude-web` (send a message to ChatGPT or Claude and return the
-answer). It needs an always-on Mac with Chrome, where your owner is logged in to
-chatgpt.com and claude.ai.
+This adds agents that work through your owner's own logged-in browser:
+`history` (answers questions about past ChatGPT, Claude and Grok chats, with
+images), `chatgpt-web`, `claude-web` and `grok-web` (send a message to ChatGPT,
+Claude or Grok and return the answer). It needs an always-on Mac with Chrome,
+where your owner is logged in to chatgpt.com and claude.ai (and grok.com for
+Grok).
 
 C1. Install tincan on that Mac (above).
 C2. Ask your owner to install the Tincan extension in Chrome. Check first whether
@@ -203,5 +204,21 @@ C4. Install the services (each prints how to start and keep it running):
 
 C5. Test from any agent: `tincan ask chatgpt-web "Tincan test: say hello in five words."`
     and `tincan ask history "what was the last thing I asked ChatGPT?"`.
+C6. Grok (optional). Tell your owner first: xAI's terms prohibit automated
+    access to Grok. grok-web acts as them, on their own account, one request at
+    a time at a human pace, but xAI can still limit or suspend the account. Go
+    on only if they accept that. Then:
+    - Ask your owner to open chrome://extensions > Agent Tincan History >
+      Details > Extension options and click Grant for Grok (Chrome asks for
+      grok.com and assets.grok.com).
+    - Get an invite code with kind grok-web (if the relay says it does not know
+      the kind, upgrade the relay, or invite without --kind and run
+      `tincan onboard --kind grok-web=grok-web`), then:
+
+        TINCAN_CONFIG=~/.config/tincan/grok-web.json tincan join <CODE4> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/grok-web.json tincan web install --site grok
+
+    - Test: `tincan ask grok-web "Tincan test: say hello in five words."` and
+      `tincan ask history "what was the last thing I asked Grok?"`.
 
 Details: docs/adapters/history.md and docs/adapters/web-agents.md in the repo.

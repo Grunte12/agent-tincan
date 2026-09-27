@@ -35,11 +35,12 @@ const (
 	KindHistory      = "history"
 	KindChatGPTWeb   = "chatgpt-web"
 	KindClaudeWeb    = "claude-web"
+	KindGrokWeb      = "grok-web"
 	KindGeneric      = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -65,6 +66,7 @@ var runtimeNames = map[string]string{
 	"history":     KindHistory,
 	"chatgpt-web": KindChatGPTWeb,
 	"claude-web":  KindClaudeWeb,
+	"grok-web":    KindGrokWeb,
 }
 
 // defaultWake is the wake method a kind normally uses.
@@ -80,6 +82,7 @@ var defaultWake = map[string]string{
 	KindHistory:      "wait",
 	KindChatGPTWeb:   "wait",
 	KindClaudeWeb:    "wait",
+	KindGrokWeb:      "wait",
 	KindGeneric:      "none",
 }
 
@@ -252,7 +255,12 @@ func expectOnline(kind, wake string) bool {
 // isService reports whether kind is a Tincan Go service rather than a
 // model: history and the web agents.
 func isService(kind string) bool {
-	return kind == KindHistory || kind == KindChatGPTWeb || kind == KindClaudeWeb
+	return kind == KindHistory || isWebKind(kind)
+}
+
+// isWebKind reports whether kind is one of the web agents.
+func isWebKind(kind string) bool {
+	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb
 }
 
 func agentBlock(d agentData) (AgentBlock, error) {

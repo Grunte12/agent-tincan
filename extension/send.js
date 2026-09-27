@@ -1,13 +1,14 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send) and the matching close operations (chatgpt.close,
-// claudeai.close).
+// claudeai.send, grok.send) and the matching close operations
+// (chatgpt.close, claudeai.close, grok.close).
 //
-// ChatGPT and claude.ai guard their send endpoints with anti-bot tokens, so
+// ChatGPT, claude.ai and grok.com guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
 // background tab the extension opens itself (never one of the user's tabs):
 //
-//   1. open https://chatgpt.com/ (or /c/<id>) or https://claude.ai/new (or
-//      /chat/<id>) with chrome.tabs.create({active: false});
+//   1. open https://chatgpt.com/ (or /c/<id>), https://claude.ai/new (or
+//      /chat/<id>) or https://grok.com/ (or /c/<id>) with
+//      chrome.tabs.create({active: false});
 //   2. inject the fixed page functions below with chrome.scripting
 //      (isolated world, func + args only) to fill the composer, verify the
 //      text landed, and click send;
@@ -37,7 +38,8 @@ export const ID_WAIT_MS = 60 * 1000;
 export const KEEP_TAB_MS = 10 * 60 * 1000;
 
 // SELECTORS is the one table of page selectors, tried in order. login and
-// loginPaths mean the page is logged out. stop and streaming refuse a send
+// loginPaths mean the page is logged out; blocked, where a site has it,
+// means the page is an anti-bot check. stop and streaming refuse a send
 // into a conversation that is still answering, and with assistant and user
 // they help confirm that the page took the message. None of them is ever
 // used to decide that a reply is finished.
@@ -62,6 +64,21 @@ export const SELECTORS = Object.freeze({
     login: ['a[href="/login"]', 'input[type="email"]'],
     loginPaths: ['/login', '/logout'],
   }),
+  // grok.com's composer is a tiptap (ProseMirror) editor inside a form; its
+  // submit button appears only once there is text, and Enter submits when
+  // it does not. A logged-out grok.com still offers anonymous chat, so the
+  // session probe in ops.js runs before any tab opens.
+  grok: Object.freeze({
+    composer: ['div[contenteditable="true"][aria-label="Ask Grok anything"]', 'form div.ProseMirror[contenteditable="true"]', 'div[contenteditable="true"].ProseMirror', 'textarea[aria-label*="Ask Grok"]'],
+    send: ['form button[type="submit"][aria-label="Submit"]', 'button[aria-label="Submit"]', 'form button[type="submit"]'],
+    stop: ['button[aria-label="Stop model response"]', 'button[aria-label*="Stop"]'],
+    streaming: ['[data-streaming="true"]'],
+    assistant: ['div[id^="response-"].items-start'],
+    user: ['div[id^="response-"].items-end'],
+    login: ['a[href^="/sign-in"]', 'a[href*="accounts.x.ai/sign-in"]', 'a[href*="/sign-up"]'],
+    loginPaths: ['/sign-in', '/sign-up'],
+    blocked: ['#challenge-form', 'iframe[src*="challenges.cloudflare.com"]', '#cf-challenge-running'],
+  }),
 });
 
 // SITES says where each site's pages are and how to read a conversation id
@@ -76,6 +93,11 @@ export const SITES = Object.freeze({
     newURL: 'https://claude.ai/new',
     convURL: (id) => `https://claude.ai/chat/${encodeURIComponent(id)}`,
     idFrom: /^https:\/\/claude\.ai\/chat\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
+  }),
+  grok: Object.freeze({
+    newURL: 'https://grok.com/',
+    convURL: (id) => `https://grok.com/c/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/grok\.com\/c\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
   }),
 });
 
@@ -113,6 +135,7 @@ export function pageProbe(sel) {
   return {
     href: String(location.href || ''),
     loggedOut: Boolean(q(sel.login)) || sel.loginPaths.some((p) => path === p || path.startsWith(p + '/')),
+    blocked: Array.isArray(sel.blocked) && (Boolean(q(sel.blocked)) || /^just a moment/i.test(String(document.title || ''))),
     composer: Boolean(composer),
     composerEmpty: draft.trim() === '',
     generating: Boolean(q(sel.stop)) || Boolean(q(sel.streaming)),
@@ -238,6 +261,7 @@ function cleanProbe(r) {
   return {
     href: str(o.href, 4096),
     loggedOut: o.loggedOut === true,
+    blocked: o.blocked === true,
     composer: o.composer === true,
     composerEmpty: o.composerEmpty === true,
     generating: o.generating === true,
@@ -351,6 +375,7 @@ export function createSender({
         const t = await tabURL(tab.id);
         if (t.status === 'complete') {
           page = cleanProbe(await inject(tab.id, pageProbe, [sel]));
+          if (page.blocked) throw new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
           if (page.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
           if (page.composer) break;
         }

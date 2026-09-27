@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// live is the read flow the ChatGPT and claude.ai readers share: list
+// live is the read flow the ChatGPT, claude.ai and Grok readers share: list
 // through the extension, open conversations one at a time while pick needs
 // them, then fetch only the images of the turns that were selected.
 type live struct {

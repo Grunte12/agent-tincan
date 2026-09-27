@@ -1,0 +1,40 @@
+{
+  "responses": [
+    {
+      "responseId": "5e5f0000-0000-4000-8000-000000000021",
+      "message": "suggest a short hike near Portland",
+      "sender": "human",
+      "createTime": "2026-09-20T08:00:00.000000Z",
+      "manual": false,
+      "partial": false,
+      "query": "",
+      "generatedImageUrls": [],
+      "imageAttachments": [],
+      "fileAttachments": [],
+      "webSearchResults": [],
+      "steps": [],
+      "streamErrors": [],
+      "mediaTypes": [],
+      "metadata": {}
+    },
+    {
+      "responseId": "5e5f0000-0000-4000-8000-000000000022",
+      "message": "Try the dummy falls loop.",
+      "sender": "assistant",
+      "createTime": "2026-09-20T08:00:04.000000Z",
+      "parentResponseId": "5e5f0000-0000-4000-8000-000000000021",
+      "manual": false,
+      "partial": false,
+      "query": "",
+      "generatedImageUrls": [],
+      "imageAttachments": [],
+      "fileAttachments": [],
+      "webSearchResults": [],
+      "steps": [],
+      "streamErrors": [],
+      "model": "grok-dummy",
+      "mediaTypes": [],
+      "metadata": {}
+    }
+  ]
+}

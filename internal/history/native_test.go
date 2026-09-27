@@ -811,6 +811,14 @@ func TestNativeHostExtensionStatus(t *testing.T) {
 	if !st.granted(SourceChatGPT) || !st.granted(SourceClaudeAI) {
 		t.Fatalf("old extension grants: %+v", st)
 	}
+	// Grok is an optional site: an older extension never has it, and web
+	// serve --site grok refuses to start against it.
+	if st.granted(SourceGrok) {
+		t.Fatalf("old extension grants grok: %+v", st)
+	}
+	if err := c.CheckSiteGrant(ctx, SourceGrok); !errors.Is(err, ErrPermissionMissing) || !strings.Contains(err.Error(), "no access to grok.com") {
+		t.Fatalf("grok without a grant at startup: %v", err)
+	}
 	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{"claudeai"}})
 	waitFor(t, func() bool { st, _ = c.ExtensionStatus(ctx); return st.Version == "0.4.0" })
 	if !slices.Equal(st.Granted, []string{"claudeai"}) || st.granted(SourceChatGPT) {
@@ -823,8 +831,11 @@ func TestNativeHostExtensionStatus(t *testing.T) {
 		t.Fatalf("granted site at startup: %v", err)
 	}
 	// The owner grants it: the next hello, same connection.
-	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{"chatgpt", "claudeai"}})
+	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{"chatgpt", "claudeai", "grok"}})
 	waitFor(t, func() bool { return c.CheckSiteGrant(ctx, SourceChatGPT) == nil })
+	if err := c.CheckSiteGrant(ctx, SourceGrok); err != nil {
+		t.Fatalf("granted grok at startup: %v", err)
+	}
 	// An empty list is not an old extension: nothing is granted.
 	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{}})
 	waitFor(t, func() bool { return c.CheckSiteGrant(ctx, SourceClaudeAI) != nil })

@@ -73,7 +73,7 @@ class FakeSite {
     this.site = site;
     this.sel = SELECTORS[site];
     this.opts = { execWorks: true, pasteWorks: false, streamTicks: 3, loadTicks: 1, ...opts };
-    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, ...(opts.match || {}) };
+    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, ...(opts.match || {}) };
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
     this.messages = [];
@@ -109,6 +109,9 @@ class FakeSite {
       case 'send':
         // sendReadyTick: the button stays disabled until that tick.
         if (this.opts.sendReadyTick) this.sendBtn.disabled = this.ticks < this.opts.sendReadyTick;
+        // sendAfterText: the button exists only while there is text
+        // (grok.com).
+        if (this.opts.sendAfterText && !this.composer.text) break;
         if (!this.opts.noSendButton) els.push(this.sendBtn);
         break;
       case 'stop':
@@ -120,16 +123,19 @@ class FakeSite {
       case 'login':
         if (this.opts.loggedOut) els.push(new El(this, 'A'));
         break;
+      case 'blocked':
+        if (this.opts.challenge) els.push(new El(this, 'FORM'));
+        break;
       case 'assistant':
       case 'user':
         for (const m of this.messages) if (m.role === r) els.push(new El(this, 'DIV', m.text));
         break;
     }
-    return s[r][this.match[r]] ? els : [];
+    return s[r] && s[r][this.match[r]] ? els : [];
   }
   lookup(sel) {
-    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login']) {
-      if (this.sel[r][this.match[r]] === sel) return this.role(r);
+    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked']) {
+      if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
     return [];
   }
@@ -175,7 +181,7 @@ class FakeSite {
     if (!/\/(?:c|chat)\//.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
       const id = `new-conv-${++convSeq}`;
       this.newID = id;
-      this.href = this.site === 'chatgpt' ? `https://chatgpt.com/c/${id}` : `https://claude.ai/chat/${id}`;
+      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}` }[this.site];
     }
     const last = this.messages.at(-1);
     if (last.role !== 'assistant') this.messages.push({ role: 'assistant', text: 'Part' });
@@ -674,4 +680,82 @@ test('helloMessage reports the version, unpacked, and the sha256 of each file', 
   const store = await helloMessage({ manifest: { ...manifest, update_url: 'https://clients2.google.com/service/update2/crx' }, getURL: (f) => f, fetch: async () => { throw new Error('x'); } });
   assert.equal(store.hello.unpacked, false);
   assert.equal(store.hello.files['ops.js'], '');
+});
+
+// ---- grok.com
+
+test('grok new chat: types into the ProseMirror composer, clicks the submit button that appears with the text, returns the /c/<id>', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { sendAfterText: true, neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('grok', { message: 'Draw a fox in a tin can', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://grok.com/');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['Draw a fox in a tin can']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://grok.com/c/${page.newID}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.deepEqual(await s.close('chatgpt', r.conversation_id), { closed: 0 }, 'close is per site');
+  assert.deepEqual(await s.close('grok', r.conversation_id), { closed: 1 });
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok continues /c/<id>; with no submit button it presses Enter', async () => {
+  const id = '0e1d0000-0000-4000-8000-000000000001';
+  const fc = fakeChrome((url) => new FakeSite('grok', url, { sendAfterText: true }));
+  const r = await sender(fc).send('grok', { message: 'shorter please', conversation_id: id });
+  assert.equal(fc.log.created[0].url, `https://grok.com/c/${id}`);
+  assert.equal(r.conversation_id, id);
+
+  let page;
+  const fc2 = fakeChrome((url) => (page = new FakeSite('grok', url, { noSendButton: true, match: { composer: 1 } })));
+  const r2 = await sender(fc2).send('grok', { message: 'enter please' });
+  assert.deepEqual(page.submitted, ['enter please']);
+  assert.equal(r2.conversation_id, page.newID);
+});
+
+test('grok page showing an anti-bot challenge is blocked: nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challenge: true })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok logged-out page (sign-in link or /sign-in): not_logged_in, nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { loggedOut: true })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+  const fc2 = fakeChrome((url) => new FakeSite('grok', url, { redirectTo: 'https://grok.com/sign-in?redirect=%2F' }));
+  await assert.rejects(sender(fc2).send('grok', { message: 'x' }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(fc2.log.removed, [100]);
+});
+
+test('runner: grok.send checks the grok.com session first; logged out or blocked opens no tab', async () => {
+  const LIST = 'https://grok.com/rest/app-chat/conversations?pageSize=1';
+  for (const [name, res, code] of [
+    ['401', () => jsonResponse({ error: 'unauthenticated' }, 401), 'not_logged_in'],
+    ['no list', () => jsonResponse({}), 'not_logged_in'],
+    ['anti-bot 403', () => jsonResponse({ error: { code: 7, message: 'Request rejected by anti-bot rules.' } }, 403), 'blocked'],
+  ]) {
+    const fc = fakeChrome((url) => new FakeSite('grok', url));
+    const calls = [];
+    const r = createRunner({ fetch: async (u) => (calls.push(String(u)), res()), sender: sender(fc) });
+    await assert.rejects(r.run('grok.send', { message: 'x' }, () => {}), (e) => e.code === code, name);
+    assert.deepEqual(calls, [LIST], name);
+    assert.equal(fc.log.created.length, 0, `${name}: no tab`);
+  }
+  const fc = fakeChrome((url) => new FakeSite('grok', url, { neverFinish: true }));
+  const s = sender(fc);
+  const r = createRunner({ fetch: async () => jsonResponse({ conversations: [] }), sender: s });
+  const frames = [];
+  await r.run('grok.send', { message: 'hi grok' }, (f) => frames.push(f));
+  assert.match(frames[0].result.conversation_id, /^new-conv-/);
+  const closed = [];
+  await r.run('grok.close', { conversation_id: frames[0].result.conversation_id }, (f) => closed.push(f));
+  assert.deepEqual(closed, [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(fc.log.removed, [100]);
 });

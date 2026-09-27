@@ -36,7 +36,9 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send']);
+  assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
+  assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
   validate({ id: 2, op: 'chatgpt.file', args: { file_id: 'file_00000000abcd1234', conversation_id: 'abc-1' } });
   validate({ id: 3, op: 'claudeai.detail', args: { id: 'c1a0d000-0000-4000-8000-000000000001' } });
@@ -79,6 +81,10 @@ test('validate accepts only the fixed operation set with exact args', () => {
     { id: 1, op: 'chatgpt.close', args: {} },
     { id: 1, op: 'chatgpt.close', args: { conversation_id: '../c/x' } },
     { id: 1, op: 'claudeai.close', args: { conversation_id: 'abc', tab_id: 5 } },
+    { id: 1, op: 'grok.file', args: { file_id: 'r1_0' } },
+    { id: 1, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1', url: 'https://assets.grok.com/x' } },
+    { id: 1, op: 'grok.list', args: { count: 1, pageToken: 'x' } },
+    { id: 1, op: 'grok.detail', args: { id: '../../rest/app-chat/conversations' } },
     { id: 1, op: 'extension.reload', args: { now: true } },
     { id: 1, op: 'extension.reload' },
   ];
@@ -397,8 +403,12 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   const m = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   const required = Object.values(SITE_ACCESS).filter((s) => s.required).flatMap((s) => s.origins);
   const optional = Object.values(SITE_ACCESS).filter((s) => !s.required).flatMap((s) => s.origins);
-  // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new.
+  // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new;
+  // Grok is optional, granted from the options page.
   assert.deepEqual(m.host_permissions, ['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
+  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*']);
+  assert.equal(SITE_ACCESS.grok.required, false);
+  assert.ok(m.description.length <= 132, 'the store caps the description at 132 characters');
   assert.deepEqual(m.host_permissions, required);
   assert.deepEqual(m.optional_host_permissions || [], optional);
   assert.equal(m.options_ui.page, 'options.html');
@@ -548,4 +558,117 @@ test('a session probe redirected to another host is not_logged_in and nothing is
   });
   await run(createRunner({ fetch: same, sender }), 'chatgpt.send', { message: 'hi' });
   assert.deepEqual(sent, ['chatgpt']);
+});
+
+// ---- grok.com
+
+const GROK_CONV = '0e1d0000-0000-4000-8000-000000000001';
+const GROK_BASE = `https://grok.com/rest/app-chat/conversations/${GROK_CONV}`;
+
+test('grok.list reads the conversation list with the session cookies and pages through nextPageToken', async () => {
+  const list = fixture('grok/conversations.json');
+  const [c1, c2, c3] = list.conversations;
+  const f = fakeFetch({
+    'https://grok.com/rest/app-chat/conversations?pageSize=3': jsonResponse({ conversations: [c1, c2], nextPageToken: 'tok+/2' }),
+    'https://grok.com/rest/app-chat/conversations?pageSize=1&pageToken=tok%2B%2F2': jsonResponse({ conversations: [c3], nextPageToken: 'tok3' }),
+  });
+  const frames = await run(createRunner({ fetch: f }), 'grok.list', { count: 3 });
+  assert.deepEqual(frames, [{ ok: true, result: { conversations: [c1, c2, c3] } }]);
+  assert.equal(f.calls.length, 2, 'stops once count conversations are in');
+  assert.equal(f.calls[0].init.credentials, 'include');
+  assert.equal(f.calls[0].init.method, 'GET');
+  assert.equal(f.calls[0].init.headers, undefined, 'no page-set headers such as x-statsig-id');
+  // One page answers a small count.
+  const one = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=2': jsonResponse(list) });
+  assert.equal((await run(createRunner({ fetch: one }), 'grok.list', { count: 2 }))[0].result.conversations.length, 2);
+  // Not a list: the API changed.
+  const bad = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ items: [] }) });
+  await assert.rejects(run(createRunner({ fetch: bad }), 'grok.list', { count: 1 }), (e) => e.code === 'endpoint_changed');
+});
+
+test('grok.detail combines response-node and load-responses (POST JSON) into one result', async () => {
+  const nodes = fixture(`grok/response-node-${GROK_CONV}.json`);
+  const loaded = fixture(`grok/load-responses-${GROK_CONV}.json`);
+  const f = fakeFetch({
+    [`${GROK_BASE}/response-node?includeThreads=true`]: jsonResponse(nodes),
+    [`${GROK_BASE}/load-responses`]: (_url, init) => {
+      assert.equal(init.method, 'POST');
+      assert.equal(init.credentials, 'include');
+      assert.equal(init.headers['content-type'], 'application/json');
+      assert.deepEqual(Object.keys(init.headers), ['content-type'], 'no page-set headers such as x-statsig-id');
+      assert.deepEqual(JSON.parse(init.body), { responseIds: nodes.responseNodes.map((n) => n.responseId) });
+      return jsonResponse(loaded);
+    },
+  });
+  const frames = await run(createRunner({ fetch: f }), 'grok.detail', { id: GROK_CONV });
+  assert.deepEqual(frames, [{ ok: true, result: { conversationId: GROK_CONV, responseNodes: nodes.responseNodes, inflightResponses: [], responses: loaded.responses } }]);
+
+  // A conversation with no nodes yet needs no body read.
+  const empty = fakeFetch({ [`${GROK_BASE}/response-node?includeThreads=true`]: jsonResponse({ responseNodes: [], inflightResponses: [{ responseId: 'r1' }] }) });
+  const e = await run(createRunner({ fetch: empty }), 'grok.detail', { id: GROK_CONV });
+  assert.deepEqual(e[0].result, { conversationId: GROK_CONV, responseNodes: [], inflightResponses: [{ responseId: 'r1' }], responses: [] });
+  assert.equal(empty.calls.length, 1);
+
+  // A deleted conversation is not_found; a moved API endpoint_changed; a 429
+  // rate_limited with its Retry-After.
+  await assert.rejects(run(createRunner({ fetch: fakeFetch({}) }), 'grok.detail', { id: GROK_CONV }), (x) => x.code === 'not_found');
+  const shape = fakeFetch({ [`${GROK_BASE}/response-node?includeThreads=true`]: jsonResponse({ nodes: [] }) });
+  await assert.rejects(run(createRunner({ fetch: shape }), 'grok.detail', { id: GROK_CONV }), (x) => x.code === 'endpoint_changed');
+  const limited = fakeFetch({ [`${GROK_BASE}/response-node?includeThreads=true`]: () => new Response('{}', { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '120' } }) });
+  await assert.rejects(run(createRunner({ fetch: limited }), 'grok.detail', { id: GROK_CONV }), (x) => x.code === 'rate_limited' && x.retryAfter === 120);
+});
+
+test('grok.file looks the image URL up again by response and index and fetches it from assets.grok.com', async () => {
+  const rid = '5e5f0000-0000-4000-8000-000000000015';
+  const loaded = fixture(`grok/load-responses-${GROK_CONV}.json`);
+  const img = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const asset = `https://assets.grok.com/${loaded.responses.find((r) => r.responseId === rid).generatedImageUrls[0]}`;
+  const route = (responses) => (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body), { responseIds: [rid] });
+    return jsonResponse({ responses });
+  };
+  const f = fakeFetch({ [`${GROK_BASE}/load-responses`]: route(loaded.responses), [asset]: bytesResponse(img) });
+  const frames = await run(createRunner({ fetch: f }), 'grok.file', { file_id: `${rid}_0`, conversation_id: GROK_CONV });
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].mime, 'image/png');
+  assert.deepEqual(Buffer.from(frames[0].chunk.data, 'base64'), Buffer.from(img));
+  assert.equal(f.calls[1].url, asset);
+  assert.equal(f.calls[1].init.credentials, 'include');
+
+  // No image at that index, or the response is gone: not_found.
+  await assert.rejects(run(createRunner({ fetch: f }), 'grok.file', { file_id: `${rid}_1`, conversation_id: GROK_CONV }), (e) => e.code === 'not_found');
+  const gone = fakeFetch({ [`${GROK_BASE}/load-responses`]: route([]) });
+  await assert.rejects(run(createRunner({ fetch: gone }), 'grok.file', { file_id: `${rid}_0`, conversation_id: GROK_CONV }), (e) => e.code === 'not_found');
+  // An image URL on any other host is refused without a fetch.
+  for (const u of ['https://evil.example/x.png', 'http://assets.grok.com/x.png', 'https://assets.grok.com.evil.example/x.png', 'https://u:p@assets.grok.com/x.png']) {
+    const other = fakeFetch({ [`${GROK_BASE}/load-responses`]: route([{ responseId: rid, generatedImageUrls: [u] }]) });
+    await assert.rejects(run(createRunner({ fetch: other }), 'grok.file', { file_id: `${rid}_0`, conversation_id: GROK_CONV }), (e) => e.code === 'endpoint_changed', u);
+    assert.equal(other.calls.length, 1, u);
+  }
+  // A file id that is not <response>_<index>.
+  for (const bad of ['r1', 'r1_x', 'r1_01', 'r1_100', '_0']) {
+    await assert.rejects(run(createRunner({ fetch: fakeFetch({}) }), 'grok.file', { file_id: bad, conversation_id: GROK_CONV }), (e) => e.code === 'bad_request', bad);
+  }
+});
+
+test('grok ops need the grok.com grant; ChatGPT and claude.ai do not change', async () => {
+  const f = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ conversations: [] }) });
+  const sent = [];
+  const sender = { send: async (site) => (sent.push(site), { conversation_id: 'c1' }), close: async () => ({ closed: 1 }) };
+  const perms = fakePermissions(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*', 'https://assets.grok.com/*']);
+  const r = createRunner({ fetch: f, sender, permissions: perms });
+  // The image host alone is not enough: grok.com is Grok's page origin.
+  for (const [op, args] of [['grok.send', { message: 'hi' }], ['grok.list', { count: 1 }], ['grok.detail', { id: 'c1' }], ['grok.file', { file_id: 'r1_0', conversation_id: 'c1' }]]) {
+    await assert.rejects(run(r, op, args), (e) => e.code === 'permission_missing' && /Grok/.test(e.message), op);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(await run(r, 'grok.close', { conversation_id: 'c1' }), [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai']);
+  // grok.com without its image host is granted: only image downloads need assets.grok.com.
+  perms.granted.delete('https://assets.grok.com/*');
+  perms.granted.add('https://grok.com/*');
+  await run(r, 'grok.send', { message: 'hi' });
+  assert.deepEqual(sent, ['grok']);
+  assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai', 'grok']);
 });

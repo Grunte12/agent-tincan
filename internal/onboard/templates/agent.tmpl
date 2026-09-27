@@ -14,13 +14,13 @@ agent. claude-code and generic get one line saying when to add the prefix.
 history is a Go service, not a model: it carries TINCAN_CONFIG like the
 fresh-session kinds, but its path is always ~/.config/tincan/history.json (the
 service's default config), and its block has no standing instructions.
-The web agents (chatgpt-web, claude-web) are Go services too: their config
+The web agents (chatgpt-web, claude-web, grok-web) are Go services too: their config
 path is always ~/.config/tincan/<kind>.json, the one tincan web install's
 service definition sets.
 */ -}}
 
-{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else if or (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
-{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else if or (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
+{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
 {{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
 {{- define "setup.cfghint" -}}
 If another agent already runs on this machine, prefix every tincan command (join, mcp, listen, rejoin) with TINCAN_CONFIG={{template "cfgpath" .}}.
@@ -49,7 +49,7 @@ If your Agent Tincan tools are missing or show 0 tools, or tincan cannot reach t
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}} --name {{.Name}}{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "grok-web")}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
@@ -99,17 +99,18 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- end -}}
 
 {{- define "instructions.history" -}}
-{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
-{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
-{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else}}chatgpt{{end}}{{end -}}
+{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
+{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else}}chatgpt{{end}}{{end -}}
 
 {{- define "instructions.web" -}}
 {{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer and any generated images attached. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 {{- define "instructions.chatgpt-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.claude-web"}}{{template "instructions.web" .}}{{end -}}
+{{- define "instructions.grok-web"}}{{template "instructions.web" .}}{{end -}}
 
 {{- define "instructions.generic" -}}
 {{- if eq .Wake "webhook" -}}
@@ -208,6 +209,10 @@ Check it from another agent: tincan ask {{.Name}} "what was the last thing {{.Ow
 Name the agent {{.Kind}} when you invite it: tincan web serve and its service expect that name (pass --name to tincan web serve for another).
 Run it on the machine where {{.Owner}} uses Chrome, logged in to {{template "websitefull" .}}. It types each request into that site as {{.Owner}}, in a background tab the Tincan Chrome extension opens and closes; the chats show up in {{.OwnerPoss}} history there.
 It needs the Tincan Chrome extension and its native host, the same ones the history agent uses: install the extension, then run tincan history install once (it also writes the history service definition; pass --no-service if you do not run history).
+{{- if eq .Kind "grok-web"}}
+grok.com is an optional site: open chrome://extensions > Agent Tincan History > Details > Extension options and click Grant for Grok (grok.com and its image host assets.grok.com). Until then every request is answered with a grant reminder, and tincan web serve --site grok refuses to start while the extension is connected.
+xAI's terms prohibit automated access to Grok. This agent acts as {{.Owner}} on {{.OwnerPoss}} own account, one request at a time and at human pace, but xAI can still limit or suspend the account; use it only if {{.Owner}} accepts that.
+{{- end}}
 Write the service definition: tincan web install --site {{template "websiteflag" .}}. It writes a launchd agent on macOS (a systemd user unit on Linux) and prints the command that starts it. It starts nothing itself.
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.{{template "websiteflag" .}}.plist).
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
@@ -216,9 +221,10 @@ Threading: a first line "new chat" starts a new conversation, "conversation: <id
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
 Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
-{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else}}chatgpt.com{{end}}{{end -}}
+{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.claude-web"}}{{template "setup.web" .}}{{end -}}
+{{- define "setup.grok-web"}}{{template "setup.web" .}}{{end -}}
 
 {{- define "setup.generic" -}}
 {{template "setup.tools" .}}
@@ -236,7 +242,8 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
 {{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
-{{- define "title.history"}}History service for ChatGPT, claude.ai, Codex and Claude Code chats{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Codex and Claude Code chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
+{{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

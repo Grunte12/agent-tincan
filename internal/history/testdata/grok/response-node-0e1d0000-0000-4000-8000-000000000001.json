@@ -1,0 +1,10 @@
+{
+  "responseNodes": [
+    {"responseId": "5e5f0000-0000-4000-8000-000000000011", "sender": "human"},
+    {"responseId": "5e5f0000-0000-4000-8000-000000000012", "sender": "assistant", "parentResponseId": "5e5f0000-0000-4000-8000-000000000011"},
+    {"responseId": "5e5f0000-0000-4000-8000-000000000013", "sender": "human", "parentResponseId": "5e5f0000-0000-4000-8000-000000000012"},
+    {"responseId": "5e5f0000-0000-4000-8000-000000000015", "sender": "assistant", "parentResponseId": "5e5f0000-0000-4000-8000-000000000013"},
+    {"responseId": "5e5f0000-0000-4000-8000-000000000014", "sender": "assistant", "parentResponseId": "5e5f0000-0000-4000-8000-000000000013"}
+  ],
+  "inflightResponses": []
+}
