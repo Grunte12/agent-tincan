@@ -20,8 +20,43 @@ closed after 10 minutes regardless).
 All page selectors are in the `SELECTORS` table in `send.js`; see
 docs/adapters/web-agents.md.
 
-On connect the worker sends the host a hello with its version and the sha256
-of each file, hashed once when the worker started (so it describes the code
+## Site access and the options page
+
+`SITE_ACCESS` in `ops.js` lists each site's origins, keyed by its op prefix.
+Before any operation except close, the worker asks
+`chrome.permissions.contains` for the site's origins and fails with
+`permission_missing` (no tab, no fetch) when they are not granted. Close runs
+regardless, so a grant revoked while a reply is read still lets the tab close.
+ChatGPT and claude.ai are required `host_permissions`, as before, so an
+upgrade asks for nothing new; the owner can still withhold them in Chrome's
+site access settings. Sites added later go under `optional_host_permissions`
+(none yet, so the manifest has no such key) and are granted from the options
+page: `options.html` and `options.js`, opened from `chrome://extensions` >
+Agent Tincan History > Details > Extension options. It lists every site in
+`SITE_ACCESS`, shows whether it is granted, and its Grant button calls
+`chrome.permissions.request` straight from the click (Chrome allows the
+request only during a user gesture). The page is built with `textContent`, has
+no inline script, and never runs in a site's page.
+
+The hello lists the granted sites (`granted`, op prefixes), and the worker
+says hello again on `chrome.permissions.onAdded` and `onRemoved`, so the host
+learns a grant without a reconnect. The host treats a hello without `granted`
+(an older extension) as ChatGPT and claude.ai only. `tincan web serve` asks
+the host (`host.status`, answered by the host itself) at startup and exits
+only when the extension is connected and reports its site ungranted.
+
+## Failure codes
+
+Besides `not_logged_in`, `not_found`, `rate_limited` and the rest, the fetch
+check reports anti-bot pages as `blocked`: a Cloudflare challenge (the
+`cf-mitigated` header, or a "Just a moment..." page), a 403 JSON refusal that
+names anti-bot rules or a captcha, and a redirect to Google's `/sorry/`
+interstitial. A plain 401 stays `not_logged_in`. A session probe (ChatGPT's
+`/api/auth/session`, claude.ai's organizations) that was redirected to
+another host is a sign-in page, so it is `not_logged_in` and no send follows.
+
+On connect the worker sends the host a hello with its version, its granted
+sites and the sha256 of each file, hashed once when the worker started (so it describes the code
 Chrome loaded). When `tincan history install --extension-dir` (or a run from
 the repo checkout) told the host where the unpacked files are, and they
 differ, the host sends `extension.reload` and the worker calls

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, errorFrame, OpError, OPS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
+import { validate, createRunner, errorFrame, grantedSites, helloMessage, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -352,7 +352,7 @@ test('message content is data: a detail containing script text is returned untou
 
 test('worker code has no dynamic code execution', () => {
   const src = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
-  for (const f of ['../ops.js', '../background.js', '../send.js']) {
+  for (const f of ['../ops.js', '../background.js', '../send.js', '../options.js']) {
     for (const banned of [/\beval\s*\(/, /new\s+Function\s*\(/, /importScripts\s*\(/, /set(Timeout|Interval)\s*\(\s*['"`]/, /chrome\.(debugger|webRequest|cookies|downloads)/]) {
       assert.ok(!banned.test(src(f)), `${f} matches ${banned}`);
     }
@@ -373,4 +373,137 @@ test('worker code has no dynamic code execution', () => {
   for (const m of send.matchAll(/inject\(tab\.id, (\w+),/g)) {
     assert.ok(['pageProbe', 'pageFill', 'pageSubmit'].includes(m[1]), m[1]);
   }
+});
+
+// ---- Site access: every operation but close needs its site's grant.
+
+// fakePermissions answers chrome.permissions.contains from a set of
+// granted origins.
+function fakePermissions(granted) {
+  const asked = [];
+  return {
+    asked,
+    granted: new Set(granted),
+    async contains({ origins }) {
+      asked.push(origins);
+      return origins.every((o) => this.granted.has(o));
+    },
+  };
+}
+
+const ALL_ORIGINS = Object.values(SITE_ACCESS).flatMap((s) => s.origins);
+
+test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
+  const m = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const required = Object.values(SITE_ACCESS).filter((s) => s.required).flatMap((s) => s.origins);
+  const optional = Object.values(SITE_ACCESS).filter((s) => !s.required).flatMap((s) => s.origins);
+  // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new.
+  assert.deepEqual(m.host_permissions, ['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
+  assert.deepEqual(m.host_permissions, required);
+  assert.deepEqual(m.optional_host_permissions || [], optional);
+  assert.equal(m.options_ui.page, 'options.html');
+  for (const s of Object.values(SITE_ACCESS)) {
+    assert.ok(typeof s.label === 'string' && s.label !== '');
+    assert.ok(s.origins.length > 0 && s.origins.every((o) => /^https:\/\/[a-z0-9.*-]+\/\*$/.test(o)), s.label);
+  }
+  // Every op prefix but extension.* has a site entry.
+  for (const op of OPS) {
+    const prefix = op.split('.')[0];
+    if (prefix !== 'extension') assert.ok(Object.hasOwn(SITE_ACCESS, prefix), op);
+  }
+});
+
+test('an op for a site without its grant fails permission_missing and opens no tab or fetch', async () => {
+  const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }) });
+  const sent = [];
+  const closed = [];
+  const sender = {
+    send: async (site, a) => (sent.push(site), { conversation_id: 'c1', url: '', submitted_at: 1 }),
+    close: async (site, id) => (closed.push([site, id]), { closed: 1 }),
+  };
+  const perms = fakePermissions(['https://claude.ai/*']);
+  const r = createRunner({ fetch: f, sender, permissions: perms });
+  for (const [op, args] of [['chatgpt.send', { message: 'hi' }], ['chatgpt.list', { count: 1 }], ['chatgpt.detail', { id: 'c1' }], ['chatgpt.file', { file_id: 'file-1' }]]) {
+    let caught;
+    await assert.rejects(run(r, op, args), (e) => ((caught = e), e.code === 'permission_missing'), op);
+    assert.match(errorFrame(caught).error.message, /options page/);
+  }
+  assert.equal(f.calls.length, 0, 'no fetch without the grant');
+  assert.deepEqual(sent, [], 'no tab without the grant');
+  // Closing a tab the extension opened needs no site access: a grant
+  // revoked while a reply is read still lets its tab close.
+  assert.deepEqual(await run(r, 'chatgpt.close', { conversation_id: 'c1' }), [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(closed, [['chatgpt', 'c1']]);
+  assert.deepEqual(perms.asked[0], [...SITE_ACCESS.chatgpt.origins]);
+
+  // Granted: the op runs.
+  perms.granted.add('https://chatgpt.com/*');
+  perms.granted.add('https://*.oaiusercontent.com/*');
+  const frames = await run(r, 'chatgpt.send', { message: 'hi' });
+  assert.equal(frames[0].result.conversation_id, 'c1');
+  assert.deepEqual(sent, ['chatgpt']);
+
+  // A permissions API that throws counts as not granted.
+  const broken = createRunner({ fetch: f, sender, permissions: { contains: async () => { throw new Error('x'); } } });
+  await assert.rejects(run(broken, 'claudeai.list', { count: 1 }), (e) => e.code === 'permission_missing');
+});
+
+test('the hello lists the granted sites', async () => {
+  const files = { 'manifest.json': 'x' };
+  const perms = fakePermissions(['https://claude.ai/*']);
+  const h = await helloMessage({ manifest: { version: '1.0.0' }, files, permissions: perms });
+  assert.deepEqual(h, { id: 0, hello: { version: '1.0.0', unpacked: true, files, granted: ['claudeai'] } });
+  perms.granted = new Set(ALL_ORIGINS);
+  assert.deepEqual((await grantedSites(perms)).sort(), Object.keys(SITE_ACCESS).sort());
+});
+
+test('anti-bot pages are blocked; a plain 401 or a 403 permission error is not_logged_in', async () => {
+  const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
+  const redirected = (res, url) => {
+    Object.defineProperty(res, 'url', { value: url });
+    Object.defineProperty(res, 'redirected', { value: true });
+    return res;
+  };
+  const cases = [
+    ['cloudflare header on a 403', () => new Response('{}', { status: 403, headers: { 'content-type': 'application/json', 'cf-mitigated': 'challenge' } }), 'blocked'],
+    ['cloudflare header on a 503', () => new Response('<html></html>', { status: 503, headers: { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } }), 'blocked'],
+    ['challenge page served 200', () => jsonResponse('<!DOCTYPE html><title>Just a moment...</title>', 200, 'text/html'), 'blocked'],
+    ['403 JSON with an anti-bot marker', () => jsonResponse({ error: { code: 7, message: 'Request rejected by anti-bot rules.' } }, 403), 'blocked'],
+    ['google /sorry/ interstitial', () => redirected(jsonResponse('<html>unusual traffic</html>', 429, 'text/html'), 'https://www.google.com/sorry/index?continue=x'), 'blocked'],
+    ['google /sorry/ served 200', () => redirected(jsonResponse('<html></html>', 200, 'text/html'), 'https://www.google.com/sorry/index'), 'blocked'],
+    ['plain 401', () => jsonResponse({ detail: 'expired' }, 401), 'not_logged_in'],
+    ['401 HTML', () => jsonResponse('<html>Just a moment...</html>', 401, 'text/html'), 'not_logged_in'],
+    ['403 permission error', () => jsonResponse({ error: { type: 'permission_error' } }, 403), 'not_logged_in'],
+  ];
+  for (const [name, resp, code] of cases) {
+    const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [listURL]: () => resp() });
+    await assert.rejects(run(createRunner({ fetch: f }), 'chatgpt.list', { count: 1 }), (e) => e.code === code, name);
+  }
+});
+
+test('a session probe redirected to another host is not_logged_in and nothing is sent', async () => {
+  const sent = [];
+  const sender = { send: async (site) => (sent.push(site), { conversation_id: 'c1' }) };
+  const moved = (url) => () => {
+    const res = jsonResponse('<html>Log in</html>', 200, 'text/html');
+    Object.defineProperty(res, 'url', { value: url });
+    Object.defineProperty(res, 'redirected', { value: true });
+    return res;
+  };
+  const chat = createRunner({ fetch: fakeFetch({ [SESSION]: moved('https://auth.openai.com/log-in') }), sender });
+  await assert.rejects(run(chat, 'chatgpt.send', { message: 'hi' }), (e) => e.code === 'not_logged_in');
+  const claude = createRunner({ fetch: fakeFetch({ 'https://claude.ai/api/organizations': moved('https://accounts.google.com/v3/signin/identifier') }), sender });
+  await assert.rejects(run(claude, 'claudeai.send', { message: 'hi' }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(sent, []);
+  // A same-host redirect is followed as before.
+  const same = fakeFetch({
+    [SESSION]: () => {
+      const res = jsonResponse({ accessToken: TOKEN });
+      Object.defineProperty(res, 'url', { value: 'https://chatgpt.com/api/auth/session?x=1' });
+      Object.defineProperty(res, 'redirected', { value: true });
+      return res;
+    },
+  });
+  await run(createRunner({ fetch: same, sender }), 'chatgpt.send', { message: 'hi' });
+  assert.deepEqual(sent, ['chatgpt']);
 });

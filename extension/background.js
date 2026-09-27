@@ -3,7 +3,9 @@
 // Connects to the native host `tincan history native-host` and answers its
 // requests with the fixed operations in ops.js (sends go through send.js).
 // On connect it says hello with its version and file hashes, so the host
-// can ask for a reload when the unpacked files on disk are newer. An open
+// can ask for a reload when the unpacked files on disk are newer, and the
+// sites it has access to; a grant or revocation (from the options page or
+// Chrome's site settings) sends the hello again on the same port. An open
 // native port keeps the worker alive; if the host is missing or exits, an
 // alarm retries.
 
@@ -15,6 +17,7 @@ const runner = createRunner({
   fetch: (url, init) => fetch(url, init),
   sender: createSender({ tabs: chrome.tabs, scripting: chrome.scripting }),
   reload: () => chrome.runtime.reload(),
+  permissions: chrome.permissions,
 });
 let port = null;
 // The files are hashed once, when this worker starts: every hello reports
@@ -67,16 +70,28 @@ function connect() {
     void chrome.runtime.lastError;
     if (port === p) port = null;
   });
+  hello(p);
+}
+
+// hello tells the host on port p who this worker is and which sites it
+// may serve.
+function hello(p) {
   loadedFiles
-    .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files }))
+    .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files, permissions: chrome.permissions }))
     .then((m) => {
       if (port === p) post(m);
     })
     .catch(() => {});
 }
 
+function grantsChanged() {
+  if (port) hello(port);
+}
+
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+chrome.permissions.onAdded.addListener(grantsChanged);
+chrome.permissions.onRemoved.addListener(grantsChanged);
 chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONNECT_ALARM) connect();

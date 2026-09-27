@@ -42,6 +42,11 @@ type fakeBrowser struct {
 	sendErr string
 	// block makes sends wait for the request context to end.
 	block bool
+	// detailErr, when set, fails every detail read after the first
+	// detailErrAfter with this code (a grant revoked mid-poll).
+	detailErr      string
+	detailErrAfter int
+	details        int
 }
 
 type fakeTurn struct {
@@ -128,6 +133,13 @@ func (f *fakeBrowser) Exchange(ctx context.Context, req NativeRequest, recv func
 		return err
 	case OpChatGPTDetail:
 		f.mu.Lock()
+		f.details++
+		if f.detailErr != "" && f.details > f.detailErrAfter {
+			code := f.detailErr
+			f.mu.Unlock()
+			_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: code, Message: "fake " + code}})
+			return err
+		}
 		turns, ok := f.convs[req.Args.ID]
 		var view []fakeTurn
 		for _, t := range turns {
@@ -502,6 +514,43 @@ func TestWebReplyNeverFinishesTimesOutAndClosesTab(t *testing.T) {
 	b, _ := os.ReadFile(rig.state)
 	if !strings.Contains(string(b), `"conv-1"`) {
 		t.Fatalf("state %s", b)
+	}
+}
+
+// The owner revokes the site's grant while the reply is being read: the
+// asker is told to grant it on the options page, and the tab is closed
+// (close needs no grant).
+func TestWebGrantRevokedMidPollRepliesPermissionMissingAndClosesTab(t *testing.T) {
+	rig := newWebRig(t)
+	rig.browser.inProgress = -1
+	rig.browser.detailErr, rig.browser.detailErrAfter = "permission_missing", 2
+	res := rig.ask(t, "grokbot", "a question")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusFailed || !strings.Contains(body, "options page") || !strings.Contains(body, "Extension options") || !strings.Contains(body, "conv-1") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+	if n := rig.browser.opCount(OpChatGPTDetail); n != 3 {
+		t.Fatalf("detail polled %d times; the wait should end at the first permission_missing", n)
+	}
+	if got := rig.browser.closed(); len(got) != 1 || got[0] != "conv-1" {
+		t.Fatalf("closes = %v", got)
+	}
+}
+
+// A send refused for a missing grant or an anti-bot page names the cause
+// and the fix.
+func TestWebSendPermissionMissingAndBlockedReplies(t *testing.T) {
+	for code, want := range map[string]string{
+		"permission_missing": "Extension options",
+		"blocked":            "anti-bot check",
+		"not_logged_in":      "not logged in to chatgpt.com",
+	} {
+		rig := newWebRig(t)
+		rig.browser.sendErr = code
+		res := rig.ask(t, "grokbot", "hello")
+		if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, want) {
+			t.Errorf("%s: %s %q", code, res.Status, res.Reply.Body)
+		}
 	}
 }
 

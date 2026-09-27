@@ -1,0 +1,83 @@
+// Agent Tincan History options page: lists each site in SITE_ACCESS, says
+// whether Chrome has granted the extension its origins, and offers a Grant
+// button for a site that is not granted.
+//
+// Chrome shows its own prompt for a grant and accepts a request only
+// during a user gesture, so the button's click handler calls
+// permissions.request before anything else (no await first). The page is
+// built with createElement and textContent only, runs as an extension page
+// (never in a site's page), and holds no state of its own: it reads the
+// grants from Chrome each time. A grant or revocation also reaches the
+// worker (chrome.permissions.onAdded/onRemoved), which tells the native
+// host.
+
+import { SITE_ACCESS, siteGranted } from './ops.js';
+
+// siteStates lists every site with whether its origins are granted.
+export async function siteStates(permissions) {
+  const out = [];
+  for (const [site, s] of Object.entries(SITE_ACCESS)) {
+    out.push({ site, label: s.label, granted: await siteGranted(permissions, site) });
+  }
+  return out;
+}
+
+// renderOptions fills the page's #sites list and keeps it current. It
+// returns {ready}, a promise for the first render.
+export function renderOptions({ document, permissions }) {
+  const list = document.getElementById('sites');
+  const rows = new Map();
+
+  function row(site, label) {
+    const li = document.createElement('li');
+    li.setAttribute('data-site', site);
+    const name = document.createElement('span');
+    name.className = 'label';
+    name.textContent = label;
+    const status = document.createElement('span');
+    status.className = 'status';
+    const button = document.createElement('button');
+    button.textContent = 'Grant';
+    button.addEventListener('click', () => {
+      button.disabled = true;
+      let asked;
+      try {
+        asked = Promise.resolve(permissions.request({ origins: [...SITE_ACCESS[site].origins] }));
+      } catch (e) {
+        asked = Promise.reject(e);
+      }
+      asked
+        .catch(() => false)
+        .finally(() => {
+          button.disabled = false;
+          refresh();
+        });
+    });
+    li.append(name, status, button);
+    return { li, status, button };
+  }
+
+  async function refresh() {
+    for (const s of await siteStates(permissions)) {
+      let r = rows.get(s.site);
+      if (!r) {
+        r = row(s.site, s.label);
+        rows.set(s.site, r);
+      }
+      r.status.textContent = s.granted ? 'Granted' : 'Not granted';
+      r.status.className = s.granted ? 'status granted' : 'status';
+      r.button.hidden = s.granted;
+    }
+    list.replaceChildren(...[...rows.values()].map((r) => r.li));
+  }
+
+  // A change made elsewhere (chrome://extensions site access) shows here
+  // too.
+  if (permissions.onAdded) permissions.onAdded.addListener(() => refresh());
+  if (permissions.onRemoved) permissions.onRemoved.addListener(() => refresh());
+  return { ready: refresh() };
+}
+
+if (typeof document !== 'undefined' && typeof chrome !== 'undefined' && chrome.permissions) {
+  renderOptions({ document, permissions: chrome.permissions });
+}

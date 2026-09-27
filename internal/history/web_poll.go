@@ -197,7 +197,8 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			}
 			w.logf("conversation %s: detail: %v (rate limited; next read in %s)", convID, err, after)
 			delay = after
-		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected):
+		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected),
+			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked):
 			return nil, a.bound, err
 		default:
 			failures++

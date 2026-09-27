@@ -114,11 +114,19 @@ func webServeCmd() *cobra.Command {
 			if me.Name != name {
 				return wrongWebAgent(name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
+			// A connected extension that reports the site ungranted cannot
+			// serve it, so the service stops here. With no extension
+			// connected (launchd starts this at login, often before Chrome)
+			// it starts, and each request gets the matching reply.
+			native := history.NewClient()
+			if err := native.CheckSiteGrant(ctx, src); err != nil {
+				return fmt.Errorf("web serve refuses to start: %w", err)
+			}
 			agent := &history.WebAgent{
 				Relay:       r,
 				Site:        src,
 				Name:        name,
-				Native:      history.NewClient(),
+				Native:      native,
 				Allowlist:   history.FileAllowlist(allowPath),
 				StatePath:   expandHome(statePath),
 				JournalPath: history.DefaultWebJournalPath(name),

@@ -15,14 +15,17 @@ import (
 	"time"
 )
 
-// Hello is what the extension sends when it connects to the native host:
-// its manifest version, whether it is unpacked (only an unpacked extension
-// re-reads files from disk on reload), and the sha256 of each of its files
-// as Chrome loaded them.
+// Hello is what the extension sends when it connects to the native host,
+// and again whenever a site grant changes: its manifest version, whether
+// it is unpacked (only an unpacked extension re-reads files from disk on
+// reload), the sha256 of each of its files as Chrome loaded them, and the
+// op prefixes of the sites Chrome has granted it. Granted is nil from an
+// extension older than site grants (see grantedPrefixes).
 type Hello struct {
 	Version  string            `json:"version"`
 	Unpacked bool              `json:"unpacked"`
 	Files    map[string]string `json:"files"`
+	Granted  []string          `json:"granted"`
 }
 
 // ExtensionDirEnv names the unpacked extension directory for the native
@@ -38,7 +41,7 @@ const reloadCooldown = 10 * time.Minute
 // extFileName is the shape of a file name a hello may report: a plain
 // top-level name, so a report can never make the host read outside the
 // extension directory.
-var extFileName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}\.(js|json)$`)
+var extFileName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}\.(js|json|html)$`)
 
 func fileSHA256(path string) (string, error) {
 	f, err := os.Open(path)

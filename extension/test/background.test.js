@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 // A fake chrome.runtime native port and alarms API.
 function fakeChrome() {
-  const listeners = { message: [], disconnect: [], startup: [], installed: [], alarm: [] };
-  const state = { connects: [], posted: [], alarms: [], port: null, reloads: 0 };
+  const listeners = { message: [], disconnect: [], startup: [], installed: [], alarm: [], permAdded: [], permRemoved: [] };
+  const state = { connects: [], posted: [], alarms: [], port: null, reloads: 0, granted: new Set(['https://claude.ai/*']) };
   const makePort = () => {
     const port = {
       postMessage: (m) => state.posted.push(JSON.parse(JSON.stringify(m))),
@@ -26,6 +26,11 @@ function fakeChrome() {
     },
     tabs: { create: async () => { throw new Error('no tabs in this test'); } },
     scripting: { executeScript: async () => { throw new Error('no scripting in this test'); } },
+    permissions: {
+      contains: async ({ origins }) => origins.every((o) => state.granted.has(o)),
+      onAdded: { addListener: (fn) => listeners.permAdded.push(fn) },
+      onRemoved: { addListener: (fn) => listeners.permRemoved.push(fn) },
+    },
     alarms: {
       create: (name, info) => state.alarms.push({ name, info }),
       onAlarm: { addListener: (fn) => listeners.alarm.push(fn) },
@@ -55,8 +60,31 @@ test('background connects to the native host and answers only valid requests', a
   assert.equal(hello.id, 0);
   assert.equal(hello.hello.version, '9.9.9');
   assert.equal(hello.hello.unpacked, true);
-  assert.deepEqual(Object.keys(hello.hello.files), ['manifest.json', 'background.js', 'ops.js', 'send.js', 'icon16.png', 'icon48.png', 'icon128.png']);
+  assert.deepEqual(Object.keys(hello.hello.files), ['manifest.json', 'background.js', 'ops.js', 'send.js', 'options.html', 'options.js', 'icon16.png', 'icon48.png', 'icon128.png']);
   assert.match(hello.hello.files['ops.js'], /^[0-9a-f]{64}$/);
+  // It lists the sites Chrome has granted.
+  assert.deepEqual(hello.hello.granted, ['claudeai']);
+
+  // chatgpt.com's access is withheld: its ops fail before any fetch.
+  const sendOp = (m) => listeners.message.forEach((fn) => fn(m));
+  sendOp({ id: 7, op: 'chatgpt.list', args: { count: 3 } });
+  await settle();
+  assert.equal(state.posted.at(-1).error.code, 'permission_missing');
+  assert.equal(calls.length, 0);
+
+  // Granting it (the options page's button) sends a new hello on the same
+  // port: the host learns the new list without a reconnect.
+  state.granted.add('https://chatgpt.com/*');
+  state.granted.add('https://*.oaiusercontent.com/*');
+  listeners.permAdded.forEach((fn) => fn({ origins: ['https://chatgpt.com/*'] }));
+  await settle();
+  assert.equal(state.connects.length, 1, 'no reconnect');
+  assert.deepEqual(state.posted.filter((m) => m.hello).map((m) => m.hello.granted), [['claudeai'], ['chatgpt', 'claudeai']]);
+  state.granted.delete('https://claude.ai/*');
+  listeners.permRemoved.forEach((fn) => fn({ origins: ['https://claude.ai/*'] }));
+  await settle();
+  assert.deepEqual(state.posted.filter((m) => m.hello).at(-1).hello.granted, ['chatgpt']);
+  state.granted.add('https://claude.ai/*');
 
   const send = (m) => listeners.message.forEach((fn) => fn(m));
   send({ id: 1, op: 'chatgpt.list', args: { count: 3 } });
@@ -93,8 +121,8 @@ test('background connects to the native host and answers only valid requests', a
   assert.equal(state.connects.length, 2);
   await settle();
   const hellos = state.posted.filter((m) => m.hello);
-  assert.equal(hellos.length, 2);
-  assert.deepEqual(hellos[1].hello.files, hello.hello.files, 'hello reports the loaded files, not the ones on disk now');
+  assert.equal(hellos.length, 4);
+  assert.deepEqual(hellos[3].hello.files, hello.hello.files, 'hello reports the loaded files, not the ones on disk now');
   // Already connected: no duplicate port.
   listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
   listeners.startup.forEach((fn) => fn());

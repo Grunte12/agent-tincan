@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,6 +168,10 @@ const (
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
+	// OpHostStatus is answered by the native host itself and never
+	// reaches the extension: what the host knows about the connected
+	// extension (ExtensionStatus).
+	OpHostStatus Op = "host.status"
 )
 
 // OpArgs are an operation's arguments: validated ids and integers, a
@@ -328,7 +333,18 @@ var (
 	// The send operations' page failures.
 	ErrComposerNotFound = errors.New("message box not found")
 	ErrSendFailed       = errors.New("send failed")
+	// ErrPermissionMissing: Chrome has not granted the extension the
+	// site's host access (an optional site not yet granted on the options
+	// page, or access the owner withheld).
+	ErrPermissionMissing = errors.New("site access not granted")
+	// ErrBlocked: the site answered with an anti-bot check (a Cloudflare
+	// challenge, a Google /sorry/ page, an anti-bot refusal) instead of
+	// its API.
+	ErrBlocked = errors.New("blocked by an anti-bot check")
 )
+
+// OptionsPageHint says where the extension's site grants are made.
+const OptionsPageHint = "chrome://extensions > Agent Tincan History > Details > Extension options"
 
 // errHostClosed means the host ended a request without a final frame.
 var errHostClosed = errors.New("native host closed the connection")
@@ -372,6 +388,10 @@ func (e *UnavailableError) Error() string {
 		reason = "no message box on the " + site + " page (the page may have changed)"
 	case ErrSendFailed:
 		reason = "the message could not be sent on " + site
+	case ErrPermissionMissing:
+		reason = "the Tincan Chrome extension has no access to " + site + "; grant it on the extension's options page (" + OptionsPageHint + ")"
+	case ErrBlocked:
+		reason = site + " showed an anti-bot check; open " + site + " in Chrome, complete the check, then try again"
 	case ErrRateLimited:
 		// The detail (a URL path, a cooldown note) adds nothing for the
 		// reader.
@@ -379,7 +399,7 @@ func (e *UnavailableError) Error() string {
 	default:
 		reason = site + " request failed"
 	}
-	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout {
+	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout && e.Kind != ErrPermissionMissing {
 		reason += " (" + e.Detail + ")"
 	}
 	return "source unavailable: " + string(e.Source) + ": " + reason
@@ -481,7 +501,9 @@ func fromNativeError(s Source, ne *NativeError) error {
 	case "endpoint_changed":
 		return unavailable(s, ErrEndpointChanged, detail)
 	case "blocked":
-		return unavailable(s, ErrEndpointChanged, "blocked: "+detail)
+		return unavailable(s, ErrBlocked, detail)
+	case "permission_missing":
+		return unavailable(s, ErrPermissionMissing, detail)
 	case "bad_request":
 		if detail == "unknown operation" {
 			detail = "unknown operation; the loaded extension is older than this tincan, reload it once from chrome://extensions"
@@ -546,6 +568,71 @@ func (c *Client) CooldownRemaining(src Source) time.Duration { return c.cooldown
 // does not, so it runs during a cooldown.
 func (op Op) hitsSite() bool {
 	return !op.is(opClose) && op != OpExtensionReload
+}
+
+// ExtensionStatus is the native host's answer to OpHostStatus.
+type ExtensionStatus struct {
+	// Hello is true once the connected extension has said hello.
+	Hello   bool   `json:"hello"`
+	Version string `json:"version,omitempty"`
+	// Granted lists the op prefixes of the sites the extension has host
+	// access to (grantedPrefixes).
+	Granted []string `json:"granted"`
+}
+
+// granted reports whether src's site is in s.Granted.
+func (s ExtensionStatus) granted(src Source) bool {
+	site := siteFor(src)
+	return site != nil && slices.Contains(s.Granted, site.opPrefix)
+}
+
+// grantedPrefixes is the op prefixes of the sites h says are granted. An
+// extension older than site grants sends no list; it has the host access
+// it always had, the alwaysGranted sites.
+func grantedPrefixes(h Hello) []string {
+	out := []string{}
+	for _, s := range webSites {
+		if (h.Granted == nil && s.alwaysGranted) || slices.Contains(h.Granted, s.opPrefix) {
+			out = append(out, s.opPrefix)
+		}
+	}
+	return out
+}
+
+// errNoHostStatus: the native host is older than OpHostStatus.
+var errNoHostStatus = errors.New("the native host does not report the extension's status")
+
+// ExtensionStatus asks the native host what it knows about the connected
+// extension. It fails when no host answers (Chrome or the extension is
+// not running) or the host is older than OpHostStatus.
+func (c *Client) ExtensionStatus(ctx context.Context) (ExtensionStatus, error) {
+	var st ExtensionStatus
+	if c.Channel == nil {
+		return st, ErrExtensionNotConnected
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := c.Channel.Exchange(ctx, NativeRequest{ID: requestSeq.Add(1), Op: OpHostStatus}, func(r NativeResponse) (bool, error) {
+		if r.Error != nil || !r.OK || json.Unmarshal(r.Result, &st) != nil {
+			return true, errNoHostStatus
+		}
+		return true, nil
+	})
+	return st, err
+}
+
+// CheckSiteGrant is web serve's startup check. It fails with
+// ErrPermissionMissing only when the extension is connected and reports
+// src ungranted. With no extension connected (launchd starts web serve at
+// login, often before Chrome) or an older host, it passes: the service
+// starts and answers each request with the not-connected or
+// permission_missing reply.
+func (c *Client) CheckSiteGrant(ctx context.Context, src Source) error {
+	st, err := c.ExtensionStatus(ctx)
+	if err != nil || !st.Hello || st.granted(src) {
+		return nil
+	}
+	return unavailable(src, ErrPermissionMissing, "")
 }
 
 // NewClient returns a client for the local native host socket.
@@ -1061,6 +1148,16 @@ func (h *NativeHost) readChrome() error {
 	}
 }
 
+// status is the host's answer to OpHostStatus, from the last hello.
+func (h *NativeHost) status() ExtensionStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.hello == nil {
+		return ExtensionStatus{Granted: []string{}}
+	}
+	return ExtensionStatus{Hello: true, Version: h.hello.Version, Granted: grantedPrefixes(*h.hello)}
+}
+
 func (h *NativeHost) forget(id int64) {
 	h.mu.Lock()
 	delete(h.pending, id)
@@ -1078,6 +1175,11 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 	var req NativeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		_ = WriteMessage(conn, NativeResponse{Error: &NativeError{Code: "bad_request", Message: "malformed request"}}, MaxHostMessage)
+		return
+	}
+	if req.Op == OpHostStatus {
+		res, _ := json.Marshal(h.status())
+		_ = WriteMessage(conn, NativeResponse{ID: req.ID, OK: true, Result: res}, MaxHostMessage)
 		return
 	}
 	if err := ValidateOp(req.Op, req.Args); err != nil || req.Op == OpExtensionReload {
