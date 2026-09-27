@@ -83,7 +83,7 @@ Files live in an `attachments` directory (0700, files 0600) beside the relay dat
 
 ## Request groups
 
-A send may include an optional `group` string of 1–64 ASCII letters, digits,
+A send may include an optional `group` string of 1 to 64 ASCII letters, digits,
 underscores or hyphens. The relay stores and echoes it on the request.
 Groups do not change identity, parent/chain checks, rate limits, wakes,
 allowlists, leases or attachment ownership: each target receives an ordinary
