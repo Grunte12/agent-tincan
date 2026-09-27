@@ -75,7 +75,9 @@ func (f failingPingResponder) Reply(context.Context, string, string, envelope.St
 	return envelope.Reply{}, &client.APIError{Code: f.status}
 }
 func TestAnswerPingsFailurePreservesInbox(t *testing.T) {
-	client.ShortPongRetry(t)
+	oldRetry := client.PongRetry
+	client.PongRetry = nil
+	t.Cleanup(func() { client.PongRetry = oldRetry })
 	for _, phase := range []string{"claim", "reply"} {
 		for _, status := range []int{409, 503} {
 			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {

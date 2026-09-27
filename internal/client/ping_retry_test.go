@@ -23,9 +23,9 @@ func (f *flakyPonger) Reply(context.Context, string, string, envelope.Status) (e
 }
 
 func TestAnswerPingsRetriesAFailedPong(t *testing.T) {
-	old := pongRetry
-	pongRetry = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { pongRetry = old })
+	old := PongRetry
+	PongRetry = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { PongRetry = old })
 	f := &flakyPonger{}
 	if _, err := AnswerPings(t.Context(), f, Inbox{Requests: []envelope.Request{{ID: "ping", Kind: envelope.KindPing}}}, "test"); err != nil {
 		t.Fatalf("a pong that succeeds on retry reported %v", err)

@@ -15,8 +15,8 @@ type PingResponder interface {
 	Reply(context.Context, string, string, envelope.Status) (envelope.Reply, error)
 }
 
-// pongRetry spaces the retries of a failed pong reply.
-var pongRetry = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second}
+// PongRetry spaces the retries of a failed pong reply. Tests shorten it.
+var PongRetry = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second}
 
 // AnswerPings removes pings from the inbox and answers them without model work.
 // The non-ping inbox is always returned. Claim races are benign; other failures
@@ -49,12 +49,12 @@ func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string)
 		body := fmt.Sprintf("pong (answered by %s, tincan %s)", surface, version)
 		var err error
 		for attempt := 0; ; attempt++ {
-			if _, err = r.Reply(ctx, req.ID, body, envelope.StatusAnswered); err == nil || IsStatus(err, 409) || attempt >= len(pongRetry) {
+			if _, err = r.Reply(ctx, req.ID, body, envelope.StatusAnswered); err == nil || IsStatus(err, 409) || attempt >= len(PongRetry) {
 				break
 			}
 			select {
 			case <-ctx.Done():
-			case <-time.After(pongRetry[attempt]):
+			case <-time.After(PongRetry[attempt]):
 				continue
 			}
 			break

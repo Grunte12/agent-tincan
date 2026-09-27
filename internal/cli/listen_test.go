@@ -271,6 +271,9 @@ func TestListenContinuesAfterPingFailure(t *testing.T) {
 		for _, status := range []int{409, 503} {
 			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
 				fastListen(t, time.Second, time.Minute, time.Second)
+				oldRetry := client.PongRetry
+				client.PongRetry = nil
+				t.Cleanup(func() { client.PongRetry = oldRetry })
 				var peeks, failures atomic.Int32
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
@@ -319,7 +322,7 @@ func TestInboxPingFailurePreservesWork(t *testing.T) {
 		case "/v1/poll":
 			fmt.Fprint(w, `{"requests":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask","body":"real work"}]}`)
 		case "/v1/requests/ping/claim":
-			http.Error(w, `{"error":"ping failed"}`, 503)
+			http.Error(w, `{"error":"ping failed"}`, http.StatusServiceUnavailable)
 		case "/v1/requests/work/claim":
 			fmt.Fprint(w, `{"id":"work","kind":"ask","body":"real work"}`)
 		default:
@@ -408,7 +411,7 @@ func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
 			fmt.Fprint(w, `{"waiting":2,"pending":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask"}]}`)
 			return
 		}
-		http.Error(w, `{"error":"ping failed"}`, 503)
+		http.Error(w, `{"error":"ping failed"}`, http.StatusServiceUnavailable)
 	}))
 	defer ts.Close()
 	relay, err := client.NewRelay(ts.URL, "")
