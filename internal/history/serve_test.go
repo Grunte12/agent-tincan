@@ -708,3 +708,57 @@ func TestRenderReplyLongConversationShowsNewestPrompts(t *testing.T) {
 		t.Errorf("short conversation:\n%s", short)
 	}
 }
+
+// hookReader calls before ahead of each Read of the wrapped fake reader.
+type hookReader struct {
+	*fakeReader
+	before func(ctx context.Context)
+}
+
+func (h hookReader) Read(ctx context.Context, q Query, o Options) ([]Conversation, error) {
+	h.before(ctx)
+	return h.fakeReader.Read(ctx, q, o)
+}
+
+// While the service handles a slow request it keeps its relay presence
+// fresh (a peek that claims nothing), so it does not show offline and a
+// request queued meanwhile stays queued.
+func TestServePresenceDuringSlowRequest(t *testing.T) {
+	rig := newServeRig(t, false)
+	rig.svc.PresenceInterval = 10 * time.Millisecond
+	codex := rig.mesh.Client(t, "codex")
+	var (
+		start    time.Time
+		lastPoll time.Time
+		queuedID string
+	)
+	rig.svc.Readers[SourceChatGPT] = hookReader{fakeReader: rig.chatgpt, before: func(ctx context.Context) {
+		start = time.Now()
+		q, err := codex.Send(ctx, "history", "a second question", envelope.KindAsk, "")
+		if err != nil {
+			t.Error(err)
+		}
+		queuedID = q.ID
+		time.Sleep(200 * time.Millisecond)
+		agents, err := codex.Agents(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		for _, a := range agents {
+			if a.Name == "history" {
+				lastPoll = a.LastPoll
+			}
+		}
+	}}
+	res := rig.ask(t, "grokbot", "what was the last thing Matt asked ChatGPT?")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if !lastPoll.After(start) {
+		t.Fatalf("last poll %s is not after the slow read began (%s): no presence during the request", lastPoll, start)
+	}
+	got, err := codex.Get(t.Context(), queuedID, 0)
+	if err != nil || got.Status != envelope.StatusQueued {
+		t.Fatalf("the request queued during the read: %s %v (want still queued)", got.Status, err)
+	}
+}
