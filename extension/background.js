@@ -73,13 +73,21 @@ function connect() {
   hello(p);
 }
 
+// helloSeq numbers the hellos this worker starts. The host keeps the last
+// hello it receives, and building one awaits Chrome's permissions API, so
+// two grant changes in quick succession can finish out of order; only the
+// newest hello started is posted, so an older one (a grant since revoked)
+// never overwrites a newer one.
+let helloSeq = 0;
+
 // hello tells the host on port p who this worker is and which sites it
 // may serve.
 function hello(p) {
+  const seq = ++helloSeq;
   loadedFiles
     .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files, permissions: chrome.permissions }))
     .then((m) => {
-      if (port === p) post(m);
+      if (port === p && seq === helloSeq) post(m);
     })
     .catch(() => {});
 }

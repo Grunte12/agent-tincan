@@ -90,8 +90,37 @@ test('siteStates reports each site and whether it is granted', async () => {
   const perms = fakePermissions(['https://claude.ai/*']);
   const states = await siteStates(perms);
   assert.deepEqual(states.map((s) => s.site), Object.keys(SITE_ACCESS));
-  assert.deepEqual(states.find((s) => s.site === 'claudeai'), { site: 'claudeai', label: 'claude.ai', granted: true });
+  assert.deepEqual(states.find((s) => s.site === 'claudeai'), { site: 'claudeai', label: 'claude.ai', granted: true, partial: false });
   assert.equal(states.find((s) => s.site === 'chatgpt').granted, false);
+  assert.equal(states.find((s) => s.site === 'chatgpt').partial, false);
+});
+
+// ChatGPT's page granted but its file host withheld: list, read and send
+// work, only files do not. The page says so rather than "Not granted",
+// and keeps a button that asks for the rest.
+test('a site with its pages granted but not its file host shows as partly granted', async () => {
+  const perms = fakePermissions(['https://claude.ai/*', 'https://chatgpt.com/*']);
+  const chat = (await siteStates(perms)).find((s) => s.site === 'chatgpt');
+  assert.deepEqual(chat, { site: 'chatgpt', label: 'ChatGPT', granted: false, partial: true });
+
+  const doc = fakeDocument();
+  const page = renderOptions({ document: doc, permissions: perms });
+  await page.ready;
+  let r = rows(doc);
+  assert.equal(r[0].status, 'Granted (images and files need file access)');
+  const status = doc.root.children[0].all((e) => e.className.split(' ').includes('status'))[0];
+  assert.equal(status.className, 'status partial');
+  assert.equal(r[0].button.hidden, false, 'the button stays to ask for the file host');
+  assert.equal(r[0].button.textContent, 'Grant file access');
+
+  perms.inGesture = true;
+  r[0].button.click();
+  perms.inGesture = false;
+  assert.deepEqual(perms.requests[0].origins, [...SITE_ACCESS.chatgpt.origins]);
+  await settle();
+  r = rows(doc);
+  assert.equal(r[0].status, 'Granted');
+  assert.equal(r[0].button.hidden, true);
 });
 
 test('the options page lists sites, shows grants, and grants from the click', async () => {
