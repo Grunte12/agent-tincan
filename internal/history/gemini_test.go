@@ -157,10 +157,16 @@ func TestGeminiSkipsWebAgentConversations(t *testing.T) {
 // crash: the named shapes, and every fixture position replaced by
 // something else.
 func TestGeminiUnexpectedShapes(t *testing.T) {
-	for _, raw := range []string{`{}`, `{"pages":"x"}`, `{"pages":[{"a":1}]}`, `{"pages":[[null,null,"x"]]}`, `{"pages":[[null,null,[5]]]}`, `{"pages":[[null,null,[[7]]]]}`, `[]`} {
+	for _, raw := range []string{`{}`, `{"pages":"x"}`, `{"pages":[{"a":1}]}`, `{"pages":[[null,null,"x"]]}`, `{"pages":[[null,null,[5]]]}`, `{"pages":[[null,null,[[7]]]]}`, `[]`,
+		// Entries, but no "c_" + hex id in any: the id format changed.
+		`{"pages":[[null,null,[["x_00000000000000a1","t"]]]]}`, `{"pages":[[null,null,[["c_not-hex","t"],["r_00000000000000a1","t"]]]]}`} {
 		if _, err := parseGeminiList(json.RawMessage(raw)); err == nil {
 			t.Errorf("list %s parsed", raw)
 		}
+	}
+	// No entries at all is an empty history, not a changed endpoint.
+	if convs, err := parseGeminiList(json.RawMessage(`{"pages":[[null,null,[]]]}`)); err != nil || len(convs) != 0 {
+		t.Errorf("empty list: %+v %v", convs, err)
 	}
 	for _, raw := range []string{`{}`, `"x"`, `[5]`, `[["turn"]]`, `[[[["c_x"]]]]`, `[[[["c_x","r_1"],null,null]]]`, `[[[["c_x","r_1"],null,[["hi"]],[5]]]]`, `[[[["c_x","r_1"],null,[["hi"]],[[[5]]]]]]`} {
 		if _, err := parseGeminiDetail("00000000000000a1", json.RawMessage(raw)); err == nil {

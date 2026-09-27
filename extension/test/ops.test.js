@@ -559,16 +559,31 @@ const GEMINI_RPC = 'https://gemini.google.com/_/BardChatUi/data/batchexecute';
 const APP_HTML = '<html><script>window.WIZ_global_data = {"SNlM0e":"dummy-at-token","cfb2h":"boq_dummy_20260927.00_p0","FdrFJe":"-1234567890"};</script></html>';
 const GEMINI_GRANT = ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*'];
 
-// batchResponse renders inner as batchexecute's answer for rpcid: the
-// guard, then length-prefixed chunks, the wrb.fr one first.
-function batchResponse(rpcid, inner, status = 200) {
+// batchChunks renders rows as batchexecute's answer: the guard, then
+// length-prefixed chunks, the wrb.fr one first.
+function batchChunks(row) {
   const chunk = (v) => {
     const line = JSON.stringify(v);
     return `${line.length}\n${line}\n`;
   };
-  const payload = inner === null ? null : JSON.stringify(inner);
-  const text = ")]}'\n\n" + chunk([['wrb.fr', rpcid, payload, null, null, inner === null ? [3] : null, 'generic'], ['di', 42], ['af.httprm', 41, '-1', 7]]) + chunk([['e', 4, null, null, 120]]);
-  return new Response(text, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+  return ")]}'\n\n" + chunk([row, ['di', 42], ['af.httprm', 41, '-1', 7]]) + chunk([['e', 4, null, null, 120]]);
+}
+
+// The error rows batchexecute sent live (2026-09-27) in place of a
+// payload: a missing or deleted conversation, and a payload it could not
+// take.
+const NOT_FOUND_ROW = (rpcid) => ['wrb.fr', rpcid, null, null, null, [5, null, [['type.googleapis.com/assistant.boq.bard.application.BardErrorInfo', [1167]]]], 'generic'];
+const MALFORMED_ROW = (rpcid) => ['wrb.fr', rpcid, null, null, null, [3], 'generic'];
+
+// batchResponse renders inner as batchexecute's answer for rpcid; null
+// renders the malformed-payload error row.
+function batchResponse(rpcid, inner, status = 200) {
+  const row = inner === null ? MALFORMED_ROW(rpcid) : ['wrb.fr', rpcid, JSON.stringify(inner), null, null, null, 'generic'];
+  return new Response(batchChunks(row), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+}
+
+function batchRow(row) {
+  return new Response(batchChunks(row), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
 }
 
 // geminiFetch answers the app page and batchexecute: rpc(rpcid, payload,
@@ -634,13 +649,23 @@ test('gemini.list reads MaZiqc page by page with the app page session, which nev
   assert.equal(f.calls.filter((c) => c.url === GEMINI_APP).length, 1, 'the app page is fetched once');
 });
 
+test('gemini.list: a first page with no payload is endpoint_changed; a later one ends the list', async () => {
+  const pages = fixture('gemini/list.json').pages;
+  let f = geminiFetch({ rpc: () => batchResponse('MaZiqc', null) });
+  await assert.rejects(run(createRunner({ fetch: f }), 'gemini.list', { count: 10 }), (e) => e.code === 'endpoint_changed');
+  f = geminiFetch({ rpc: (_rpcid, payload) => (payload[1] === null ? batchResponse('MaZiqc', pages[0]) : batchResponse('MaZiqc', null)) });
+  const frames = await run(createRunner({ fetch: f }), 'gemini.list', { count: 100 });
+  assert.deepEqual(frames, [{ ok: true, result: { pages: [pages[0]] } }]);
+});
+
 test('gemini.detail reads hNvQHb with the c_ id; a missing conversation is not_found', async () => {
   const inner = fixture('gemini/conversation-00000000000000a1.json');
   const f = geminiFetch({
     rpc: (rpcid, payload) => {
       assert.equal(rpcid, 'hNvQHb');
       if (payload[0] === 'c_00000000000000a1') return batchResponse('hNvQHb', inner);
-      return batchResponse('hNvQHb', null);
+      if (payload[0] === 'c_00000000000000ee') return batchResponse('hNvQHb', null);
+      return batchRow(NOT_FOUND_ROW('hNvQHb'));
     },
   });
   const r = createRunner({ fetch: f });
@@ -648,6 +673,8 @@ test('gemini.detail reads hNvQHb with the c_ id; a missing conversation is not_f
   const sent = JSON.parse(JSON.parse(new URLSearchParams(f.calls.at(-1).init.body).get('f.req'))[0][0][1]);
   assert.deepEqual(sent, ['c_00000000000000a1', 10, null, 1, [0], [4], null, 1]);
   await assert.rejects(run(r, 'gemini.detail', { id: '00000000000000ff' }), (e) => e.code === 'not_found');
+  // A payload the site could not take (code 3) is not a missing conversation.
+  await assert.rejects(run(r, 'gemini.detail', { id: '00000000000000ee' }), (e) => e.code === 'endpoint_changed');
   await assert.rejects(run(r, 'gemini.detail', { id: 'c_00000000000000a1' }), (e) => e.code === 'bad_request');
   await assert.rejects(run(r, 'gemini.detail', { id: 'abc-1' }), (e) => e.code === 'bad_request');
 });
@@ -655,7 +682,17 @@ test('gemini.detail reads hNvQHb with the c_ id; a missing conversation is not_f
 test('parseBatchexecute: anything but a wrb.fr answer for the rpcid is endpoint_changed', () => {
   const ok = ")]}'\n\n40\n" + JSON.stringify([['wrb.fr', 'X', '[1,2]', null]]) + '\n';
   assert.deepEqual(parseBatchexecute(ok, 'X'), [1, 2]);
-  assert.equal(parseBatchexecute(JSON.stringify([['wrb.fr', 'X', null, null, null, [5]]]), 'X'), null);
+  // The live error rows: code 5 on hNvQHb is not_found; code 3, code 5
+  // on another rpcid, or no payload and no code is endpoint_changed.
+  assert.throws(() => parseBatchexecute(batchChunks(NOT_FOUND_ROW('hNvQHb')), 'hNvQHb'), (e) => e.code === 'not_found');
+  assert.throws(() => parseBatchexecute(batchChunks(MALFORMED_ROW('hNvQHb')), 'hNvQHb'), (e) => e.code === 'endpoint_changed' && /3/.test(e.message));
+  assert.throws(() => parseBatchexecute(batchChunks(MALFORMED_ROW('MaZiqc')), 'MaZiqc'), (e) => e.code === 'endpoint_changed');
+  assert.throws(() => parseBatchexecute(batchChunks(NOT_FOUND_ROW('MaZiqc')), 'MaZiqc'), (e) => e.code === 'endpoint_changed');
+  assert.throws(() => parseBatchexecute(JSON.stringify([['wrb.fr', 'X', null]]), 'X'), (e) => e.code === 'endpoint_changed');
+  // nullOK (a later list page) takes a null payload, but never hides a
+  // missing conversation.
+  assert.equal(parseBatchexecute(batchChunks(MALFORMED_ROW('MaZiqc')), 'MaZiqc', { nullOK: true }), null);
+  assert.throws(() => parseBatchexecute(batchChunks(NOT_FOUND_ROW('hNvQHb')), 'hNvQHb', { nullOK: true }), (e) => e.code === 'not_found');
   for (const text of ['', ")]}'\n", '<html>nope</html>', JSON.stringify([['wrb.fr', 'Y', '[1]']]), JSON.stringify([['wrb.fr', 'X', '{bad json']]), JSON.stringify([['wrb.fr', 'X', 5]]), undefined]) {
     assert.throws(() => parseBatchexecute(text, 'X'), (e) => e.code === 'endpoint_changed', String(text));
   }
@@ -726,6 +763,13 @@ test('gemini.file captures the image in the send tab first, then fetches it in t
   // 3. Neither: the op fails, and the Go side notes the lost image.
   t = mk(() => null, () => new Response('', { status: 403, headers: { 'content-type': 'text/plain' } }));
   await assert.rejects(run(t.r, 'gemini.file', args), (e) => e instanceof OpError);
+  // The worker fetch must end on the image host: a redirect to a sign-in
+  // page is not_logged_in, and nothing is emitted.
+  t = mk(() => null, () => redirectedTo(bytesResponse(png), 'https://accounts.google.com/ServiceLogin'));
+  await assert.rejects(run(t.r, 'gemini.file', args), (e) => e.code === 'not_logged_in');
+  t = mk(() => null, () => redirectedTo(bytesResponse(png), 'https://lh3.googleusercontent.com/gg/dummy-star-1=s0'));
+  frames = await run(t.r, 'gemini.file', args);
+  assert.deepEqual(Buffer.from(frames[0].chunk.data, 'base64'), Buffer.from(png));
   // An image that is not in the conversation is not_found, with no capture.
   t = mk(() => null, () => bytesResponse(png));
   await assert.rejects(run(t.r, 'gemini.file', { ...args, file_id: 'rc_00000000000000b2-3' }), (e) => e.code === 'not_found');

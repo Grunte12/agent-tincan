@@ -328,7 +328,7 @@ func parseStructured(raw string) (Query, error) {
 }
 
 // ValidateServiceQuery checks a query from an extractor before any read:
-// Query.Validate plus a source that is one of the four. Failures are
+// Query.Validate plus a source that is one of Sources. Failures are
 // ErrUnclearQuestion.
 func ValidateServiceQuery(q Query) error {
 	if err := q.Validate(); err != nil {

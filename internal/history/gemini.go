@@ -192,6 +192,7 @@ func parseGeminiList(raw json.RawMessage) ([]Conversation, error) {
 	}
 	var out []Conversation
 	seen := map[string]bool{}
+	entries := 0
 	for _, p := range l.Pages {
 		page, err := decodeGemini(p)
 		if err != nil {
@@ -204,6 +205,7 @@ func parseGeminiList(raw json.RawMessage) ([]Conversation, error) {
 		if !ok {
 			return nil, errGeminiShape
 		}
+		entries += len(items)
 		for _, it := range items {
 			if _, ok := it.([]any); !ok {
 				return nil, errGeminiShape
@@ -220,6 +222,11 @@ func parseGeminiList(raw json.RawMessage) ([]Conversation, error) {
 			title, _ := gIndex(it, 1).(string)
 			out = append(out, Conversation{Source: SourceGemini, ID: id, Title: title, UpdatedAt: gTime(gIndex(it, 5))})
 		}
+	}
+	// Entries with not one "c_" + hex id among them mean the id format
+	// changed, not an empty history.
+	if entries > 0 && len(out) == 0 {
+		return nil, errGeminiShape
 	}
 	return out, nil
 }

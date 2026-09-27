@@ -321,6 +321,7 @@ export function createSender({
   sendConfirmMs = 15000,
   idWaitMs = ID_WAIT_MS,
   keepMs = KEEP_TAB_MS,
+  settleMs = 1500,
 }) {
   // owned: tabs being driven by a send, the only ones that may be
   // scripted. kept: finished sends' tabs, tab id -> {site, id, timer},
@@ -395,10 +396,21 @@ export function createSender({
     const tab = await tabs.create({ url: target, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('send_failed', 'could not open a tab');
     owned.add(tab.id);
+    // onSite reads the tab's address and fails when the site sent the tab
+    // to another host: Google's /sorry/ anti-bot page is blocked, anything
+    // else (a sign-in page) not_logged_in. Nothing is typed there. Every
+    // poll after the page loaded goes through it, so a redirect in the
+    // middle of a send stops the send too.
+    const onSite = async () => {
+      const t = await tabURL(tab.id);
+      const away = elsewhere(t.url, cfg.newURL);
+      if (away) throw new OpError(away.pathname.startsWith('/sorry/') ? 'blocked' : 'not_logged_in', `the page went to ${away.host}`);
+      return t;
+    };
     // urlId is the conversation id in the tab's address right now, '' when
-    // there is none.
+    // there is none; it checks the host first (onSite).
     const urlId = async () => {
-      const m = cfg.idFrom.exec((await tabURL(tab.id)).url);
+      const m = cfg.idFrom.exec((await onSite()).url);
       return m ? m[1] : '';
     };
     let done = false;
@@ -407,11 +419,11 @@ export function createSender({
       const loadBy = Math.min(deadline, start + loadMs);
       let page = null;
       for (;;) {
-        const t = await tabURL(tab.id);
-        // The site sent the tab to another host: a sign-in page, or
-        // Google's /sorry/ anti-bot page. Nothing is typed there.
-        const away = elsewhere(t.url, cfg.newURL);
-        if (away) throw new OpError(away.pathname.startsWith('/sorry/') ? 'blocked' : 'not_logged_in', `the page went to ${away.host}`);
+        // While loading, a tab on another host gets one short settle before
+        // it fails: a logged-in Google session can pass through
+        // accounts.google.com and come straight back.
+        if (elsewhere((await tabURL(tab.id)).url, cfg.newURL)) await sleep(settleMs);
+        const t = await onSite();
         if (t.status === 'complete') {
           page = cleanProbe(await inject(tab.id, pageProbe, [sel]));
           if (page.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
@@ -454,7 +466,8 @@ export function createSender({
       let submittedAt;
       let base;
       for (;;) {
-        if (existing && (await urlId()) !== existing) throw new OpError('not_found', 'conversation not found');
+        const cur = await urlId();
+        if (existing && cur !== existing) throw new OpError('not_found', 'conversation not found');
         base = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (base.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (base.generating) throw answering();
@@ -467,7 +480,8 @@ export function createSender({
       }
       for (;;) {
         await sleep(pollMs);
-        if (!existing && (await urlId())) break;
+        const cur = await urlId();
+        if (!existing && cur) break;
         const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (p.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (p.userCount > base.userCount || p.generating || p.assistantCount > base.assistantCount) break;

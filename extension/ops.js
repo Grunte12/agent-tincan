@@ -352,12 +352,19 @@ function geminiId(id) {
   return id;
 }
 
+// GEMINI_NOT_FOUND is the error code batchexecute puts in place of an
+// hNvQHb payload when the conversation is missing or deleted (live, with
+// a BardErrorInfo detail): ["wrb.fr","hNvQHb",null,null,null,[5,...]].
+const GEMINI_NOT_FOUND = 5;
+
 // parseBatchexecute reads a batchexecute answer: a ")]}'" guard, then
 // length-prefixed chunks, one of which holds [["wrb.fr", rpcid,
-// "<inner JSON>", ...]]. It returns the decoded inner payload, or null
-// when the site answered the rpcid with no payload (an error code in
-// place of it). Anything else is endpoint_changed.
-export function parseBatchexecute(text, rpcid) {
+// "<inner JSON>", ...]], and returns the decoded inner payload. When the
+// site answered with no payload it puts an error code at [5][0] instead
+// (3 for a payload it could not take): code 5 on hNvQHb is not_found, a
+// null payload is returned as null only with nullOK, and anything else
+// (another code, no code, no answer for the rpcid) is endpoint_changed.
+export function parseBatchexecute(text, rpcid, { nullOK = false } = {}) {
   if (typeof text !== 'string') throw new OpError('endpoint_changed', `no ${rpcid} answer`);
   const body = text.replace(/^\)\]\}'\s*/, '');
   for (const line of body.split('\n')) {
@@ -372,7 +379,12 @@ export function parseBatchexecute(text, rpcid) {
     if (!Array.isArray(v)) continue;
     for (const e of v) {
       if (!Array.isArray(e) || e[0] !== 'wrb.fr' || e[1] !== rpcid) continue;
-      if (e[2] === null || e[2] === undefined) return null;
+      if (e[2] === null || e[2] === undefined) {
+        const code = Array.isArray(e[5]) && Number.isInteger(e[5][0]) ? e[5][0] : null;
+        if (code === GEMINI_NOT_FOUND && rpcid === 'hNvQHb') throw new OpError('not_found', 'conversation not found');
+        if (nullOK) return null;
+        throw new OpError('endpoint_changed', code === null ? `no ${rpcid} payload` : `${rpcid} error ${code}`);
+      }
       if (typeof e[2] !== 'string') throw new OpError('endpoint_changed', `unexpected ${rpcid} answer`);
       try {
         return JSON.parse(e[2]);
@@ -542,9 +554,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return bytes;
   }
 
-  async function emitFile(url, init, emit) {
+  // emitFile fetches an image and emits it in chunks. With host set, an
+  // answer that ended anywhere else after redirects is refused, as
+  // getJSON does.
+  async function emitFile(url, init, emit, host = null) {
     const res = await send(url, init);
     await check(res, url, true);
+    if (host) {
+      const at = finalURL(res, url);
+      if (!at || at.host !== host) throw new OpError('not_logged_in', `redirected to ${at ? at.host : 'an unknown host'}`);
+    }
     const declared = Number(res.headers.get('content-length') || 0);
     if (declared > MAX_FILE_BYTES) throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
     const mime = contentType(res);
@@ -629,9 +648,9 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   }
 
   // geminiRPC calls one batchexecute rpcid with payload and returns the
-  // decoded inner payload (null when the site sent none). A 400 or 401
-  // first fetches the session values again, once.
-  async function geminiRPC(rpcid, payload) {
+  // decoded inner payload (see parseBatchexecute; opts go to it). A 400
+  // or 401 first fetches the session values again, once.
+  async function geminiRPC(rpcid, payload, opts = {}) {
     for (let attempt = 0; ; attempt++) {
       const s = await geminiAuth(attempt > 0);
       const q = new URLSearchParams({ rpcids: rpcid, 'source-path': '/app', bl: s.bl });
@@ -661,15 +680,13 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       } catch {
         throw new OpError('network', `could not read the ${rpcid} answer`);
       }
-      return parseBatchexecute(text, rpcid);
+      return parseBatchexecute(text, rpcid, opts);
     }
   }
 
   // geminiRead reads conversation id (URL hex) with hNvQHb.
   async function geminiRead(id) {
-    const inner = await geminiRPC('hNvQHb', [`c_${geminiId(id)}`, 10, null, 1, [0], [4], null, 1]);
-    if (inner === null) throw new OpError('not_found', 'conversation not found');
-    return inner;
+    return geminiRPC('hNvQHb', [`c_${geminiId(id)}`, 10, null, 1, [0], [4], null, 1]);
   }
 
   const handlers = {
@@ -734,13 +751,15 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       return sender.send('claudeai', a);
     },
     // The list reads MaZiqc a page at a time, passing each page's token
-    // for the next, until it has count conversations or the pages end.
+    // for the next, until it has count conversations or the pages end. A
+    // first page with no payload is endpoint_changed; a later one ends
+    // the list.
     async 'gemini.list'(a) {
       const pages = [];
       let token = null;
       let seen = 0;
       for (let i = 0; i < GEMINI_MAX_PAGES; i++) {
-        const inner = await geminiRPC('MaZiqc', [GEMINI_PAGE_SIZE, token, [0, null, 1]]);
+        const inner = await geminiRPC('MaZiqc', [GEMINI_PAGE_SIZE, token, [0, null, 1]], { nullOK: i > 0 });
         if (inner === null) break;
         if (!Array.isArray(inner)) throw new OpError('endpoint_changed', 'unexpected MaZiqc payload');
         pages.push(inner);
@@ -776,7 +795,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
           return undefined;
         }
       }
-      await emitFile(url, { credentials: 'include' }, emit);
+      await emitFile(url, { credentials: 'include' }, emit, new URL(GEMINI_IMAGE_PREFIX).host);
       return undefined;
     },
     // The session values are fetched fresh for a send, as for claude.ai.

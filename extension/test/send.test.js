@@ -77,6 +77,7 @@ class FakeSite {
     this.sel = SELECTORS[site];
     this.opts = { execWorks: true, pasteWorks: false, streamTicks: 3, loadTicks: 1, ...opts };
     this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, ...(opts.match || {}) };
+    this.home = url;
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
     this.messages = [];
@@ -173,6 +174,8 @@ class FakeSite {
     // moveAtTick/moveTo: the site changes the address at that tick (a
     // deleted conversation redirecting, or a fork).
     if (this.opts.moveTo && this.ticks === this.opts.moveAtTick) this.href = this.opts.moveTo;
+    // returnAtTick: a redirectTo bounce that comes back to the page.
+    if (this.opts.redirectTo && this.ticks === this.opts.returnAtTick) this.href = this.home;
     if (!this.generating) return;
     this.ticksSinceSubmit = (this.ticksSinceSubmit || 0) + 1;
     if (!CONV_PATH.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
@@ -718,6 +721,36 @@ test('a send tab sent to a sign-in host is not_logged_in, to /sorry/ is blocked;
     assert.deepEqual(page.submitted, []);
     assert.equal(fc.log.scripts.length, 0, 'no script in a page on another host');
     assert.deepEqual(fc.log.removed, [100]);
+  }
+});
+
+test('a sign-in bounce that comes back while loading does not fail the send; one that stays does, after a settle', async () => {
+  let page;
+  let fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: 'https://accounts.google.com/ServiceLogin?continue=x', returnAtTick: 1, neverFinish: true })));
+  const r = await sender(fc, { settleMs: 1500 }).send('gemini', { message: 'hi', new_chat: true });
+  assert.deepEqual(page.submitted, ['hi']);
+  assert.equal(r.conversation_id, page.newID);
+  fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: 'https://accounts.google.com/ServiceLogin?continue=x' })));
+  await assert.rejects(sender(fc, { settleMs: 1500 }).send('gemini', { message: 'hi' }), (e) => e.code === 'not_logged_in');
+  assert.equal(fc.now(), 1500, 'one settle, then it fails');
+  assert.deepEqual(page.submitted, []);
+});
+
+test('a redirect after the composer was found stops the send: /sorry/ is blocked, a sign-in host not_logged_in', async () => {
+  for (const [to, code] of [['https://www.google.com/sorry/index?continue=x', 'blocked'], ['https://accounts.google.com/v3/signin/identifier?continue=x', 'not_logged_in']]) {
+    // While the send button is still disabled (before the click).
+    let page;
+    let fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { sendReadyTick: 5, moveTo: to, moveAtTick: 2 })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `before the click: ${to}`);
+    assert.deepEqual(page.submitted, [], 'nothing sent on another host');
+    assert.deepEqual(fc.log.removed, [100]);
+    // After the click, while confirming.
+    fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, streamTicks: 99, moveTo: to, moveAtTick: 2 })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `confirming: ${to}`);
+    // While waiting for the new chat's id.
+    fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, neverFinish: true, moveTo: to, moveAtTick: 4 })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `id wait: ${to}`);
+    assert.deepEqual(page.submitted, ['hi']);
   }
 });
 

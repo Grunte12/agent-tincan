@@ -99,7 +99,7 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- end -}}
 
 {{- define "instructions.history" -}}
-{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Gemini, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
 {{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
@@ -243,7 +243,7 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
 {{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
-{{- define "title.history"}}History service for ChatGPT, claude.ai, Codex and Claude Code chats{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Gemini, Codex and Claude Code chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.gemini-web"}}Gemini (gemini.google.com) as a teammate, through your logged-in browser{{end -}}

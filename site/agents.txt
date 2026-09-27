@@ -215,6 +215,8 @@ C6. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
     - Ask your owner to grant Gemini on the extension's options page
       (chrome://extensions > Agent Tincan History > Details > Extension
       options > Grant next to Gemini). It is not granted by default.
+    - Make sure your owner is signed in to gemini.google.com in this same
+      Chrome before continuing.
     - Get an invite code with kind gemini-web and join and install it:
 
         TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan join <CODE4> --relay http://tincan-relay
