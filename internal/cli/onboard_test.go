@@ -271,21 +271,32 @@ func TestUnknownKindOnOlderRelayHints(t *testing.T) {
 	t.Cleanup(old.Close)
 	useConfig(t, client.Config{})
 
+	// Changing an existing agent's kind is not an invite: its hint must not
+	// send the operator to tincan invite, and must say the onboard override
+	// is not saved.
 	for _, c := range []struct {
-		cmd  *cobra.Command
-		args []string
+		cmd          *cobra.Command
+		args         []string
+		want, reject []string
 	}{
-		{inviteCmd(), []string{"cx", "--kind", onboard.KindCodex, "--relay", old.URL}},
-		{kindCmd(), []string{"cx", onboard.KindCodex, "--relay", old.URL}},
+		{inviteCmd(), []string{"cx", "--kind", onboard.KindCodex, "--relay", old.URL},
+			[]string{"without a kind", "tincan invite cx with no --kind"}, nil},
+		{kindCmd(), []string{"cx", onboard.KindCodex, "--relay", old.URL},
+			[]string{"is not saved", "every time"}, []string{"invite"}},
 	} {
 		_, err := run(t, c.cmd, c.args...)
 		if err == nil {
 			t.Fatalf("%s: older relay accepted the kind", c.cmd.Name())
 		}
 		msg := err.Error()
-		for _, want := range []string{"unknown kind", "upgrade the relay", "without a kind", "tincan onboard --kind cx=codex"} {
+		for _, want := range append([]string{"unknown kind", "upgrade the relay", "tincan onboard --kind cx=codex"}, c.want...) {
 			if !strings.Contains(msg, want) {
 				t.Errorf("%s: error lacks %q:\n%s", c.cmd.Name(), want, msg)
+			}
+		}
+		for _, bad := range c.reject {
+			if strings.Contains(msg, bad) {
+				t.Errorf("%s: error mentions %q:\n%s", c.cmd.Name(), bad, msg)
 			}
 		}
 	}

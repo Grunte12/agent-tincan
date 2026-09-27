@@ -137,7 +137,7 @@ func inviteCmd() *cobra.Command {
 			}
 			code, err := r.InviteKind(cmd.Context(), args[0], kind)
 			if err != nil {
-				return olderRelayKind(err, args[0], kind)
+				return olderRelayKind(err, args[0], kind, true)
 			}
 			valid := "valid 10 minutes"
 			if kind != "" {
@@ -171,15 +171,21 @@ func inviteCmd() *cobra.Command {
 // olderRelayKind turns a relay's "unknown kind" rejection of a kind this
 // client knows into an upgrade hint. The relay checks kinds against its own
 // list, so a relay older than this client refuses kinds added since, while
-// onboarding (which runs here) already knows them.
-func olderRelayKind(err error, name, kind string) error {
+// onboarding (which runs here) already knows them. invite says whether the
+// rejected call was an invite; otherwise it was tincan kind on an existing
+// agent, which needs no new invite.
+func olderRelayKind(err error, name, kind string, invite bool) error {
 	apiErr, ok := errors.AsType[*client.APIError](err)
 	if !ok || apiErr.Code != http.StatusBadRequest || !strings.Contains(apiErr.Message, "unknown kind") ||
 		kind == "" || !onboard.KnownKind(kind) {
 		return err
 	}
-	return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet: upgrade the relay to this release and restart it, "+
-		"or leave %s without a kind (tincan invite %s with no --kind) and tailor its block with tincan onboard --kind %s=%s", err, kind, name, name, name, kind)
+	if invite {
+		return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet: upgrade the relay to this release and restart it, "+
+			"or leave %s without a kind (tincan invite %s with no --kind) and tailor its block with tincan onboard --kind %s=%s", err, kind, name, name, name, kind)
+	}
+	return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet, so %s keeps its current kind: upgrade the relay to this release and restart it, "+
+		"or pass tincan onboard --kind %s=%s every time you generate its block (that override is not saved on the relay)", err, kind, name, name, kind)
 }
 
 // inviteRelayURL is the relay URL to print in an invite's join line: the

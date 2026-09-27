@@ -20,7 +20,9 @@ import (
 // fakeCLI answers --version (after FAKE_VERSION_SLEEP seconds, if set),
 // records each real run, and can sleep (with a child of its own, like a CLI
 // running an MCP server), start a child that ignores TERM (FAKE_STUBBORN),
-// or fail.
+// leave a TERM-ignoring child running after it exits (FAKE_LEAVE=1, or
+// FAKE_LEAVE=pgrp to put that child in a process group of its own, like a
+// daemonized MCP server), or fail.
 const fakeCLI = `#!/bin/sh
 if [ "${1:-}" = --version ]; then
   [ -z "${FAKE_VERSION_SLEEP:-}" ] || sleep "$FAKE_VERSION_SLEEP"
@@ -35,6 +37,15 @@ if [ -n "${FAKE_STUBBORN:-}" ]; then
   sleep 60 &
   wait
 fi
+if [ -n "${FAKE_LEAVE:-}" ]; then
+  if [ "$FAKE_LEAVE" = pgrp ]; then
+    perl -e 'setpgrp(0, 0); $SIG{TERM} = "IGNORE"; sleep 60' </dev/null >/dev/null 2>&1 &
+  else
+    sh -c 'trap "" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+  fi
+  echo $! > "$STATE_OUT/child.pid"
+  sleep 2
+fi
 if [ -n "${FAKE_SLEEP:-}" ]; then
   sleep "$FAKE_SLEEP" &
   echo $! > "$STATE_OUT/child.pid"
@@ -43,8 +54,10 @@ fi
 exit "${FAKE_EXIT:-0}"
 `
 
-// fakeTincan records each call's argv on one line.
+// fakeTincan records each call's argv on one line, and can hang
+// (FAKE_NOTIFY_SLEEP seconds) first.
 const fakeTincan = `#!/bin/sh
+[ -z "${FAKE_NOTIFY_SLEEP:-}" ] || sleep "$FAKE_NOTIFY_SLEEP"
 printf '%s\n' "$*" >> "$NOTICES"
 `
 
@@ -665,5 +678,81 @@ func TestWakeLibNoConfigSendsNoNotice(t *testing.T) {
 	}
 	if n := h.count(h.notices); n != 0 {
 		t.Fatalf("operator notices = %d without TINCAN_CONFIG, want 0", n)
+	}
+}
+
+// A CLI that exits normally but leaves a child running (a daemonized MCP
+// server, say) must not leave it behind: the next nudge could start a
+// second CLI beside it.
+func TestWakeLibCleanExitReapsLeftoverChildren(t *testing.T) {
+	for _, mode := range []struct{ name, leave, env string }{
+		{"process group", "1", ""},
+		{"process group, child in its own group", "pgrp", ""},
+		{"saved tree", "1", "_TW_NO_PGRP=1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			h := newLibHarness(t)
+			env := []string{"FAKE_LEAVE=" + mode.leave}
+			if mode.env != "" {
+				env = append(env, mode.env)
+			}
+			r := h.run(driver, env...)
+			child := readPid(t, filepath.Join(h.dir, "child.pid"))
+			t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+			if r.err != nil {
+				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+			}
+			if !waitDead(child) {
+				t.Fatalf("child %d the CLI left behind outlived the wake\nstderr:\n%s", child, r.stderr)
+			}
+			if h.exists(h.lockDir()) {
+				t.Fatal("lock left behind")
+			}
+		})
+	}
+}
+
+// A live run holds the lock through both preflights and the CLI run, so a
+// lock whose pid is alive is not broken until it is older than all of them
+// together could take.
+func TestWakeLibLiveLockBoundCoversPreflights(t *testing.T) {
+	env := []string{"TINCAN_WAKE_TIMEOUT=3600", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=300"}
+	h := newLibHarness(t)
+	writeLock(t, h.lockDir(), os.Getpid())
+	// Older than the run timeout plus five minutes, within the run plus
+	// three preflight-length steps (two checks and a notice).
+	old := time.Now().Add(-70 * time.Minute)
+	if err := os.Chtimes(h.lockDir(), old, old); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(driver, env...)
+	if r.err != nil || h.count(h.runs) != 0 {
+		t.Fatalf("live lock inside the bound: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+	if strings.Contains(r.stderr, "stale lock") {
+		t.Fatalf("a live run's lock was broken early:\n%s", r.stderr)
+	}
+
+	// Past every configured timeout, the pid is taken to be reused.
+	older := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(h.lockDir(), older, older); err != nil {
+		t.Fatal(err)
+	}
+	r = h.run(driver, env...)
+	if r.err != nil || h.count(h.runs) != 1 || !strings.Contains(r.stderr, "stale lock") {
+		t.Fatalf("lock past the bound: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+}
+
+// The operator notice is sent while the lock is held, so a hung send is cut
+// off like a preflight.
+func TestWakeLibHungNoticeTimesOut(t *testing.T) {
+	h := newLibHarness(t)
+	r := h.run(driver, "FAKE_VERSION=other 1.0", "TINCAN_WAKE_OPERATOR=ops", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=1", "FAKE_NOTIFY_SLEEP=60")
+	if exitCode(r.err) != 1 || r.took > 20*time.Second {
+		t.Fatalf("hung notice: %v after %s\nstderr:\n%s", r.err, r.took, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "could not notify") || h.exists(h.lockDir()) {
+		t.Fatalf("hung notice: lock left %v\nstderr:\n%s", h.exists(h.lockDir()), r.stderr)
 	}
 }

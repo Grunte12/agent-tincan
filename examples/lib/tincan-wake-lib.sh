@@ -43,8 +43,18 @@
 #
 # The CLI runs in a process group of its own (through perl, or setsid when
 # perl is missing), so a timeout reaches everything it started, even
-# processes that were reparented. With neither tool the wake signals the
-# CLI's process tree as it stood when the timeout fired.
+# processes that were reparented. The wake also saves the CLI's process
+# tree every second. However the CLI ends, on time or not, whatever is left
+# of its group and of the saved tree is stopped (TERM, then KILL five
+# seconds later) before the lock is released, so a server the CLI started
+# and left running cannot outlive the wake. With neither perl nor setsid,
+# only the saved tree is stopped, so a child started and daemonized in the
+# CLI's last second can escape.
+#
+# The lock is held from tincan_wake_begin until the script exits. A lock
+# whose pid is alive is only broken once it is older than the run, the two
+# preflights and one operator notice could take together, with their grace
+# periods (see _tw_lock_max_minutes).
 #
 # Every function keeps its own variables under the _tw_ prefix, since POSIX
 # sh has no local variables.
@@ -67,6 +77,7 @@ tincan_wake_init() {
   _tw_child=
   _tw_group=
   _tw_watchdog=
+  _tw_snap=
   for _tw_v in "$TINCAN_WAKE_TIMEOUT" "$TINCAN_WAKE_PREFLIGHT_TIMEOUT" "$TINCAN_WAKE_MAX_FAILURES" "$TINCAN_WAKE_BACKOFF"; do
     case $_tw_v in
       '' | *[!0-9]*)
@@ -108,8 +119,8 @@ tincan_wake_begin() {
 
 # tincan_wake_lock takes the lock directory (mkdir is atomic) and records
 # this script's pid in it. A lock whose pid is gone was left by a run that
-# was killed, and is broken. So is one older than a run can take, whatever
-# its pid says, since pids are reused. Returns 1 when a live run holds it,
+# was killed, and is broken. So is one older than a whole wake can take
+# (_tw_lock_max_minutes), whatever its pid says, since pids are reused. Returns 1 when a live run holds it,
 # 2 when the state directory cannot be made.
 tincan_wake_lock() {
   { mkdir -p "$_tw_state" && chmod 700 "$_tw_state"; } 2>/dev/null || return 2
@@ -119,7 +130,7 @@ tincan_wake_lock() {
   trap 'exit 143' TERM
   if ! mkdir "$_tw_lock" 2>/dev/null; then
     _tw_pid=$(cat "$_tw_lock/pid" 2>/dev/null) || _tw_pid=
-    _tw_max=$((TINCAN_WAKE_TIMEOUT / 60 + 5))
+    _tw_max=$(_tw_lock_max_minutes)
     if [ -n "$_tw_pid" ] && kill -0 "$_tw_pid" 2>/dev/null && ! _tw_older "$_tw_lock" "$_tw_max"; then
       return 1
     fi
@@ -143,6 +154,17 @@ tincan_wake_lock() {
   _tw_locked=1
 }
 
+# _tw_lock_max_minutes prints how many minutes a live wake may hold the
+# lock: the CLI run, the version probe, the MCP listing and one operator
+# notice, each with the time it takes to stop it and whatever it left
+# running (a second tick, five seconds from TERM to KILL, five more to reap
+# leftovers, with room to spare: fifteen seconds), rounded up, plus five
+# minutes. A lock older than this is broken even if its pid is alive.
+_tw_lock_max_minutes() {
+  _tw_secs=$((TINCAN_WAKE_TIMEOUT + 3 * TINCAN_WAKE_PREFLIGHT_TIMEOUT + 4 * 15))
+  echo $(((_tw_secs + 59) / 60 + 5))
+}
+
 # _tw_older DIR MINUTES succeeds if DIR was last changed more than MINUTES
 # minutes ago.
 _tw_older() {
@@ -154,7 +176,8 @@ _tw_cleanup() {
     kill "$_tw_watchdog" 2>/dev/null || true
   fi
   if [ -n "$_tw_child" ]; then
-    _tw_signal KILL "$_tw_group" "$(_tw_tree "$_tw_child")"
+    _tw_signal KILL "$_tw_group" "$(_tw_tree "$_tw_child") $(_tw_saved_tree)"
+    rm -f "$_tw_snap" "$_tw_snap.tmp"
   fi
   if [ -n "$_tw_locked" ] && [ "$(cat "$_tw_lock/pid" 2>/dev/null)" = "$$" ]; then
     rm -rf "$_tw_lock"
@@ -203,7 +226,8 @@ tincan_wake_notify() {
   fi
   _tw_marker=${_tw_marker:-$_tw_state/notified}
   [ ! -e "$_tw_marker" ] || return 0
-  if "$TINCAN_BIN" ask --notify "$TINCAN_WAKE_OPERATOR" "$1" >/dev/null 2>&1 </dev/null; then
+  # Supervised like a preflight, so a hung send cannot hold the lock.
+  if _tw_supervise "$TINCAN_WAKE_PREFLIGHT_TIMEOUT" "$TINCAN_BIN" ask --notify "$TINCAN_WAKE_OPERATOR" "$1" >/dev/null 2>&1; then
     : >"$_tw_marker" 2>/dev/null || true
   else
     tincan_wake_log "could not notify $TINCAN_WAKE_OPERATOR"
@@ -473,6 +497,32 @@ _tw_any_alive() {
   return 1
 }
 
+# _tw_saved_tree prints the pids in the last saved process tree of the CLI,
+# without the CLI itself.
+_tw_saved_tree() {
+  [ -n "$_tw_snap" ] || return 0
+  # The saved tree is one line of pids.
+  _tw_line=
+  { read -r _tw_line <"$_tw_snap"; } 2>/dev/null || :
+  for _tw_p in $_tw_line; do
+    [ "$_tw_p" = "$_tw_child" ] || printf '%s ' "$_tw_p"
+  done
+}
+
+# _tw_reap GROUP PIDS stops what is left of process group GROUP and of PIDS:
+# TERM, then KILL five seconds later to whatever ignored it.
+_tw_reap() {
+  _tw_any_alive "$1" "$2" || return 0
+  tincan_wake_log "stopping processes the CLI left running"
+  _tw_signal TERM "$1" "$2"
+  _tw_i=0
+  while [ "$_tw_i" -lt 5 ] && _tw_any_alive "$1" "$2"; do
+    sleep 1
+    _tw_i=$((_tw_i + 1))
+  done
+  _tw_signal KILL "$1" "$2"
+}
+
 # _tw_pgrp_tool prints how to start a program in a process group of its
 # own, keeping its pid: perl, else setsid (which keeps the pid as long as
 # the caller is not a group leader, and a background job without job
@@ -490,15 +540,19 @@ _tw_pgrp_tool() {
 # _tw_supervise TIMEOUT CMD [ARGS...] runs CMD with stdin closed and a hard
 # TIMEOUT in seconds (GNU timeout is not on macOS, so a watchdog does it).
 # A program runs in a process group of its own when setsid or perl can make
-# one; a shell function runs in a subshell. On timeout the watchdog saves
-# the process tree, sends TERM to the group and the tree, and five seconds
-# later KILL to whatever is left, so descendants that ignore TERM or were
-# reparented still die. Returns CMD's status, or 124 when it timed out.
+# one; a shell function runs in a subshell. The watchdog saves the process
+# tree every second. On timeout it sends TERM to the group and the tree,
+# and five seconds later KILL to whatever is left, so descendants that
+# ignore TERM or were reparented still die. When CMD exits on its own,
+# whatever is left of its group and saved tree is stopped the same way, so
+# nothing it started outlives it. Returns CMD's status, or 124 when it
+# timed out.
 _tw_supervise() {
   _tw_limit=$1
   shift
   _tw_timed_out=$_tw_state/timed-out.$$
-  rm -f "$_tw_timed_out"
+  _tw_snap=$_tw_state/tree.$$
+  rm -f "$_tw_timed_out" "$_tw_snap"
   _tw_tool=
   case $(command -v "$1" 2>/dev/null) in
     */*) _tw_tool=$(_tw_pgrp_tool) ;;
@@ -518,10 +572,15 @@ _tw_supervise() {
     while [ "$_tw_i" -lt "$_tw_limit" ]; do
       sleep 1
       kill -0 "$_tw_child" 2>/dev/null || exit 0
+      # Saved for the reap after the CLI exits, when its children have
+      # been reparented and can no longer be found from its pid. The
+      # rename keeps a reader from seeing half a list; a state directory
+      # that cannot be written only loses the list.
+      { _tw_tree "$_tw_child" >"$_tw_snap.tmp" && mv -f "$_tw_snap.tmp" "$_tw_snap"; } 2>/dev/null || :
       _tw_i=$((_tw_i + 1))
     done
-    : >"$_tw_timed_out"
-    _tw_saved=$(_tw_tree "$_tw_child")
+    : >"$_tw_timed_out" 2>/dev/null || :
+    _tw_saved="$(_tw_tree "$_tw_child") $(_tw_saved_tree)"
     _tw_signal TERM "$_tw_group" "$_tw_saved"
     _tw_i=0
     while [ "$_tw_i" -lt 5 ] && _tw_any_alive "$_tw_group" "$_tw_saved"; do
@@ -544,9 +603,11 @@ _tw_supervise() {
       _tw_signal KILL "$_tw_group" ""
     fi
   fi
+  _tw_watchdog=
+  _tw_reap "$_tw_group" "$(_tw_saved_tree)"
+  rm -f "$_tw_snap" "$_tw_snap.tmp"
   _tw_child=
   _tw_group=
-  _tw_watchdog=
   if [ -e "$_tw_timed_out" ]; then
     rm -f "$_tw_timed_out"
     return 124
