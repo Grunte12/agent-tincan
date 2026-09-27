@@ -113,7 +113,7 @@ In both cases the identity check starts the engine wired only to this teammate: 
 
 ## Doctor
 
-`tincan doctor` reads `~/.gemini/settings.json` (Gemini CLI) and `~/.gemini/config/mcp_config.json` (agy) along with the other apps' MCP configs. It checks that the tincan entry runs this tincan with `mcp` and flags two tincan servers loaded together. It does not read the workdir-scoped configs the wake also checks (`.gemini/settings.json` or `.agents/mcp_config.json` in `TINCAN_GEMINI_WORKDIR`), so a server added there shows up only as a wake refusal.
+`tincan doctor` reads `~/.gemini/settings.json` (Gemini CLI) and `~/.gemini/config/mcp_config.json` (agy) along with the other apps' MCP configs, plus the other files the wake checks: `TINCAN_AGY_MCP_CONFIG` and `TINCAN_GEMINI_SETTINGS` when set, and `.agents/mcp_config.json` and `.gemini/settings.json` in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`). Those settings usually live in the listener's environment, so run doctor with the same ones when you changed them. It checks that the tincan entry runs this tincan with `mcp` and flags two tincan servers loaded together in one file.
 
 ## Limits
 

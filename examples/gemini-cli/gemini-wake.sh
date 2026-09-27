@@ -236,6 +236,10 @@ fi
 state=$(CDPATH='' cd -P -- "$TINCAN_WAKE_STATE_DIR" && pwd -P)
 out=$state/out.$$
 err=$state/err.$$
+# A wake stopped mid-run (the listener stopping) exits through the
+# library's EXIT trap: remove the captured output there too, then run the
+# library's own cleanup (the engine's process tree and the lock).
+trap 'rm -f "$out" "$err"; _tw_cleanup' EXIT
 cd "$WORKDIR"
 status=0
 tincan_wake_run "$@" -p "$PROMPT" >"$out" 2>"$err" || status=$?

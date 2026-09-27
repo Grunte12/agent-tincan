@@ -402,3 +402,62 @@ func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 		}
 	}
 }
+
+// Doctor reads the same gemini-cli engine configs the wake does: the files
+// TINCAN_AGY_MCP_CONFIG and TINCAN_GEMINI_SETTINGS point at, and the
+// workdir-scoped ones in TINCAN_GEMINI_WORKDIR (~/tincan-gemini by default).
+func TestFindMCPConfigsReadsGeminiWakeLocations(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("TINCAN_AGY_MCP_CONFIG", "")
+	t.Setenv("TINCAN_GEMINI_SETTINGS", "")
+	t.Setenv("TINCAN_GEMINI_WORKDIR", "")
+	body := []byte(`{"mcpServers":{"agent-tincan":{"command":"tincan","args":["mcp"]}}}`)
+	write := func(f string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	found := func(f string) bool {
+		for _, e := range findMCPConfigs(nil) {
+			if e.File == f && e.Name == "agent-tincan" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default workdir.
+	for _, f := range []string{
+		write(filepath.Join(home, "tincan-gemini", ".agents", "mcp_config.json")),
+		write(filepath.Join(home, "tincan-gemini", ".gemini", "settings.json")),
+	} {
+		if !found(f) {
+			t.Errorf("doctor does not read the default workdir config %s", f)
+		}
+	}
+
+	// Overridden locations.
+	wd := filepath.Join(dir, "wd")
+	t.Setenv("TINCAN_GEMINI_WORKDIR", wd)
+	agy := write(filepath.Join(dir, "agy", "mcp.json"))
+	t.Setenv("TINCAN_AGY_MCP_CONFIG", agy)
+	settings := write(filepath.Join(dir, "gem", "settings.json"))
+	t.Setenv("TINCAN_GEMINI_SETTINGS", settings)
+	for _, f := range []string{
+		agy,
+		settings,
+		write(filepath.Join(wd, ".agents", "mcp_config.json")),
+		write(filepath.Join(wd, ".gemini", "settings.json")),
+	} {
+		if !found(f) {
+			t.Errorf("doctor does not read %s", f)
+		}
+	}
+}

@@ -9,7 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // These tests run examples/gemini-cli/gemini-wake.sh with fake agy and
@@ -30,6 +32,10 @@ for a in "$@"; do printf '%s\0' "$a"; done > "$ARGV_DIR/run.$n"
 pwd -P > "$ARGV_DIR/cwd.$n"
 if [ -n "${FAKE_STDERR:-}" ]; then
   echo "$FAKE_STDERR" >&2
+fi
+if [ -n "${FAKE_SLEEP:-}" ]; then
+  : > "$ARGV_DIR/sleeping"
+  sleep "$FAKE_SLEEP"
 fi
 echo "${FAKE_STDOUT:-{\"response\":\"done\"}}"
 exit "${FAKE_EXIT:-0}"
@@ -495,5 +501,61 @@ func TestGeminiWakeAllowedServerNamesFollowTheTincanServer(t *testing.T) {
 				t.Fatalf("--allowed-mcp-server-names = %q, want team-bus then files", got)
 			}
 		})
+	}
+}
+
+// A wake stopped mid-run (the listener stopping) removes the engine's
+// captured output from its state directory along with the lock: the
+// response and diagnostics are not left behind.
+func TestGeminiWakeSignalRemovesCapturedOutput(t *testing.T) {
+	h := newGeminiHarness(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "examples", "gemini-cli", "gemini-wake.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + h.home,
+		"AGY_BIN=" + filepath.Join(h.dir, "agy"),
+		"TINCAN_BIN=" + filepath.Join(h.dir, "tincan"),
+		"TINCAN_WAKE_STATE_DIR=" + h.state,
+		"TINCAN_WAKE_OPERATOR=ops",
+		"TINCAN_CONFIG=" + h.config,
+		"ARGV_DIR=" + h.argvDir,
+		"NOTICES=" + h.notices,
+		"TINCAN_GEMINI_ALLOW_UNCONFINED=1",
+		"FAKE_STDERR=private diagnostics",
+		"FAKE_SLEEP=30",
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	sleeping := filepath.Join(h.argvDir, "sleeping")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sleeping); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	captured, _ := filepath.Glob(filepath.Join(h.state, "err.*"))
+	if len(captured) == 0 {
+		t.Fatalf("engine never started, or its output is not captured in the state directory\nstderr:\n%s", stderr.String())
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	for _, pat := range []string{"out.*", "err.*"} {
+		if left, _ := filepath.Glob(filepath.Join(h.state, pat)); len(left) != 0 {
+			t.Fatalf("captured output left behind after a SIGTERM: %v\nstderr:\n%s", left, stderr.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.state, "lock")); err == nil {
+		t.Fatalf("lock left behind after a SIGTERM\nstderr:\n%s", stderr.String())
 	}
 }

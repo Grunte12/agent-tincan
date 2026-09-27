@@ -36,6 +36,13 @@ func mcpConfigFiles(extra []string) []string {
 	if grokHome == "" {
 		grokHome = filepath.Join(home, ".grok")
 	}
+	// The gemini-cli wake's settings name the configs its engines read:
+	// the ones it points them at, and the workspace configs in its
+	// working directory.
+	geminiWorkdir := os.Getenv("TINCAN_GEMINI_WORKDIR")
+	if geminiWorkdir == "" {
+		geminiWorkdir = filepath.Join(home, "tincan-gemini")
+	}
 	files := []string{
 		filepath.Join(home, ".claude.json"),
 		filepath.Join(home, ".claude", "settings.json"),
@@ -48,6 +55,10 @@ func mcpConfigFiles(extra []string) []string {
 		// one secondary source, so the gemini-cli docs say to confirm it
 		// with agy mcp list.
 		filepath.Join(home, ".gemini", "config", "mcp_config.json"),
+		os.Getenv("TINCAN_AGY_MCP_CONFIG"),
+		os.Getenv("TINCAN_GEMINI_SETTINGS"),
+		filepath.Join(geminiWorkdir, ".agents", "mcp_config.json"),
+		filepath.Join(geminiWorkdir, ".gemini", "settings.json"),
 		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
 		filepath.Join(home, ".hermes", "config.yaml"),
 		filepath.Join(home, ".openclaw", "openclaw.json"),
