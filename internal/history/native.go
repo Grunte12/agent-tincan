@@ -298,6 +298,9 @@ type NativeError struct {
 	// RetryAfter is the site's Retry-After, in seconds, on a rate_limited
 	// error when the extension could read it (zero when unknown).
 	RetryAfter int `json:"retry_after,omitempty"`
+	// Clicked is set on a send that failed after its send button was
+	// clicked: the message may have been sent.
+	Clicked bool `json:"clicked,omitempty"`
 }
 
 // NativeChunk is one piece of a file's bytes, base64.
@@ -364,6 +367,9 @@ type UnavailableError struct {
 	// RetryAfter is how long to wait before asking the site again, for
 	// ErrRateLimited (zero when the site did not say).
 	RetryAfter time.Duration
+	// Clicked: a send failed after its send button was clicked, so the
+	// message may have been sent anyway.
+	Clicked bool
 }
 
 // siteOf is a site's host, for error text (the source name for a site
@@ -521,8 +527,18 @@ func (c *SiteCooldown) Remaining(src Source) time.Duration {
 // process.
 var sharedCooldown = &SiteCooldown{}
 
-// fromNativeError maps an extension error code to a typed error.
+// fromNativeError maps an extension error code to a typed error, and
+// carries a send's clicked mark over.
 func fromNativeError(s Source, ne *NativeError) error {
+	err := nativeErrorKind(s, ne)
+	var ue *UnavailableError
+	if ne.Clicked && errors.As(err, &ue) {
+		ue.Clicked = true
+	}
+	return err
+}
+
+func nativeErrorKind(s Source, ne *NativeError) error {
 	detail := clip(ne.Message, 200)
 	switch ne.Code {
 	case "not_logged_in":

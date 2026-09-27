@@ -252,15 +252,40 @@ export function pageSubmit(sel) {
 }
 
 // pageFetchImage fetches url with the page's cookies and returns it as
-// base64, or why it could not. Only an image under maxBytes is returned.
+// base64, or why it could not. Only an image under maxBytes is returned:
+// a declared size over it is refused unread, and the body is read a chunk
+// at a time and cancelled as soon as it passes maxBytes, so a large answer
+// never sits whole in the tab's memory. It runs in the page, so it uses
+// nothing from this module.
 export async function pageFetchImage(url, maxBytes) {
   try {
     const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
     if (!res.ok) return { ok: false, status: res.status };
     const mime = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     if (!mime.startsWith('image/')) return { ok: false, code: 'not_image' };
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.length === 0 || buf.length > maxBytes) return { ok: false, code: 'size' };
+    if (!res.body) return { ok: false, code: 'size' };
+    const reader = res.body.getReader();
+    const tooBig = async () => {
+      try {
+        await reader.cancel();
+      } catch {
+        // Already closed.
+      }
+      return { ok: false, code: 'size' };
+    };
+    if (Number(res.headers.get('content-length') || 0) > maxBytes) return tooBig();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) return tooBig();
+      parts.push(value);
+    }
+    if (total === 0) return { ok: false, code: 'size' };
+    const buf = new Uint8Array(total);
+    for (let off = 0, i = 0; i < parts.length; off += parts[i].length, i++) buf.set(parts[i], off);
     let bin = '';
     for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
     return { ok: true, mime, data: btoa(bin) };
@@ -414,6 +439,11 @@ export function createSender({
       return m ? m[1] : '';
     };
     let done = false;
+    // clicked: the page took a click on the send button. Any failure after
+    // it (a redirect to a sign-in page or /sorry/, no confirmation, no id)
+    // is marked clicked: the message may have been sent, and sending it
+    // again could post it twice.
+    let clicked = false;
     try {
       // 1. Page load, then a composer (or a login page).
       const loadBy = Math.min(deadline, start + loadMs);
@@ -473,7 +503,10 @@ export function createSender({
         if (base.generating) throw answering();
         submittedAt = now();
         const r = await inject(tab.id, pageSubmit, [sel]);
-        if (r && r.ok === true) break;
+        if (r && r.ok === true) {
+          clicked = true;
+          break;
+        }
         if (r && r.code === 'composer_not_found') throw new OpError('composer_not_found', 'the message box went away');
         if (now() >= confirmBy) throw new OpError('send_failed', 'the send button stayed disabled');
         await sleep(pollMs);
@@ -502,6 +535,9 @@ export function createSender({
       done = true;
       keep(tab.id, site, id);
       return { conversation_id: id, url: cfg.convURL(id), submitted_at: submittedAt };
+    } catch (e) {
+      if (clicked && e instanceof OpError) e.clicked = true;
+      throw e;
     } finally {
       owned.delete(tab.id);
       if (!done) await removeTab(tab.id);

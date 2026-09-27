@@ -168,7 +168,10 @@ func TestGeminiUnexpectedShapes(t *testing.T) {
 	if convs, err := parseGeminiList(json.RawMessage(`{"pages":[[null,null,[]]]}`)); err != nil || len(convs) != 0 {
 		t.Errorf("empty list: %+v %v", convs, err)
 	}
-	for _, raw := range []string{`{}`, `"x"`, `[5]`, `[["turn"]]`, `[[[["c_x"]]]]`, `[[[["c_x","r_1"],null,null]]]`, `[[[["c_x","r_1"],null,[["hi"]],[5]]]]`, `[[[["c_x","r_1"],null,[["hi"]],[[[5]]]]]]`} {
+	for _, raw := range []string{`{}`, `"x"`, `[5]`, `[["turn"]]`, `[[[["c_x"]]]]`, `[[[["c_x","r_1"],null,null]]]`, `[[[["c_x","r_1"],null,[["hi"]],[5]]]]`, `[[[["c_x","r_1"],null,[["hi"]],[[[5]]]]]]`,
+		// The chosen candidate is named but not among the candidates: the
+		// first one may be a draft, so none is taken for the answer.
+		`[[[["c_x","r_1"],null,[["hi"]],[[["rc_1",["a draft"]],["rc_2",["another draft"]]],null,null,"rc_9"]]]]`} {
 		if _, err := parseGeminiDetail("00000000000000a1", json.RawMessage(raw)); err == nil {
 			t.Errorf("detail %s parsed", raw)
 		}
@@ -615,6 +618,34 @@ func TestWebGeminiBlockedCoolsDownGeminiOnly(t *testing.T) {
 	}
 	if other.CooldownRemaining(SourceChatGPT) != 0 {
 		t.Fatal("a ChatGPT anti-bot answer started a cooldown")
+	}
+}
+
+// A send that failed after its click (the tab went to /sorry/ or a
+// sign-in page once the button was clicked) may have posted the message:
+// the reply keeps the cause and says so, so the asker does not simply
+// send it again. A failure before the click says nothing of the kind.
+func TestWebGeminiFailureAfterClickMayHaveSent(t *testing.T) {
+	for _, tc := range []struct {
+		code, cause string
+	}{
+		{"blocked", "gemini.google.com showed an anti-bot check"},
+		{"not_logged_in", "not logged in to gemini.google.com"},
+		{"send_failed", "the message could not be sent on gemini.google.com"},
+	} {
+		rig := newGemRig(t, func(int, time.Time) (json.RawMessage, *NativeError) { return nil, nil }, noFile)
+		rig.sendErr = &NativeError{Code: tc.code, Message: "the page went to www.google.com", Clicked: true}
+		res := rig.ask(t, "grokbot", "hello")
+		body := res.Reply.Body
+		if res.Status != envelope.StatusFailed || !strings.Contains(body, tc.cause) || !strings.Contains(body, "may have been sent") {
+			t.Fatalf("%s after the click: %s %q", tc.code, res.Status, body)
+		}
+		rig = newGemRig(t, func(int, time.Time) (json.RawMessage, *NativeError) { return nil, nil }, noFile)
+		rig.sendErr = &NativeError{Code: tc.code, Message: "the page went to www.google.com"}
+		res = rig.ask(t, "grokbot", "hello")
+		if body := res.Reply.Body; res.Status != envelope.StatusFailed || !strings.Contains(body, tc.cause) || strings.Contains(body, "may have been sent") {
+			t.Fatalf("%s before the click: %s %q", tc.code, res.Status, body)
+		}
 	}
 }
 

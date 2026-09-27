@@ -139,7 +139,9 @@ export const MAX_RETRY_AFTER_S = 3600;
 
 export class OpError extends Error {
   // retryAfter, for rate_limited, is the site's Retry-After in whole
-  // seconds when it sent one.
+  // seconds when it sent one. clicked, set by a send, means the send
+  // button had been clicked before the failure, so the message may have
+  // been sent.
   constructor(code, message, retryAfter) {
     super(message);
     this.code = code;
@@ -148,13 +150,15 @@ export class OpError extends Error {
 }
 
 // errorFrame is the failure frame for an error thrown by an operation:
-// its code and message (retry_after too for a rate limit), or a bare
+// its code and message (retry_after too for a rate limit, clicked for a
+// send that failed after its click), or a bare
 // internal error for anything that is not an OpError, so no unexpected
 // detail leaves the extension.
 export function errorFrame(e) {
   if (!(e instanceof OpError)) return { ok: false, error: { code: 'internal', message: 'internal error' } };
   const error = { code: e.code, message: e.message };
   if (e.retryAfter !== undefined) error.retry_after = e.retryAfter;
+  if (e.clicked === true) error.clicked = true;
   return { ok: false, error };
 }
 
@@ -361,10 +365,10 @@ const GEMINI_NOT_FOUND = 5;
 // length-prefixed chunks, one of which holds [["wrb.fr", rpcid,
 // "<inner JSON>", ...]], and returns the decoded inner payload. When the
 // site answered with no payload it puts an error code at [5][0] instead
-// (3 for a payload it could not take): code 5 on hNvQHb is not_found, a
-// null payload is returned as null only with nullOK, and anything else
-// (another code, no code, no answer for the rpcid) is endpoint_changed.
-export function parseBatchexecute(text, rpcid, { nullOK = false } = {}) {
+// (3 for a payload it could not take): code 5 on hNvQHb is not_found, and
+// anything else (another code, no code, no answer for the rpcid) is
+// endpoint_changed. A null payload is never an answer.
+export function parseBatchexecute(text, rpcid) {
   if (typeof text !== 'string') throw new OpError('endpoint_changed', `no ${rpcid} answer`);
   const body = text.replace(/^\)\]\}'\s*/, '');
   for (const line of body.split('\n')) {
@@ -382,7 +386,6 @@ export function parseBatchexecute(text, rpcid, { nullOK = false } = {}) {
       if (e[2] === null || e[2] === undefined) {
         const code = Array.isArray(e[5]) && Number.isInteger(e[5][0]) ? e[5][0] : null;
         if (code === GEMINI_NOT_FOUND && rpcid === 'hNvQHb') throw new OpError('not_found', 'conversation not found');
-        if (nullOK) return null;
         throw new OpError('endpoint_changed', code === null ? `no ${rpcid} payload` : `${rpcid} error ${code}`);
       }
       if (typeof e[2] !== 'string') throw new OpError('endpoint_changed', `unexpected ${rpcid} answer`);
@@ -648,9 +651,9 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   }
 
   // geminiRPC calls one batchexecute rpcid with payload and returns the
-  // decoded inner payload (see parseBatchexecute; opts go to it). A 400
-  // or 401 first fetches the session values again, once.
-  async function geminiRPC(rpcid, payload, opts = {}) {
+  // decoded inner payload (see parseBatchexecute). A 400 or 401 first
+  // fetches the session values again, once.
+  async function geminiRPC(rpcid, payload) {
     for (let attempt = 0; ; attempt++) {
       const s = await geminiAuth(attempt > 0);
       const q = new URLSearchParams({ rpcids: rpcid, 'source-path': '/app', bl: s.bl });
@@ -680,7 +683,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       } catch {
         throw new OpError('network', `could not read the ${rpcid} answer`);
       }
-      return parseBatchexecute(text, rpcid, opts);
+      return parseBatchexecute(text, rpcid);
     }
   }
 
@@ -751,16 +754,15 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       return sender.send('claudeai', a);
     },
     // The list reads MaZiqc a page at a time, passing each page's token
-    // for the next, until it has count conversations or the pages end. A
-    // first page with no payload is endpoint_changed; a later one ends
-    // the list.
+    // for the next, until it has count conversations or a page carries
+    // no next-page token. An error row on any page is endpoint_changed,
+    // never an early end: a partial list is not returned as complete.
     async 'gemini.list'(a) {
       const pages = [];
       let token = null;
       let seen = 0;
       for (let i = 0; i < GEMINI_MAX_PAGES; i++) {
-        const inner = await geminiRPC('MaZiqc', [GEMINI_PAGE_SIZE, token, [0, null, 1]], { nullOK: i > 0 });
-        if (inner === null) break;
+        const inner = await geminiRPC('MaZiqc', [GEMINI_PAGE_SIZE, token, [0, null, 1]]);
         if (!Array.isArray(inner)) throw new OpError('endpoint_changed', 'unexpected MaZiqc payload');
         pages.push(inner);
         seen += Array.isArray(inner[2]) ? inner[2].length : 0;

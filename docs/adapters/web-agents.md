@@ -116,7 +116,7 @@ All page selectors live in one table, `SELECTORS` in `extension/send.js`, each w
 | user messages | `[data-message-author-role="user"]` | `[data-testid="user-message"]` | `user-query` |
 | logged out | `[data-testid="login-button"]`, `a[href*="/auth/login"]`, paths `/auth/login`, `/log-in` | `a[href="/login"]`, `input[type="email"]`, paths `/login`, `/logout` | `a[href*="accounts.google.com/ServiceLogin"]`, `a[href*="accounts.google.com/v3/signin"]` |
 
-On every site, a send tab the site sends to another host is not typed into: Google's `/sorry/` page is `blocked`, any other host (a sign-in page) is `not_logged_in`.
+On every site, a send tab the site sends to another host is not typed into: Google's `/sorry/` page is `blocked`, any other host (a sign-in page) is `not_logged_in`. When that happens after the send button was clicked, the message may already be in the conversation, so the failure reply says so and asks you to check the conversation before sending it again.
 
 The text is entered by typing (`document.execCommand('insertText')`), then a paste event, then setting it directly, and checked after each attempt. Before each click the page is probed again, and an existing conversation's address is checked again. The send counts as taken when, compared with that probe, a new chat's address gains a conversation id, or a new user or assistant message or an answering marker appears. The page is never used to decide that an answer is finished.
 

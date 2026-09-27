@@ -288,6 +288,13 @@ func geminiTurns(raw json.RawMessage) ([]gmTurn, error) {
 					break
 				}
 			}
+			// A chosen id that names no candidate is a shape this reader
+			// does not know: the first candidate may be a draft the owner
+			// did not pick, so it is never taken in its place. With no
+			// chosen id at all, the first candidate is the answer.
+			if cand == nil && chosen != "" {
+				return nil, errGeminiShape
+			}
 			if cand == nil && len(cands) > 0 {
 				cand = cands[0]
 			}

@@ -487,7 +487,7 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	label := siteLabel(w.Site)
 	var ue *UnavailableError
 	if _, ok := rateLimited(err); ok {
-		return w.rateLimitReply()
+		return w.rateLimitReply() + clickedNote(err, label)
 	}
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -495,9 +495,21 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	case errors.Is(err, ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fmt.Sprintf("Sorry, %s did not finish answering in time. The message may still have been sent.", label)
 	case errors.As(err, &ue):
-		return "Sorry, " + ue.Error() + "."
+		return "Sorry, " + ue.Error() + "." + clickedNote(err, label)
 	}
 	return fmt.Sprintf("Sending to %s failed.", label)
+}
+
+// clickedNote is what a send failure adds when it came after the send
+// button was clicked (a redirect to a sign-in page or an anti-bot check
+// mid-send): the message may be in the conversation already, and sending
+// it again could post it twice.
+func clickedNote(err error, label string) string {
+	var ue *UnavailableError
+	if !errors.As(err, &ue) || !ue.Clicked {
+		return ""
+	}
+	return fmt.Sprintf(" The send button had already been clicked, so the message may have been sent; check the %s conversation before sending it again.", label)
 }
 
 // site is the agent's table entry, nil for a site outside the table

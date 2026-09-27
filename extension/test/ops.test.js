@@ -649,13 +649,21 @@ test('gemini.list reads MaZiqc page by page with the app page session, which nev
   assert.equal(f.calls.filter((c) => c.url === GEMINI_APP).length, 1, 'the app page is fetched once');
 });
 
-test('gemini.list: a first page with no payload is endpoint_changed; a later one ends the list', async () => {
+test('gemini.list: an error row on any page is endpoint_changed; only a page with no token ends the list', async () => {
   const pages = fixture('gemini/list.json').pages;
-  let f = geminiFetch({ rpc: () => batchResponse('MaZiqc', null) });
-  await assert.rejects(run(createRunner({ fetch: f }), 'gemini.list', { count: 10 }), (e) => e.code === 'endpoint_changed');
-  f = geminiFetch({ rpc: (_rpcid, payload) => (payload[1] === null ? batchResponse('MaZiqc', pages[0]) : batchResponse('MaZiqc', null)) });
-  const frames = await run(createRunner({ fetch: f }), 'gemini.list', { count: 100 });
-  assert.deepEqual(frames, [{ ok: true, result: { pages: [pages[0]] } }]);
+  const rows = [MALFORMED_ROW('MaZiqc'), NOT_FOUND_ROW('MaZiqc'), ['wrb.fr', 'MaZiqc', null, null, null, null, 'generic']];
+  for (const row of rows) {
+    let f = geminiFetch({ rpc: () => batchRow(row) });
+    await assert.rejects(run(createRunner({ fetch: f }), 'gemini.list', { count: 10 }), (e) => e.code === 'endpoint_changed', JSON.stringify(row));
+    // A later page's error row never turns the earlier pages into a
+    // complete list.
+    f = geminiFetch({ rpc: (_rpcid, payload) => (payload[1] === null ? batchResponse('MaZiqc', pages[0]) : batchRow(row)) });
+    await assert.rejects(run(createRunner({ fetch: f }), 'gemini.list', { count: 100 }), (e) => e.code === 'endpoint_changed', JSON.stringify(row));
+  }
+  // A page with no next-page token is the genuine end.
+  const f = geminiFetch({ rpc: (_rpcid, payload) => batchResponse('MaZiqc', payload[1] === null ? pages[0] : pages[1]) });
+  assert.deepEqual(await run(createRunner({ fetch: f }), 'gemini.list', { count: 100 }), [{ ok: true, result: { pages } }]);
+  assert.equal(f.calls.filter((c) => c.url.startsWith(GEMINI_RPC)).length, 2);
 });
 
 test('gemini.detail reads hNvQHb with the c_ id; a missing conversation is not_found', async () => {
@@ -689,10 +697,6 @@ test('parseBatchexecute: anything but a wrb.fr answer for the rpcid is endpoint_
   assert.throws(() => parseBatchexecute(batchChunks(MALFORMED_ROW('MaZiqc')), 'MaZiqc'), (e) => e.code === 'endpoint_changed');
   assert.throws(() => parseBatchexecute(batchChunks(NOT_FOUND_ROW('MaZiqc')), 'MaZiqc'), (e) => e.code === 'endpoint_changed');
   assert.throws(() => parseBatchexecute(JSON.stringify([['wrb.fr', 'X', null]]), 'X'), (e) => e.code === 'endpoint_changed');
-  // nullOK (a later list page) takes a null payload, but never hides a
-  // missing conversation.
-  assert.equal(parseBatchexecute(batchChunks(MALFORMED_ROW('MaZiqc')), 'MaZiqc', { nullOK: true }), null);
-  assert.throws(() => parseBatchexecute(batchChunks(NOT_FOUND_ROW('hNvQHb')), 'hNvQHb', { nullOK: true }), (e) => e.code === 'not_found');
   for (const text of ['', ")]}'\n", '<html>nope</html>', JSON.stringify([['wrb.fr', 'Y', '[1]']]), JSON.stringify([['wrb.fr', 'X', '{bad json']]), JSON.stringify([['wrb.fr', 'X', 5]]), undefined]) {
     assert.throws(() => parseBatchexecute(text, 'X'), (e) => e.code === 'endpoint_changed', String(text));
   }

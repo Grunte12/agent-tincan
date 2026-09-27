@@ -59,7 +59,7 @@ manager never restarts it in a loop.
 
 | Operation | Arguments | What it does |
 | --- | --- | --- |
-| `gemini.list` | `count` | Reads `MaZiqc` 13 conversations a page, passing each page's token, until it has `count` or the pages end (at most 10 pages). Returns `{pages: [<inner payload>, ...]}`. |
+| `gemini.list` | `count` | Reads `MaZiqc` 13 conversations a page, passing each page's token, until it has `count` or a page carries no next-page token (at most 10 pages). An error row on any page is `endpoint_changed`, never a shorter list. Returns `{pages: [<inner payload>, ...]}`. |
 | `gemini.detail` | `id` | Reads `hNvQHb` for `c_<id>` (latest 10 turns) and returns the inner payload. No payload is `not_found`. |
 | `gemini.file` | `file_id` (`<response id>-<n>`), `conversation_id` | Reads the conversation again, takes image `n` of that response (only `https://lh3.googleusercontent.com/` URLs, found the way `geminiImageURLs` walks a response), then asks the sender to fetch it inside the tab the send left open (`pageFetchImage`, isolated world, the page's cookies) and falls back to a worker fetch with the image host's grant. Never draws an `<img>` onto a canvas. |
 | `gemini.send` | `message`, `conversation_id?`, `new_chat?` | Fetches the app page fresh (logged out or `/sorry/` opens no tab), then types into the Quill composer (`div.ql-editor`) of `https://gemini.google.com/app` or `/app/<id>` in a background tab. Returns the hex id from the tab's address. |

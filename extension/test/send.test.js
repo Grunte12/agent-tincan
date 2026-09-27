@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { SELECTORS, SITES, createSender, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
-import { createRunner, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
+import { createRunner, errorFrame, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
 // ---- A fake DOM, just enough for the page functions.
 
@@ -741,15 +741,16 @@ test('a redirect after the composer was found stops the send: /sorry/ is blocked
     // While the send button is still disabled (before the click).
     let page;
     let fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { sendReadyTick: 5, moveTo: to, moveAtTick: 2 })));
-    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `before the click: ${to}`);
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && !e.clicked && !errorFrame(e).error.clicked, `before the click: ${to}`);
     assert.deepEqual(page.submitted, [], 'nothing sent on another host');
     assert.deepEqual(fc.log.removed, [100]);
     // After the click, while confirming.
     fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, streamTicks: 99, moveTo: to, moveAtTick: 2 })));
-    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `confirming: ${to}`);
+    // The click happened, so the failure says the message may have gone.
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && e.clicked === true && errorFrame(e).error.clicked === true, `confirming: ${to}`);
     // While waiting for the new chat's id.
     fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, neverFinish: true, moveTo: to, moveAtTick: 4 })));
-    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, `id wait: ${to}`);
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && e.clicked === true && errorFrame(e).error.clicked === true, `id wait: ${to}`);
     assert.deepEqual(page.submitted, ['hi']);
   }
 });
@@ -788,6 +789,42 @@ test('capture fetches a Gemini image inside the tab the send left open, and only
     await s.close('gemini', r.conversation_id);
     assert.equal(await s.capture('gemini', r.conversation_id, IMG), null);
     assert.equal(fc.log.scripts.length, n);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test('pageFetchImage stops reading once an image passes maxBytes, and refuses a declared size over it unread', async () => {
+  const saved = globalThis.fetch;
+  let pulled = 0;
+  let cancelled = false;
+  // An endless image body, 1 KiB a chunk.
+  const endless = () =>
+    new ReadableStream({
+      pull(c) {
+        pulled++;
+        c.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+  try {
+    globalThis.fetch = async () => new Response(endless(), { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/big', 4096), { ok: false, code: 'size' });
+    assert.ok(pulled <= 8, `read ${pulled} chunks for a 4 KiB cap`);
+    assert.ok(cancelled, 'the body is cancelled');
+    pulled = 0;
+    globalThis.fetch = async () => new Response(endless(), { status: 200, headers: { 'content-type': 'image/png', 'content-length': '999999' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/big', 4096), { ok: false, code: 'size' });
+    assert.ok(pulled <= 1, `read ${pulled} chunks of a body declared too large`);
+    // One that fits comes back whole, in chunks or not.
+    const png = new Uint8Array(3000).map((_, i) => i % 251);
+    globalThis.fetch = async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/ok', 4096), { ok: true, mime: 'image/png', data: Buffer.from(png).toString('base64') });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/ok', 2999), { ok: false, code: 'size' });
+    globalThis.fetch = async () => new Response(new Uint8Array(0), { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/empty', 4096), { ok: false, code: 'size' });
   } finally {
     globalThis.fetch = saved;
   }
