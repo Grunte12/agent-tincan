@@ -16,6 +16,7 @@
 #   roots=$(tincan_wake_write_roots "$ALLOWED_ROOTS" "$WRITE_ROOTS")
 #   set -- "$BIN" <headless and sandbox flags>   # plus one flag per root
 #   tincan_wake_run "$@" "$PROMPT"          # timeout, failure count
+#   tincan_wake_backoff "login expired"     # optional: back off at once
 #
 # Operator settings, read from the environment (the listener's):
 #
@@ -215,6 +216,13 @@ tincan_wake_refuse() {
   tincan_wake_log "refusing to run: $1"
   _tw_backoff "$1"
   exit 1
+}
+
+# tincan_wake_backoff REASON backs off at once and tells the operator, after
+# a run failed in a way the next run cannot fix on its own (an expired
+# login). The requests stay queued.
+tincan_wake_backoff() {
+  _tw_backoff "$1"
 }
 
 # tincan_wake_record_failure REASON counts one failed run, and backs off

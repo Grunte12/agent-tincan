@@ -1,0 +1,212 @@
+#!/bin/sh
+# Wake for the gemini-cli teammate: Google's Antigravity CLI (agy) or Gemini
+# CLI (gemini), run headless by "tincan listen --exec".
+#
+# Neither CLI has a daemon, so an idle gemini-cli needs something to start a
+# fresh run when teammates' requests are waiting. Copy this script and
+# examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in
+# the release downloads) into one folder you keep, chmod +x this one, and run:
+#
+#   TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh
+#
+# Engines (TINCAN_GEMINI_ENGINE):
+#
+#   agy     the default. Antigravity CLI, logged in once interactively with a
+#           Google consumer account; no API key. agy documents no sandbox,
+#           so the wake refuses to run it unless the owner accepts an
+#           unconfined run with TINCAN_GEMINI_ALLOW_UNCONFINED=1. See
+#           docs/adapters/gemini-cli.md.
+#   gemini  Gemini CLI with a paid API key in GEMINI_API_KEY (Gemini CLI has
+#           not accepted consumer Google logins since 2026-06-18). It runs in
+#           its own sandbox (--sandbox: seatbelt on macOS), writing only in
+#           the workdir and the operator's write roots.
+#
+# Settings, read from the listener's environment (the library's settings,
+# TINCAN_WAKE_*, are listed in tincan-wake-lib.sh):
+#
+#   TINCAN_CONFIG                   this teammate's tincan config (default
+#                                   ~/.config/tincan/gemini-cli.json)
+#   TINCAN_GEMINI_ENGINE            agy (default) or gemini
+#   TINCAN_GEMINI_WORKDIR           where the engine runs (~/tincan-gemini)
+#   TINCAN_GEMINI_WRITE_ROOTS       extra write roots for the gemini engine,
+#                                   colon-separated absolute paths
+#   TINCAN_GEMINI_ALLOWED_ROOTS     where write roots may be (default
+#                                   ~/code:~/tincan-gemini)
+#   TINCAN_GEMINI_ALLOW_UNCONFINED  1 lets the agy engine run with no sandbox
+#   TINCAN_GEMINI_VERSION_PATTERN   what "<engine> --version" must print
+#   TINCAN_AGY_MCP_CONFIG           agy's MCP config (default
+#                                   ~/.gemini/config/mcp_config.json)
+#   TINCAN_AGY_PRINT_TIMEOUT        passed to agy --print-timeout when set
+#                                   (agy stops a headless run after 5 minutes
+#                                   by default)
+#   TINCAN_GEMINI_SETTINGS          Gemini CLI settings (default
+#                                   ~/.gemini/settings.json)
+#   TINCAN_GEMINI_JSON_TOOL         jq or python3, to read the MCP configs
+#                                   (default jq when on PATH)
+#   AGY_BIN, GEMINI_BIN             the engine binaries (agy, gemini)
+set -eu
+
+: "${TINCAN_CONFIG:=$HOME/.config/tincan/gemini-cli.json}"
+export TINCAN_CONFIG
+
+# The library sits next to this script, or in the repo's examples/lib.
+here=$(dirname -- "$0")
+if [ -z "${TINCAN_WAKE_LIB:-}" ]; then
+  TINCAN_WAKE_LIB=$here/tincan-wake-lib.sh
+  [ -f "$TINCAN_WAKE_LIB" ] || TINCAN_WAKE_LIB=$here/../lib/tincan-wake-lib.sh
+fi
+if [ ! -f "$TINCAN_WAKE_LIB" ]; then
+  echo "gemini-cli-wake: tincan-wake-lib.sh not found; copy examples/lib/tincan-wake-lib.sh next to this script" >&2
+  exit 2
+fi
+# shellcheck source=SCRIPTDIR/../lib/tincan-wake-lib.sh
+. "$TINCAN_WAKE_LIB"
+
+ENGINE=${TINCAN_GEMINI_ENGINE:-agy}
+WORKDIR=${TINCAN_GEMINI_WORKDIR:-$HOME/tincan-gemini}
+ALLOWED_ROOTS=${TINCAN_GEMINI_ALLOWED_ROOTS:-$HOME/code:$HOME/tincan-gemini}
+WRITE_ROOTS=${TINCAN_GEMINI_WRITE_ROOTS:-}
+AGY_MCP_CONFIG=${TINCAN_AGY_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}
+GEMINI_SETTINGS=${TINCAN_GEMINI_SETTINGS:-$HOME/.gemini/settings.json}
+
+tincan_wake_init gemini-cli
+tincan_wake_begin
+
+case $ENGINE in
+  agy)
+    BIN=${AGY_BIN:-agy}
+    VERSION_PATTERN=${TINCAN_GEMINI_VERSION_PATTERN:-[Aa]ntigravity|agy|[0-9]+\.[0-9]+}
+    # The global config agy mcp add writes, and the workspace one agy reads
+    # from the directory it runs in.
+    MCP_FILES="$AGY_MCP_CONFIG
+$WORKDIR/.agents/mcp_config.json"
+    ;;
+  gemini)
+    BIN=${GEMINI_BIN:-gemini}
+    VERSION_PATTERN=${TINCAN_GEMINI_VERSION_PATTERN:-^v?[0-9]+\.[0-9]+}
+    # User settings, and the project settings Gemini CLI reads from the
+    # directory it runs in.
+    MCP_FILES="$GEMINI_SETTINGS
+$WORKDIR/.gemini/settings.json"
+    ;;
+  *)
+    tincan_wake_refuse "TINCAN_GEMINI_ENGINE is \"$ENGINE\"; set it to agy or gemini"
+    ;;
+esac
+
+if [ "$ENGINE" = gemini ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+  tincan_wake_refuse "the gemini engine needs GEMINI_API_KEY in the listener's environment (Gemini CLI no longer accepts Google account logins); set it, or use TINCAN_GEMINI_ENGINE=agy"
+fi
+if [ "$ENGINE" = agy ] && [ "${TINCAN_GEMINI_ALLOW_UNCONFINED:-}" != 1 ]; then
+  tincan_wake_refuse "agy has no documented sandbox, so this wake would run it with tool approval off and nothing confining its writes; set TINCAN_GEMINI_ALLOW_UNCONFINED=1 to accept that (docs/adapters/gemini-cli.md), or use TINCAN_GEMINI_ENGINE=gemini"
+fi
+
+tincan_wake_check_binary "$BIN" "$VERSION_PATTERN"
+
+mkdir -p "$WORKDIR"
+
+# gemini_mcp_json FILE... prints the mcpServers of each JSON config that
+# exists as the library's listing lines: name, TINCAN_CONFIG, command.
+# It needs jq or python3; TINCAN_GEMINI_JSON_TOOL picks one.
+gemini_mcp_json() {
+  _tool=${TINCAN_GEMINI_JSON_TOOL:-}
+  if [ -z "$_tool" ]; then
+    if command -v jq >/dev/null 2>&1; then _tool=jq; else _tool=python3; fi
+  fi
+  for f in "$@"; do
+    [ -e "$f" ] || continue
+    if [ "$_tool" = jq ] && command -v jq >/dev/null 2>&1; then
+      jq -r '(.mcpServers // {}) | to_entries[]
+        | [.key,
+           ((.value.env // {}).TINCAN_CONFIG // "" | tostring),
+           ([.value.command // .value.url // .value.httpUrl // .value.serverUrl // ""]
+             + ((.value.args // []) | map(tostring)) | join(" "))]
+        | map(gsub("[\t\n]"; " ")) | join("\t")' "$f" || return 1
+    elif [ "$_tool" = python3 ] && command -v python3 >/dev/null 2>&1; then
+      python3 -c '
+import json, sys
+servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+for name, v in servers.items():
+    env = v.get("env") or {}
+    cmd = [v.get("command") or v.get("url") or v.get("httpUrl") or v.get("serverUrl") or ""]
+    cmd += [str(a) for a in (v.get("args") or [])]
+    row = [name, str(env.get("TINCAN_CONFIG") or ""), " ".join(cmd)]
+    print("\t".join(x.replace("\t", " ").replace("\n", " ") for x in row))
+' "$f" || return 1
+    else
+      tincan_wake_log "reading $f needs jq or python3 on PATH"
+      return 1
+    fi
+  done
+}
+
+gemini_mcp_list() {
+  _old_ifs=$IFS
+  IFS='
+'
+  set -f
+  # shellcheck disable=SC2086 # one file per line
+  set -- $MCP_FILES
+  set +f
+  IFS=$_old_ifs
+  gemini_mcp_json "$@"
+}
+
+tincan_wake_check_identity gemini_mcp_list
+
+PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan item(s) waiting: requests from teammates, or replies to requests you sent. Call check_inbox. It shows replies to your requests first, with what you asked: finish the work that was waiting on each one. Then, for each request, handle it the way you would handle a request from your owner, and call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask; it may return before the answer does, and you do not have to wait for it: you will be woken again when the reply arrives. You can read anywhere, but write only in your working directory and in write roots your operator has opened; if work needs to be written somewhere else, say so in your reply rather than writing there."
+
+if [ "$ENGINE" = agy ]; then
+  if [ -n "$WRITE_ROOTS" ]; then
+    tincan_wake_log "TINCAN_GEMINI_WRITE_ROOTS is ignored for agy, which has no write confinement to open roots in"
+  fi
+  tincan_wake_log "running agy unconfined (TINCAN_GEMINI_ALLOW_UNCONFINED=1): tool approval is off and nothing limits its writes"
+  set -- "$BIN" --output-format json --dangerously-skip-permissions
+  if [ -n "${TINCAN_AGY_PRINT_TIMEOUT:-}" ]; then
+    set -- "$@" --print-timeout "$TINCAN_AGY_PRINT_TIMEOUT"
+  fi
+else
+  # Only the vetted servers may start, whatever else a settings file or an
+  # extension adds: the tincan server the identity check found, plus the
+  # operator's allowed servers.
+  tincan_name=$(gemini_mcp_list | awk -F '\t' '$1 != "" && (tolower($1) ~ /tincan/ || $3 ~ /tincan/) { print $1; exit }')
+  set -- "$BIN" --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names "$tincan_name"
+  for s in $(printf '%s' "${TINCAN_WAKE_ALLOWED_SERVERS:-}" | tr ',' ' '); do
+    set -- "$@" --allowed-mcp-server-names "$s"
+  done
+  roots=$(tincan_wake_write_roots "$ALLOWED_ROOTS" "$WRITE_ROOTS")
+  while IFS= read -r d; do
+    [ -n "$d" ] && set -- "$@" --include-directories "$d"
+  done <<EOF
+$roots
+EOF
+fi
+
+# The engine's output is kept in the wake's private state directory, so an
+# authentication failure can be told apart from other failures, then passed
+# on to the listener's log.
+state=$(CDPATH='' cd -P -- "$TINCAN_WAKE_STATE_DIR" && pwd -P)
+out=$state/out.$$
+err=$state/err.$$
+cd "$WORKDIR"
+status=0
+tincan_wake_run "$@" -p "$PROMPT" >"$out" 2>"$err" || status=$?
+cat "$out"
+cat "$err" >&2
+auth=
+if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+  if [ "$ENGINE" = gemini ] && [ "$status" -eq 41 ]; then
+    auth=1
+  elif grep -Eiq 'authentication required|not authenticated|unauthenticated|not logged in|log ?in (is )?required|login (has )?expired|please (re-?)?log ?in|api key not valid|invalid api key|API_KEY_INVALID' "$out" "$err"; then
+    auth=1
+  fi
+fi
+rm -f "$out" "$err"
+if [ -n "$auth" ]; then
+  if [ "$ENGINE" = agy ]; then
+    tincan_wake_backoff "agy is not logged in or its login expired; run agy once on this machine and log in with the owner's Google account"
+  else
+    tincan_wake_backoff "Gemini CLI rejected its credentials; check GEMINI_API_KEY in the listener's environment"
+  fi
+fi
+exit "$status"

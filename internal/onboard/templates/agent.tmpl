@@ -7,7 +7,8 @@ Service.
 
 Never print a secret value. Name the wake.json field that holds a secret and
 say to set it in the file only. Wake messages carry only the waiting counts.
-Fresh-session kinds (freshSession in onboard.go: hermes, openclaw, codex) must
+Fresh-session kinds (freshSession in onboard.go: hermes, openclaw, codex,
+gemini-cli) must
 carry instructions.fresh. They also commonly share a machine with another
 agent, so every tincan command in their join, setup and self-heal lines
 carries a per-agent TINCAN_CONFIG (template "cfg"), their MCP entries set that
@@ -96,6 +97,11 @@ An OpenClaw hook turn (a POST to /hooks/agent named "Agent Tincan") whose messag
 {{- end -}}
 
 {{- define "instructions.codex" -}}
+You are started by tincan listen with a check-inbox prompt whenever teammates' requests, or replies to your own requests, are waiting.
+{{template "instructions.fresh" .}}
+{{- end -}}
+
+{{- define "instructions.gemini-cli" -}}
 You are started by tincan listen with a check-inbox prompt whenever teammates' requests, or replies to your own requests, are waiting.
 {{template "instructions.fresh" .}}
 {{- end -}}
@@ -195,6 +201,17 @@ On the relay host, in wake.json: set {{.Name}} to method "command". No secret fi
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}
 
+{{- define "setup.gemini-cli" -}}
+Pick the engine. agy (Antigravity CLI, the default) works with {{.OwnerPoss}} Google account and needs no API key: install it (curl -fsSL https://antigravity.google/cli/install.sh | bash) and run agy once in a terminal to log in. gemini (Gemini CLI) needs a paid Gemini API key, because Google stopped accepting Google account logins in Gemini CLI on 2026-06-18: to use it, set TINCAN_GEMINI_ENGINE=gemini and GEMINI_API_KEY in the listener's environment only, never in chat.
+Add tincan to the engine's MCP config, with {{template "mcpenv" .}}. For agy: agy mcp add a server named agent-tincan that runs tincan mcp with that env (agy mcp add --help shows the flags), then check it with agy mcp list; the wake reads agy's MCP config from ~/.gemini/config/mcp_config.json (set TINCAN_AGY_MCP_CONFIG if agy mcp list shows another file). For gemini: gemini mcp add -s user -e TINCAN_CONFIG=<full path of {{template "cfgpath" .}}> --trust agent-tincan tincan mcp, which writes it to ~/.gemini/settings.json with trust true so its tool calls are not held for confirmation.
+Get the wake script: copy examples/gemini-cli/gemini-wake.sh and examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in the release downloads) into ~/bin, and chmod +x ~/bin/gemini-wake.sh. It takes a lock, backs off and tells TINCAN_WAKE_OPERATOR once when runs keep failing or the login expires, and refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's TINCAN_CONFIG.
+Confinement: the gemini engine runs in its --sandbox (seatbelt on macOS), writing only in TINCAN_GEMINI_WORKDIR (default ~/tincan-gemini) and write roots opened with TINCAN_GEMINI_WRITE_ROOTS. agy documents no sandbox, so the wake runs it only after {{.Owner}} accepts an unconfined run with TINCAN_GEMINI_ALLOW_UNCONFINED=1; read docs/adapters/gemini-cli.md before setting it.
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec ~/bin/gemini-wake.sh
+The listener runs the script whenever requests or replies are waiting; the script tells the engine to run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty.
+On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
+Put the standing instructions in the context file the engine reads in its working directory (GEMINI.md for Gemini CLI), or in the prompt the listener passes.
+{{- end -}}
+
 {{- define "setup.history" -}}
 Run it on the machine where {{.Owner}} uses Chrome, Codex and Claude Code; it reads their history there. codex must be installed and logged in for the query step (check with codex login status).
 Install the native messaging host and the service definition: tincan history install (with --extension-dir <folder> when the extension is loaded unpacked, see below). It writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS, a systemd user unit on Linux), then prints the command that starts the service. It starts nothing itself.
@@ -238,6 +255,7 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
 {{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
+{{- define "title.gemini-cli"}}Gemini through Antigravity CLI or Gemini CLI, woken by tincan listen{{end -}}
 {{- define "title.history"}}History service for ChatGPT, claude.ai, Codex and Claude Code chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}

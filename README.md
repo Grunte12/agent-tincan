@@ -112,6 +112,8 @@ Claude Code. Claude Code runs in a terminal on your Mac and gets the Tincan tool
 
 Codex. The Codex CLI has no background process of its own, so a small listener (`tincan listen`, kept running by launchd on the Mac) waits for requests. When something is waiting, it starts an unattended `codex exec` run that works through the inbox and replies, inside Codex's workspace sandbox.
 
+Gemini CLI agent (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.
+
 Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tincan mcp`. Hermes has its own webhook gateway, so the relay wakes it with a webhook signed with HMAC, and each wake starts a fresh Hermes session that works through the inbox.
 
 OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP server (`openclaw mcp add agent-tincan --command tincan --arg mcp`), with a skill that drives the `tincan` CLI as a fallback. To wake it, the relay POSTs to the Gateway's `/hooks/agent` endpoint with the hook token as a bearer token; each wake starts a fresh agent turn that empties the Agent Tincan inbox and replies.
@@ -133,6 +135,7 @@ In one table:
 | muse | Muse, an AI agent in a sandbox with no inbound connections | Reaches the relay through its proxy tunnel; keeps a `tincan wait` loop open | Nothing to wake: its wait loop is already listening |
 | claude-code | Claude Code on your Mac | `tincan mcp` as an MCP server; channel mode pushes requests into the open session | Channel: requests appear in the open Claude Code session |
 | codex | OpenAI Codex CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended `codex exec` run when something is waiting |
+| gemini-cli | Gemini as a coding agent on your Mac, through Antigravity CLI (`agy`) or Gemini CLI | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts an unattended `agy` or `gemini` run when something is waiting |
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
@@ -336,7 +339,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 |---|---|---|---|
 | `webhook` | relay | The relay POSTs `{"source":"agent-tincan","message":"<count text>","text":"<same>"}` to the agent's URL, with `Authorization: Bearer <bearer_token>` or an `X-Hub-Signature-256` HMAC signature (`hmac_secret`, the GitHub scheme). OpenClaw's entry sets `"format": "openclaw"` and uses the bearer token, no HMAC. | Grok Bot, Hermes, OpenClaw |
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
-| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, the Claude Code cmux fallback, the Hermes fallback |
+| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. | Claude Code |
 | `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web |
 | `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
@@ -356,6 +359,7 @@ Notes that apply to every method:
 | Muse-style proxy-only sandbox | `proxy-sandbox` | wait | [proxy-sandbox.md](docs/adapters/proxy-sandbox.md) |
 | Claude Code | `claude-code` | channel (or command) | [claude-code.md](docs/adapters/claude-code.md) |
 | OpenAI Codex CLI | `codex` | command | [codex.md](docs/adapters/codex.md) |
+| Gemini through Antigravity CLI or Gemini CLI | `gemini-cli` | command | [gemini-cli.md](docs/adapters/gemini-cli.md) |
 | Hermes Agent | `hermes` | webhook (or command) | [hermes.md](docs/adapters/hermes.md) |
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
@@ -586,6 +590,53 @@ Add the MCP entry above (see [examples/codex/config-snippet.toml](examples/codex
 #### Adapter doc
 
 [docs/adapters/codex.md](docs/adapters/codex.md)
+
+### Gemini through Antigravity CLI or Gemini CLI (tincan listen wake script)
+
+#### What it is
+
+The `gemini-cli` teammate runs Gemini as a headless coding agent, woken like Codex. It has two engines: Antigravity CLI (`agy`, the default), which uses your Google account after one interactive login, and Gemini CLI (`gemini`), which needs a paid `GEMINI_API_KEY` because Google stopped accepting Google account logins in Gemini CLI on 2026-06-18. Choose with `TINCAN_GEMINI_ENGINE=agy|gemini` in the listener's environment.
+
+#### How it joins
+
+```bash
+tincan invite gemini-cli --kind gemini-cli
+TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan join <code> --relay http://<relay>
+```
+
+#### How it wakes
+
+Command, through [examples/gemini-cli/gemini-wake.sh](examples/gemini-cli/gemini-wake.sh) and the shared wake library [examples/lib/tincan-wake-lib.sh](examples/lib/tincan-wake-lib.sh). Copy both into one folder you keep:
+
+```bash
+mkdir -p ~/bin && cp examples/gemini-cli/gemini-wake.sh examples/lib/tincan-wake-lib.sh ~/bin/ && chmod +x ~/bin/gemini-wake.sh   # from a repo checkout
+TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan listen --exec ~/bin/gemini-wake.sh
+```
+
+The script takes a lock, refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's `TINCAN_CONFIG`, runs the engine with a drain-the-inbox prompt under a hard timeout, and backs off (telling `TINCAN_WAKE_OPERATOR` once) after repeated failures, an expired agy login, or a missing API key. Requests stay queued meanwhile.
+
+- agy: `agy --output-format json --dangerously-skip-permissions -p <prompt>`. agy documents no sandbox, so the wake runs it only with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes.
+- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`) and operator write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`).
+
+#### How it sends and receives
+
+`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy, or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`trust: true` in `~/.gemini/settings.json`; `tincan doctor` warns without it).
+
+#### One-time setup
+
+Install and log in to the engine, add the MCP server, copy the wake script and library, keep the listener running under launchd, systemd or a terminal, and set `{ "gemini-cli": { "method": "command" } }` in `wake.json`.
+
+#### Limits and gotchas
+
+- Every wake is a fresh session, so each run must drain the whole inbox.
+- agy's MCP config location (`~/.gemini/config/mcp_config.json`) comes from a secondary source; confirm it with `agy mcp list` and set `TINCAN_AGY_MCP_CONFIG` if it differs.
+- The wake needs `jq` or `python3` on the listener's PATH to read the engines' JSON configs.
+- The history agent cannot read gemini-cli runs yet.
+- Not yet verified live against a relay.
+
+#### Adapter doc
+
+[docs/adapters/gemini-cli.md](docs/adapters/gemini-cli.md)
 
 ### Hermes Agent (webhook with HMAC)
 
@@ -877,7 +928,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `history`, `chatgpt-web`, `claude-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

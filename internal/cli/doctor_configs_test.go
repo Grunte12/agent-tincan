@@ -343,3 +343,71 @@ func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 		t.Fatalf("~/.grok/config.toml read although GROK_HOME points elsewhere: %+v", es)
 	}
 }
+
+// The gemini-cli teammate's engines keep their tincan entry in their own
+// JSON files: Gemini CLI in ~/.gemini/settings.json, where the wake needs
+// trust true on it, and Antigravity (agy) in ~/.gemini/config/mcp_config.json.
+func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "tincan")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	write := func(f, body string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	entriesIn := func(f string) []mcpConfigEntry {
+		var out []mcpConfigEntry
+		for _, e := range findMCPConfigs(nil) {
+			if e.File == f {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	entry := func(extra string) string {
+		return `{"mcpServers":{"agent-tincan":{"command":"` + exe + `","args":["mcp"],"env":{"TINCAN_CONFIG":"/Users/x/.config/tincan/gemini-cli.json"}` + extra + `}}}`
+	}
+
+	agy := write(filepath.Join(home, ".gemini", "config", "mcp_config.json"), entry(""))
+	es := entriesIn(agy)
+	if len(es) != 1 || es[0].Name != "agent-tincan" || len(es[0].Problems) != 0 {
+		t.Fatalf("agy mcp_config.json entries = %+v", es)
+	}
+	if c := configCheck(es, exe); c.Status != "ok" {
+		t.Fatalf("agy entry: got %+v", c)
+	}
+
+	settings := filepath.Join(home, ".gemini", "settings.json")
+	write(settings, entry(`,"trust":true`))
+	es = entriesIn(settings)
+	if len(es) != 1 || len(es[0].Problems) != 0 {
+		t.Fatalf("trusted gemini entry = %+v", es)
+	}
+	if c := configCheck(es, exe); c.Status != "ok" {
+		t.Fatalf("trusted gemini entry: got %+v", c)
+	}
+
+	write(settings, entry(""))
+	es = entriesIn(settings)
+	if len(es) != 1 || !strings.Contains(strings.Join(es[0].Problems, " "), "trust") {
+		t.Fatalf("untrusted gemini entry not flagged: %+v", es)
+	}
+	c := configCheck(es, exe)
+	if c.Status != "warn" || !strings.Contains(c.Detail+c.Fix, "trust") {
+		t.Fatalf("untrusted gemini entry: got %+v", c)
+	}
+	// trust is a Gemini CLI setting; other JSON configs do not need it.
+	if es := entriesIn(agy); len(es) != 1 || len(es[0].Problems) != 0 {
+		t.Fatalf("agy entry flagged for trust: %+v", es)
+	}
+}
