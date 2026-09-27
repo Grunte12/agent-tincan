@@ -82,7 +82,7 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 		}
 		backoff = time.Second
 		nudged := false
-		err = client.ReportUpgrade(w.UpgradeAvailable, func(string) error {
+		err = client.ReportUpgradeOn(client.UpgradeSurfaceListen, w.UpgradeAvailable, func(string) error {
 			nudged = true
 			return nudge(ctx, r, execCmd, n, once, w.UpgradeAvailable)
 		})

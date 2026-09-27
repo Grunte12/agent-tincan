@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -93,5 +94,19 @@ func TestConcurrentUpgradeNotice(t *testing.T) {
 	wg.Wait()
 	if calls.Load() != 1 {
 		t.Fatalf("emitted %d times", calls.Load())
+	}
+}
+
+func TestClientSendsItsPlatform(t *testing.T) {
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get(client.PlatformHeader)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	r, _ := client.NewRelay(srv.URL, "")
+	_, _ = r.Peek(t.Context(), 0)
+	if want := runtime.GOOS + "_" + runtime.GOARCH; <-got != want {
+		t.Fatalf("platform header != %s", want)
 	}
 }

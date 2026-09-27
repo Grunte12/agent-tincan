@@ -111,8 +111,14 @@ func TestChannelUpgradeRetriesAndDeduplicates(t *testing.T) {
 	if p.calls != 2 || !strings.Contains(p.content, "94.0.0 is available") {
 		t.Fatalf("push = %+v", p)
 	}
-	if got := client.FormatInbox(t.Context(), nil, client.Inbox{UpgradeAvailable: "94.0.0"}); strings.Contains(got, "upgrade") {
-		t.Fatalf("duplicate = %q", got)
+	if got := client.UpgradeNotice("94.0.0"); !strings.Contains(got, "94.0.0 is available") {
+		t.Fatalf("a channel event hid the inbox notice: %q", got)
+	}
+	if err := client.ReportUpgradeOn(client.UpgradeSurfaceChannel, "94.0.0", func(string) error {
+		t.Fatal("channel notice repeated")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -170,8 +176,11 @@ func TestListenUpgradeRetriesAndDeduplicates(t *testing.T) {
 	if err != nil || string(got) != "failed\n0:98.0.0\n" {
 		t.Fatalf("attempts = %q, %v", got, err)
 	}
-	if got := client.UpgradeNotice("98.0.0"); got != "" {
-		t.Fatalf("successful notice not deduplicated: %q", got)
+	if err := client.ReportUpgradeOn(client.UpgradeSurfaceListen, "98.0.0", func(string) error {
+		t.Fatal("successful listener notice not deduplicated")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

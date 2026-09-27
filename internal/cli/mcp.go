@@ -98,7 +98,7 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 			continue
 		}
 		backoff = time.Second
-		if err := client.ReportUpgrade(w.UpgradeAvailable, func(line string) error {
+		if err := client.ReportUpgradeOn(client.UpgradeSurfaceChannel, w.UpgradeAvailable, func(line string) error {
 			return t.Push(ctx, line, map[string]string{"kind": "upgrade", "upgrade_available": w.UpgradeAvailable})
 		}); err != nil {
 			log.Printf("tincan channel: push upgrade: %v", err)

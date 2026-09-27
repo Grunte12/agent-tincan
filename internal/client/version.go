@@ -86,23 +86,39 @@ var upgradeNotices = struct {
 	seen map[string]bool
 }{seen: map[string]bool{}}
 
+// Surfaces an upgrade notice is reported on. Each keeps its own once-per-
+// release guard, so a channel event the session never read does not hide the
+// notice from the next check_inbox.
+const (
+	UpgradeSurfaceInbox   = "inbox"
+	UpgradeSurfaceChannel = "channel"
+	UpgradeSurfaceListen  = "listen"
+)
+
 // ReportUpgrade emits an actionable notice at most once per process per
-// release. A failed emission may be retried; concurrent callers share the guard.
+// release on the inbox surface. A failed emission may be retried.
 func ReportUpgrade(version string, emit func(string) error) error {
+	return ReportUpgradeOn(UpgradeSurfaceInbox, version, emit)
+}
+
+// ReportUpgradeOn is ReportUpgrade for one surface; concurrent callers on the
+// same surface share its guard.
+func ReportUpgradeOn(surface, version string, emit func(string) error) error {
 	if !Newer(version, Version) {
 		return nil
 	}
 	version = strings.TrimPrefix(version, "v")
 	upgradeNotices.Lock()
 	defer upgradeNotices.Unlock()
-	if upgradeNotices.seen[version] {
+	key := surface + "\x00" + version
+	if upgradeNotices.seen[key] {
 		return nil
 	}
 	line := fmt.Sprintf("tincan %s is available from the relay (you run %s): run tincan upgrade, then restart long-running tincan processes.\n", version, strings.TrimPrefix(Version, "v"))
 	if err := emit(line); err != nil {
 		return err
 	}
-	upgradeNotices.seen[version] = true
+	upgradeNotices.seen[key] = true
 	return nil
 }
 

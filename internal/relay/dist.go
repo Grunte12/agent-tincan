@@ -32,9 +32,7 @@ const distDownloadTimeout = 10 * time.Minute
 
 // dist serves release files from an operator-managed directory.
 type dist struct {
-	dir         string
-	versionInfo os.FileInfo
-	version     string
+	dir string
 
 	mu   sync.Mutex
 	sums map[string]distSum // cached sha256 per file, keyed by name
@@ -161,31 +159,35 @@ func (d *dist) sum(name string) (string, error) {
 	return c.sum, nil
 }
 
+// release is the dist VERSION, read on every call: the file is a few bytes,
+// and reading it each time means an in-place edit is never missed.
 func (d *dist) release() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	path := filepath.Join(d.dir, "VERSION")
-	fi, err := os.Stat(path)
+	raw, err := os.ReadFile(filepath.Join(d.dir, "VERSION"))
 	if err != nil {
-		d.versionInfo = nil
 		return ""
 	}
-	if d.versionInfo != nil && os.SameFile(fi, d.versionInfo) && fi.ModTime().Equal(d.versionInfo.ModTime()) && fi.Size() == d.versionInfo.Size() {
-		return d.version
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		d.versionInfo = nil
-		return ""
-	}
-	d.versionInfo, d.version = fi, strings.TrimSpace(string(raw))
-	return d.version
+	return strings.TrimSpace(string(raw))
 }
 
-func (s *Server) upgradeFor(version string) string {
+// installable reports whether the dist holds the release binary for
+// platform (os_arch), so a notice never sends an agent to a failing
+// tincan upgrade.
+func (d *dist) installable(platform string) bool {
+	name := "tincan_" + platform
+	if !distBinary.MatchString(name) {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(d.dir, name))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// upgradeFor returns the newer release the caller should install, or "".
+// It needs the caller's build and platform headers, and the platform's
+// binary in the dist; clients that send no platform get no notice.
+func (s *Server) upgradeFor(r *http.Request) string {
 	if s.dist != nil {
 		available := s.dist.release()
-		if client.Newer(available, version) {
+		if client.Newer(available, r.Header.Get(client.VersionHeader)) && s.dist.installable(r.Header.Get(client.PlatformHeader)) {
 			return strings.TrimPrefix(available, "v")
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ const AgentHeader = "X-Tincan-Agent"
 // VersionHeader carries the tincan build the client runs on every relay
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
+
+// PlatformHeader carries the client's os_arch (for example darwin_arm64), so
+// the relay only announces a release it holds a binary for.
+const PlatformHeader = "X-Tincan-Platform"
 
 // Version is the tincan build this process runs, sent as VersionHeader by
 // every relay client made after it is set. main sets it from the link-time
@@ -513,6 +518,7 @@ func (r *Relay) headers(req *http.Request) {
 	if r.version != "" {
 		req.Header.Set(VersionHeader, r.version)
 	}
+	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
 }
 
 // IsStatus reports whether err is a relay error with the given HTTP code.

@@ -23,6 +23,7 @@ func whoamiAs(t *testing.T, h *harness, addr, version string) map[string]any {
 	if version != "" {
 		req.Header.Set(client.VersionHeader, version)
 	}
+	req.Header.Set(client.PlatformHeader, "linux_amd64")
 	rec := httptest.NewRecorder()
 	h.h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -157,12 +158,16 @@ func TestUpgradeAvailable(t *testing.T) {
 	if err := os.WriteFile(versionPath, []byte("0.5.5\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "tincan_linux_amd64"), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	h.srv.SetDist(dir)
 	for _, path := range []string{"/v1/whoami", "/v1/poll?hold=0", "/v1/poll?hold=0&peek=1"} {
 		for _, version := range []string{"0.5.4", "0.5.5", "0.6.0", "", "dev", "0.5.4-rc.1", "0.5.4-3-gabcdef", "invalid"} {
 			req := httptest.NewRequest("GET", path, nil)
 			req.RemoteAddr = grokAddr
 			req.Header.Set(client.VersionHeader, version)
+			req.Header.Set(client.PlatformHeader, "linux_amd64")
 			rec := httptest.NewRecorder()
 			h.h.ServeHTTP(rec, req)
 			var out map[string]any
@@ -195,6 +200,7 @@ func TestUpgradeAvailable(t *testing.T) {
 		req := httptest.NewRequest("GET", path, nil)
 		req.RemoteAddr = grokAddr
 		req.Header.Set(client.VersionHeader, "0.5.4")
+		req.Header.Set(client.PlatformHeader, "linux_amd64")
 		rec := httptest.NewRecorder()
 		h.h.ServeHTTP(rec, req)
 		if !strings.Contains(rec.Body.String(), `"upgrade_available":"0.5.5"`) {
@@ -233,5 +239,58 @@ func TestUpgradeAvailable(t *testing.T) {
 	h.srv.SetDist("")
 	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != nil {
 		t.Fatalf("no dist = %v", got)
+	}
+}
+
+func TestUpgradeAvailableNeedsPlatformBinaryAndSeesInPlaceEdits(t *testing.T) {
+	h := newHarness(t, Config{})
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "VERSION")
+	if err := os.WriteFile(versionPath, []byte("0.5.5"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.SetDist(dir)
+	ask := func(platform string) any {
+		req := httptest.NewRequest("GET", "/v1/whoami", nil)
+		req.RemoteAddr = grokAddr
+		req.Header.Set(client.VersionHeader, "0.5.4")
+		if platform != "" {
+			req.Header.Set(client.PlatformHeader, platform)
+		}
+		rec := httptest.NewRecorder()
+		h.h.ServeHTTP(rec, req)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out["upgrade_available"]
+	}
+	if got := ask("darwin_arm64"); got != nil {
+		t.Fatalf("VERSION staged before binaries = %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tincan_darwin_arm64"), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask("darwin_arm64"); got != "0.5.5" {
+		t.Fatalf("staged binary = %v", got)
+	}
+	for _, platform := range []string{"", "linux_amd64", "windows_amd64", "../darwin_arm64"} {
+		if got := ask(platform); got != nil {
+			t.Fatalf("platform %q = %v", platform, got)
+		}
+	}
+	// Same size, same mtime, rewritten in place: still seen.
+	info, err := os.Stat(versionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(versionPath, []byte("0.5.6"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(versionPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask("darwin_arm64"); got != "0.5.6" {
+		t.Fatalf("in-place VERSION edit = %v", got)
 	}
 }
