@@ -1172,7 +1172,7 @@ func assertStructuredHelp(t *testing.T, body string) {
 
 func TestHistoryAnswersPingWithoutHandling(t *testing.T) {
 	rig := newServeRig(t, false)
-	if _, err := rig.svc.Relay.Agents(t.Context()); err != nil {
+	if _, err := rig.svc.Relay.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
 	sender := rig.mesh.Client(t, "grokbot")

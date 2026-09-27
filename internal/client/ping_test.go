@@ -20,7 +20,7 @@ func TestPingCapabilityAndAutomaticReply(t *testing.T) {
 	if _, err := sender.Send(ctx, "muse", "", envelope.KindPing, ""); !client.IsStatus(err, 409) {
 		t.Fatalf("unadvertised ping: %v", err)
 	}
-	if _, err := target.Agents(ctx); err != nil {
+	if _, err := target.Peek(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 	req, err := sender.Send(ctx, "muse", "", envelope.KindPing, "")
@@ -31,7 +31,7 @@ func TestPingCapabilityAndAutomaticReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rest, err := client.AnswerPings(ctx, target, in, "inbox")
+	rest, _, err := client.AnswerPings(ctx, target, in, "inbox")
 	if err != nil || !rest.Empty() {
 		t.Fatalf("rest: %+v, %v", rest, err)
 	}
@@ -44,7 +44,7 @@ func TestPingCapabilityAndAutomaticReply(t *testing.T) {
 		t.Fatalf("pong leaked into sender inbox: %+v, %v", in, err)
 	}
 	// An older process replaces the capability advertisement on its next call.
-	raw, _ := http.NewRequestWithContext(ctx, "GET", m.URL("muse")+"/v1/agents", nil)
+	raw, _ := http.NewRequestWithContext(ctx, "GET", m.URL("muse")+"/v1/poll?peek=1&hold=0", nil)
 	raw.Header.Set(client.VersionHeader, "0.5.4")
 	resp, err := http.DefaultClient.Do(raw)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestAnswerPingsFailurePreservesInbox(t *testing.T) {
 		for _, status := range []int{409, 503} {
 			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
 				in := client.Inbox{Requests: []envelope.Request{{ID: "ping", Kind: envelope.KindPing}, {ID: "work", Kind: envelope.KindAsk}}, Replies: []client.Result{{Request: envelope.Request{ID: "reply", Kind: envelope.KindAsk}}}}
-				rest, err := client.AnswerPings(t.Context(), failingPingResponder{phase, status}, in, "test")
+				rest, _, err := client.AnswerPings(t.Context(), failingPingResponder{phase, status}, in, "test")
 				if (err == nil) != (status == 409) {
 					t.Fatalf("error: %v", err)
 				}

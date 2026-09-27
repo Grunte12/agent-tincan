@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +24,7 @@ func TestWaitAnswersPingAndKeepsWaiting(t *testing.T) {
 	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := target.Agents(ctx); err != nil {
+	if _, err := target.Peek(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 	ping, err := sender.Send(ctx, "muse", "", envelope.KindPing, "")
@@ -29,7 +32,7 @@ func TestWaitAnswersPingAndKeepsWaiting(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan client.Inbox, 1)
-	go func() { in, _ := waitForInbox(ctx, target, time.Second, client.RepliesKeep); done <- in }()
+	go func() { in, _, _ := waitForInbox(ctx, target, time.Second, client.RepliesKeep); done <- in }()
 	pong, err := sender.Get(ctx, ping.ID, 2*time.Second)
 	if err != nil || pong.Reply == nil {
 		t.Fatalf("pong: %+v %v", pong, err)
@@ -58,7 +61,7 @@ func TestListenAnswersPingsWithoutExec(t *testing.T) {
 	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, err := target.Agents(ctx); err != nil {
+	if _, err := target.Peek(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 	var last envelope.Request
@@ -112,7 +115,7 @@ func TestPingCommand(t *testing.T) {
 			target := m.Client(t, "muse")
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			if _, err := target.Agents(ctx); err != nil {
+			if _, err := target.Peek(ctx, 0); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
@@ -165,7 +168,7 @@ func fmtBool(b bool) string {
 func TestInboxJSONFiltersPingAmongWork(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
-	if _, err := target.Agents(t.Context()); err != nil {
+	if _, err := target.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
 	ping, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "")
@@ -188,7 +191,7 @@ func TestInboxJSONFiltersPingAmongWork(t *testing.T) {
 func TestTraceFilterBeforeLimit(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
-	if _, err := target.Agents(t.Context()); err != nil {
+	if _, err := target.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
 	ask, err := sender.Send(t.Context(), "muse", "real work", envelope.KindAsk, "")
@@ -206,5 +209,38 @@ func TestTraceFilterBeforeLimit(t *testing.T) {
 	}
 	if len(out.Traces) != 1 || out.Traces[0].Request.ID != ask.ID {
 		t.Fatalf("traces: %+v", out)
+	}
+}
+
+func TestPingEndedIdentifiesRequest(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		t.Run(fmtBool(asJSON), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					fmt.Fprint(w, `{"id":"ping-id","to":"hermes","kind":"ping"}`)
+					return
+				}
+				fmt.Fprint(w, `{"request":{"id":"ping-id","to":"hermes","kind":"ping"},"status":"expired"}`)
+			}))
+			defer ts.Close()
+			t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+			t.Setenv("TINCAN_RELAY", "")
+			t.Setenv("TINCAN_PROXY", "")
+			if err := client.SaveConfig(client.Config{Relay: ts.URL, Agent: "grokbot"}); err != nil {
+				t.Fatal(err)
+			}
+			cmd := pingCmd()
+			args := []string{"hermes"}
+			if asJSON {
+				args = append(args, "--json")
+			}
+			cmd.SetArgs(args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.ExecuteContext(t.Context())
+			if err == nil || err.Error() != "ping hermes (request ping-id) ended: expired" {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }

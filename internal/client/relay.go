@@ -291,6 +291,7 @@ func (in Inbox) ReplyIDs() []string {
 
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
+	Pings   int      `json:"pings,omitempty"`
 	Total   int      `json:"waiting"` // queued requests plus unseen replies
 	Queued  int      `json:"queued"`
 	Replies []Result `json:"replies,omitempty"`

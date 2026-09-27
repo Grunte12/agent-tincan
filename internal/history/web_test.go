@@ -1213,7 +1213,7 @@ func TestWebReadReplyUnparseable(t *testing.T) {
 
 func TestWebAnswersPingWithoutHandling(t *testing.T) {
 	rig := newWebRig(t)
-	if _, err := rig.agent.Relay.Agents(t.Context()); err != nil {
+	if _, err := rig.agent.Relay.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
 	sender := rig.mesh.Client(t, "grokbot")

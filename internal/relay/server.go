@@ -115,8 +115,8 @@ type Server struct {
 	// versions is the tincan build each agent last called with, from the
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
-	versions map[string]string
-	features map[string]string
+	versions     map[string]string
+	pollFeatures map[string]pollFeatures
 	// storedVersion is the build last written to the store for each agent,
 	// and versionWritten when. The write is throttled like last-seen, so two
 	// builds running under one name (an old listen or MCP process next to an
@@ -128,6 +128,20 @@ type Server struct {
 // persistEvery bounds how often an agent's activity is written to the store.
 const persistEvery = time.Minute
 
+// legacyPollWindow keeps mixed-version receivers from accepting unanswerable pings.
+const legacyPollWindow = 24 * time.Hour
+
+// pollFeaturesPersistEvery bounds how often a legacy poller's last-seen time
+// is written; the in-memory value is always current.
+const pollFeaturesPersistEvery = time.Hour
+
+// pollFeatures intentionally excludes advertisements from non-poll calls.
+// The legacy features column cannot establish whether a receiver supports ping.
+type pollFeatures struct {
+	Ping            bool
+	LastUnsupported time.Time
+}
+
 // New builds a relay server.
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
@@ -135,13 +149,16 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}}
 	s.storedVersion = maps.Clone(s.versions)
-	var err error
-	s.features, err = st.AgentFeatures(context.Background())
+	s.pollFeatures = map[string]pollFeatures{}
+	states, err := st.PollFeatures(context.Background())
 	if err != nil {
-		log.Printf("agent features: %v", err)
+		log.Printf("poll features: %v", err)
 	}
-	if s.features == nil {
-		s.features = map[string]string{}
+	for name, state := range states {
+		var f pollFeatures
+		if json.Unmarshal([]byte(state), &f) == nil {
+			s.pollFeatures[name] = f
+		}
 	}
 	return s
 }
@@ -345,21 +362,35 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 		}))
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
-	features := ""
-	for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
-		if strings.TrimSpace(f) == "ping" {
-			features = "ping"
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/poll" {
+		supported := false
+		for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
+			if strings.TrimSpace(f) == "ping" {
+				supported = true
+			}
 		}
-	}
-	s.mu.Lock()
-	if s.features[res.Name] != features {
-		if err := s.store.SetAgentFeatures(r.Context(), res.Name, features); err == nil {
-			s.features[res.Name] = features
+		now := s.cfg.Now()
+		s.mu.Lock()
+		old := s.pollFeatures[res.Name]
+		state := old
+		if supported {
+			state.Ping = true
 		} else {
-			log.Printf("agent features: %v", err)
+			state.LastUnsupported = now
+		}
+		s.pollFeatures[res.Name] = state
+		// Persist only what changes the gate: support appearing, or a legacy
+		// poll after a quiet spell. Every poll hitting the database would put
+		// a write on the hot path.
+		persist := state.Ping != old.Ping || (!supported && (old.LastUnsupported.IsZero() || now.Sub(old.LastUnsupported) > pollFeaturesPersistEvery))
+		s.mu.Unlock()
+		if persist {
+			encoded, _ := json.Marshal(state)
+			if err := s.store.SetPollFeatures(r.Context(), res.Name, string(encoded)); err != nil {
+				log.Printf("poll features: %v", err)
+			}
 		}
 	}
-	s.mu.Unlock()
 	return res.Name
 }
 
@@ -453,7 +484,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Kind == envelope.KindPing {
 		s.mu.Lock()
-		capable, version := s.features[req.To] == "ping", s.versions[req.To]
+		state := s.pollFeatures[req.To]
+		capable, version := state.Ping && (state.LastUnsupported.IsZero() || s.cfg.Now().Sub(state.LastUnsupported) > legacyPollWindow), s.versions[req.To]
 		s.mu.Unlock()
 		if !capable {
 			if version == "" {
@@ -533,13 +565,16 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			// Report what is waiting without delivering it, so a listener
 			// can nudge the agent and the agent's own check_inbox still
 			// receives it. waiting counts the replies it was asked for.
-			n, err := s.store.CountQueued(r.Context(), name)
+			n, pings, err := s.store.CountQueuedWithPings(r.Context(), name)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, err)
 				return
 			}
 			if n > 0 || len(reps) > 0 {
 				out := map[string]any{"waiting": n + len(reps) + more, "queued": n}
+				if pings > 0 {
+					out["pings"] = pings
+				}
 				if n > 0 {
 					pending, err := s.store.PendingRequests(r.Context(), name, MaxPeekPending)
 					if err != nil {
@@ -945,7 +980,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
 	delete(s.versions, in.Name)
-	delete(s.features, in.Name)
+	delete(s.pollFeatures, in.Name)
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()

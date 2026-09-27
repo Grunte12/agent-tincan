@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 )
@@ -109,5 +110,38 @@ func TestAgentFeaturesMigratesAndSurvivesRejoin(t *testing.T) {
 	}
 	if vs, _ := s2.AgentFeatures(ctx); len(vs) != 0 {
 		t.Fatalf("versions after clearing = %v", vs)
+	}
+}
+
+func TestPollFeaturesSurvivesReopenAndRejoin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	agent := identity.Agent{Name: "muse", NodeID: "node", NodeName: "muse", JoinedAt: time.Now()}
+	if err := s.PutAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	const state = `{"Ping":true,"LastUnsupported":"2026-09-27T00:00:00Z"}`
+	if err := s.SetPollFeatures(ctx, agent.Name, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.PollFeatures(ctx)
+	if err != nil || got[agent.Name] != state {
+		t.Fatalf("poll features: %v, %v", got, err)
 	}
 }

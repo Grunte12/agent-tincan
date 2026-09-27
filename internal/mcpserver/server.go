@@ -233,7 +233,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return fail(err)
 			}
 			allReplyIDs := inbox.ReplyIDs()
-			inbox, _ = client.AnswerPings(ctx, b, inbox, "check_inbox")
+			inbox, retry, _ := client.AnswerPings(ctx, b, inbox, "check_inbox")
 			out := client.FormatInbox(ctx, b, inbox)
 			var atts []envelope.Attachment
 			for _, r := range inbox.Replies {
@@ -248,6 +248,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			if err := b.AckReplies(ctx, allReplyIDs); err != nil {
 				res.Content = append(res.Content, &mcp.TextContent{Text: fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)})
 			}
+			go client.RetryPongs(ctx, retry)
 			return res, nil, nil
 		})
 

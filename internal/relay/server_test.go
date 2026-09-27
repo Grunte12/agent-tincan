@@ -640,3 +640,69 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
 	}
 }
+
+func TestPingGateTracksReceivingPollers(t *testing.T) {
+	for _, pollPath := range []string{"/v1/poll?hold=0", "/v1/poll?peek=1&hold=0"} {
+		t.Run(pollPath, func(t *testing.T) {
+			h := newHarness(t, Config{})
+			advertise := func(path, features string) {
+				req := httptest.NewRequest("GET", path, nil)
+				req.RemoteAddr = museAddr
+				req.Header.Set(client.FeaturesHeader, features)
+				rec := httptest.NewRecorder()
+				h.h.ServeHTTP(rec, req)
+				if rec.Code != 200 && rec.Code != 204 {
+					t.Fatalf("advertise: %d %s", rec.Code, rec.Body)
+				}
+			}
+			ping := func(status int) {
+				rec := h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","kind":"ping"}`, status, nil)
+				if status == 409 && !strings.Contains(rec.Body.String(), "has not advertised ping support; use ask") {
+					t.Fatal(rec.Body.String())
+				}
+			}
+			advertise("/v1/agents", "ping")
+			ping(409)
+			advertise(pollPath, "")
+			advertise("/v1/agents", "ping")
+			ping(409)
+			advertise(pollPath, "ping")
+			ping(409)
+			// Reconstruct from the store as on relay restart.
+			h.srv = New(h.srv.dir, h.st, Config{})
+			h.h = h.srv.Handler()
+			ping(409)
+			h.srv.mu.Lock()
+			state := h.srv.pollFeatures["muse"]
+			state.LastUnsupported = time.Now().Add(-legacyPollWindow - time.Second)
+			h.srv.pollFeatures["muse"] = state
+			h.srv.mu.Unlock()
+			ping(201)
+		})
+	}
+}
+
+func TestPingCapablePollAndExactPeekCount(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := httptest.NewRequest("GET", "/v1/poll?peek=1&hold=0", nil)
+	req.RemoteAddr = museAddr
+	req.Header.Set(client.FeaturesHeader, "ping")
+	h.h.ServeHTTP(httptest.NewRecorder(), req)
+	// A CLI without the header must not remove poller support.
+	h.do(museAddr, "GET", "/v1/agents", "", 200, nil)
+	h.srv = New(h.srv.dir, h.st, Config{})
+	h.h = h.srv.Handler()
+	for range MaxPeekPending + 1 {
+		h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","kind":"ping"}`, 201, nil)
+	}
+	h.send(grokAddr, "muse", "work behind pings")
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	var waiting client.Waiting
+	if err := json.Unmarshal(rec.Body.Bytes(), &waiting); err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Total != MaxPeekPending+2 || waiting.Pings != MaxPeekPending+1 || len(waiting.Pending) != MaxPeekPending {
+		t.Fatalf("peek: %+v", waiting)
+	}
+}

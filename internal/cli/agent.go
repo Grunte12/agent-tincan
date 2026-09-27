@@ -461,7 +461,8 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 	if err != nil {
 		return err
 	}
-	in, _ = client.AnswerPings(ctx, r, in, "inbox")
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	return printInboxJSON(ctx, r, in, out, errOut)
 }
 
@@ -501,7 +502,8 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	if err != nil {
 		return err
 	}
-	in, _ = client.AnswerPings(ctx, r, in, "inbox")
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
 		return err
 	}
@@ -596,11 +598,12 @@ flaky tailnet path does not end the wait.`,
 				ctx, cancel = context.WithTimeout(ctx, limit)
 				defer cancel()
 			}
-			in, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			in, retry, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
 			if err != nil {
 				return err
 			}
 			cmd.Print(formatWait(cmd.Context(), r, in))
+			retry(cmd.Context())
 			return nil
 		},
 	}
@@ -612,29 +615,34 @@ flaky tailnet path does not end the wait.`,
 // says what the poll does with replies), retrying transient errors with
 // jittered backoff. It gives up only on ctx or a hard refusal
 // (for example, this machine is not a joined agent).
-func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, error) {
+func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, func(context.Context), error) {
 	backoff := time.Second
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
 		pingFailed := false
+		var retry func(context.Context)
 		if err == nil {
-			in, err = client.AnswerPings(ctx, r, in, "wait")
+			in, retry, err = client.AnswerPings(ctx, r, in, "wait")
 			pingFailed = err != nil
 		}
 		switch {
 		case (err == nil || pingFailed) && !in.Empty():
-			return in, nil
+			return in, retry, nil
 		case err == nil:
+			retry(ctx)
 			backoff = time.Second
 			continue
 		case ctx.Err() != nil:
-			return client.Inbox{}, ctx.Err()
+			return client.Inbox{}, nil, ctx.Err()
 		case client.IsStatus(err, 403) && !pingFailed:
-			return client.Inbox{}, err
+			return client.Inbox{}, nil, err
+		}
+		if retry != nil {
+			retry(ctx)
 		}
 		select {
 		case <-ctx.Done():
-			return client.Inbox{}, ctx.Err()
+			return client.Inbox{}, nil, ctx.Err()
 		case <-time.After(jitter(backoff)):
 		}
 		backoff = min(backoff*2, 30*time.Second)

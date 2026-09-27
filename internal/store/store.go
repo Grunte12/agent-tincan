@@ -253,6 +253,16 @@ func (s *Store) migrateAgentVersion() error {
 }
 
 func (s *Store) migrateAgentFeatures() error {
+	var pollColumn bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'poll_features')`).Scan(&pollColumn); err != nil {
+		return err
+	}
+	if !pollColumn {
+		if _, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN poll_features TEXT`); err != nil {
+			return err
+		}
+	}
+
 	var has bool
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'features')`).Scan(&has); err != nil {
 		return err
@@ -314,16 +324,16 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// on either machine are untouched: a node may carry several names. The
 	// name's last activity and the build it last reported carry over.
 	var lastSeen sql.NullInt64
-	var version, features sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features)
+	var version, features, pollFeatures sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -872,4 +882,36 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// PollFeatures is poll-only capability state, separate from legacy advertisements.
+func (s *Store) PollFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, poll_features FROM agents WHERE poll_features IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, state string
+		if err := rows.Scan(&name, &state); err != nil {
+			return nil, err
+		}
+		out[name] = state
+	}
+	return out, rows.Err()
+}
+
+// SetPollFeatures persists poll-only capabilities and the last unsupported poll.
+func (s *Store) SetPollFeatures(ctx context.Context, name, state string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET poll_features = ? WHERE name = ?`, state, name)
+	return err
+}
+
+// CountQueuedWithPings counts queued requests and pings from the same snapshot.
+func (s *Store) CountQueuedWithPings(ctx context.Context, agent string) (int, int, error) {
+	var queued, pings int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN kind = ? THEN 1 END) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
+		string(envelope.KindPing), agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&queued, &pings)
+	return queued, pings, err
 }

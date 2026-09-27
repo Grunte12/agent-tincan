@@ -21,10 +21,12 @@ var PongRetry = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Se
 // AnswerPings removes pings from the inbox and answers them without model work.
 // The non-ping inbox is always returned. Claim races are benign; other failures
 // are logged and returned separately for callers that need retry backoff.
-func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string) (Inbox, error) {
+// Run the returned retry function only after handing off ordinary work.
+func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string) (Inbox, func(context.Context), error) {
 	rest := in
 	rest.Requests = nil
 	var first error
+	var retries []func(context.Context)
 	for _, req := range in.Requests {
 		if req.Kind != envelope.KindPing {
 			rest.Requests = append(rest.Requests, req)
@@ -45,20 +47,24 @@ func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string)
 			version = "dev"
 		}
 		// The ping is claimed now, so polling will not see it again until the
-		// lease runs out; retry a failed pong here instead.
+		// lease runs out; retain failed pongs for retries after ordinary work.
 		body := fmt.Sprintf("pong (answered by %s, tincan %s)", surface, version)
-		var err error
-		for attempt := 0; ; attempt++ {
-			if _, err = r.Reply(ctx, req.ID, body, envelope.StatusAnswered); err == nil || IsStatus(err, 409) || attempt >= len(PongRetry) {
-				break
-			}
-			select {
-			case <-ctx.Done():
-			case <-time.After(PongRetry[attempt]):
-				continue
-			}
-			break
+		_, err := r.Reply(ctx, req.ID, body, envelope.StatusAnswered)
+		if err != nil && !IsStatus(err, 409) {
+			retries = append(retries, func(ctx context.Context) {
+				for _, delay := range PongRetry {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(delay):
+					}
+					if _, err := r.Reply(ctx, req.ID, body, envelope.StatusAnswered); err == nil || IsStatus(err, 409) {
+						return
+					}
+				}
+			})
 		}
+
 		if err != nil && !IsStatus(err, 409) {
 			log.Printf("tincan %s: ping %s reply failed: %v", surface, req.ID, err)
 			if first == nil {
@@ -73,5 +79,16 @@ func AnswerPings(ctx context.Context, r PingResponder, in Inbox, surface string)
 			rest.Replies = append(rest.Replies, reply)
 		}
 	}
-	return rest, first
+	return rest, func(ctx context.Context) {
+		for _, retry := range retries {
+			retry(ctx)
+		}
+	}, first
+}
+
+// RetryPongs runs deferred pong retries within a bounded background context.
+func RetryPongs(ctx context.Context, retry func(context.Context)) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	retry(ctx)
 }

@@ -283,7 +283,7 @@ func TestListenContinuesAfterPingFailure(t *testing.T) {
 							return
 						}
 						if peeks.Add(1) == 1 {
-							fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"ping","kind":"ping"}]}`)
+							fmt.Fprint(w, `{"waiting":1,"pings":1,"pending":[{"id":"ping","kind":"ping"}]}`)
 						} else {
 							fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"work","kind":"ask"}]}`)
 						}
@@ -347,7 +347,7 @@ func TestInboxPingFailurePreservesWork(t *testing.T) {
 			t.Fatalf("output: %s", &out)
 		}
 	}
-	in, err := waitForInbox(t.Context(), relay, time.Second, client.RepliesNone)
+	in, _, err := waitForInbox(t.Context(), relay, time.Second, client.RepliesNone)
 	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "work" {
 		t.Fatalf("wait: %+v, %v", in, err)
 	}
@@ -366,7 +366,7 @@ func TestListenDrainsTruncatedPingBatchWithoutNudging(t *testing.T) {
 			}
 			peeks.Add(1)
 			done := int(answered.Load())
-			waiting := client.Waiting{Total: 60 - done, Queued: 60 - done}
+			waiting := client.Waiting{Total: 60 - done, Queued: 60 - done, Pings: 60 - done}
 			for i := done; i < min(done+relay.MaxPeekPending, 60); i++ {
 				waiting.Pending = append(waiting.Pending, envelope.Pending{ID: fmt.Sprintf("ping-%d", i), Kind: envelope.KindPing})
 			}
@@ -408,7 +408,13 @@ func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
 	fastListen(t, time.Second, time.Minute, time.Second)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/poll" {
-			fmt.Fprint(w, `{"waiting":2,"pending":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask"}]}`)
+			waiting := client.Waiting{Total: 51, Queued: 51, Pings: 50}
+			for i := range 50 {
+				waiting.Pending = append(waiting.Pending, envelope.Pending{ID: fmt.Sprintf("ping-%d", i), Kind: envelope.KindPing})
+			}
+			if err := json.NewEncoder(w).Encode(waiting); err != nil {
+				t.Error(err)
+			}
 			return
 		}
 		http.Error(w, `{"error":"ping failed"}`, http.StatusServiceUnavailable)
