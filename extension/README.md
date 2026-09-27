@@ -1,22 +1,24 @@
 # Agent Tincan History extension
 
-Manifest V3 extension that lets the `history` agent read ChatGPT and claude.ai
-conversations, and the `chatgpt-web` and `claude-web` agents send to them,
-through the user's own logged-in Chrome. Its service worker runs a fixed set of
+Manifest V3 extension that lets the `history` agent read ChatGPT, claude.ai
+and Gemini conversations, and the `chatgpt-web`, `claude-web` and
+`gemini-web` agents send to them, through the user's own logged-in Chrome. Its service worker runs a fixed set of
 operations (`ops.js`) for the native host `com.agenttincan.history`
 (`tincan history native-host`) and returns JSON, with images as base64 in
 chunks of at most 384 KiB. It accepts nothing else and never runs code from a
 message or a page. The ChatGPT access token is read from `/api/auth/session`
 inside the worker and never leaves it.
 
-The send operations (`chatgpt.send`, `claudeai.send`, in `send.js`) open a
+The send operations (`chatgpt.send`, `claudeai.send`, `gemini.send`, in `send.js`) open a
 background tab of their own, fill the message box through fixed page functions
 injected with `chrome.scripting` (message as an argument, isolated world),
 click send, and return once the conversation id is in the tab's address. They
 never watch the page for the answer: the Go side reads the conversation until
-the answer is finished, then calls `chatgpt.close` or `claudeai.close`, which
+the answer is finished, then calls `chatgpt.close`, `claudeai.close` or `gemini.close`, which
 close only the tab a send left open for that conversation (any such tab is
-closed after 10 minutes regardless).
+closed after 10 minutes regardless). A send tab the site moves to another
+host is never typed into: Google's `/sorry/` page is `blocked`, any other host
+(a sign-in page) `not_logged_in`.
 All page selectors are in the `SELECTORS` table in `send.js`; see
 docs/adapters/web-agents.md.
 
@@ -34,8 +36,8 @@ regardless, so a grant revoked while a reply is read still lets the tab close.
 ChatGPT and claude.ai are required `host_permissions`, as before, so an
 upgrade asks for nothing new; the owner can still withhold them in Chrome's
 site access settings. Sites added later go under `optional_host_permissions`
-(none yet, so the manifest has no such key) and are granted from the options
-page: `options.html` and `options.js`, opened from `chrome://extensions` >
+(Gemini: `https://gemini.google.com/*` and `https://lh3.googleusercontent.com/*`,
+its image host, granted together) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in
 `SITE_ACCESS`, shows whether all its origins are granted, and its Grant button calls
 `chrome.permissions.request` for all of the site's origins straight from the
@@ -52,6 +54,30 @@ extension is connected and reports its site ungranted, it logs that once
 (naming the options page) and waits, asking again every minute, until the
 grant appears or the extension goes away; it does not exit, so the service
 manager never restarts it in a loop.
+
+## Gemini
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `gemini.list` | `count` | Reads `MaZiqc` 13 conversations a page, passing each page's token, until it has `count` or the pages end (at most 10 pages). Returns `{pages: [<inner payload>, ...]}`. |
+| `gemini.detail` | `id` | Reads `hNvQHb` for `c_<id>` (latest 10 turns) and returns the inner payload. No payload is `not_found`. |
+| `gemini.file` | `file_id` (`<response id>-<n>`), `conversation_id` | Reads the conversation again, takes image `n` of that response (only `https://lh3.googleusercontent.com/` URLs, found the way `geminiImageURLs` walks a response), then asks the sender to fetch it inside the tab the send left open (`pageFetchImage`, isolated world, the page's cookies) and falls back to a worker fetch with the image host's grant. Never draws an `<img>` onto a canvas. |
+| `gemini.send` | `message`, `conversation_id?`, `new_chat?` | Fetches the app page fresh (logged out or `/sorry/` opens no tab), then types into the Quill composer (`div.ql-editor`) of `https://gemini.google.com/app` or `/app/<id>` in a background tab. Returns the hex id from the tab's address. |
+| `gemini.close` | `conversation_id` | Closes the tab a Gemini send left open. |
+
+Reads have no Gemini JSON API: the worker fetches `https://gemini.google.com/app`
+for `SNlM0e` (the `at` token), `cfb2h` (`bl`) and `FdrFJe` (`f.sid`), keeps
+them in memory for 10 minutes (never returned; a send or a 400/401 fetches
+them again), and POSTs `f.req` and `at` to
+`/_/BardChatUi/data/batchexecute?rpcids=<rpcid>&source-path=/app&bl=...&rt=c`.
+`parseBatchexecute` takes the `wrb.fr` entry for the rpcid out of the
+length-prefixed answer and decodes its inner JSON; anything else is
+`endpoint_changed`. Payload positions are read in Go
+(`internal/history/gemini.go`). Conversation ids cross the socket as the
+URL's hex (`/app/<id>`); the `c_` prefix is added only here. If a live check
+shows the worker's requests are refused, the fetch can move into an
+extension-opened tab's isolated world: `geminiRPC` is the one place it
+happens.
 
 ## Failure codes
 

@@ -1,7 +1,7 @@
 package history
 
-// The live sites: everything that differs between chatgpt.com and
-// claude.ai, in one table. Adding a site is one entry here plus its
+// The live sites: everything that differs between chatgpt.com, claude.ai
+// and gemini.google.com, in one table. Adding a site is one entry here plus its
 // reader file; nothing else branches on which site it is.
 
 import (
@@ -42,6 +42,27 @@ type webSite struct {
 	// convPath matches a conversation URL's path on host; its first
 	// group is the conversation id.
 	convPath *regexp.Regexp
+	// canonID, when set, turns a conversation id in any of the site's
+	// forms into the one form every store (per-asker state, used list,
+	// journal, reply footer) holds; ok is false for an id that is not
+	// the site's. Without it ids are used as given.
+	canonID func(id string) (string, bool)
+	// noteLostImages: a reply image that could not be fetched is noted
+	// in the reply, since the site's images are captured from the page
+	// and may fail where an API download would not.
+	noteLostImages bool
+	// blockedCooldown, when set, holds every request to the site back
+	// this long after it showed an anti-bot check, so the agent does not
+	// keep tripping it on the owner's account.
+	blockedCooldown time.Duration
+}
+
+// canonical returns id in the site's canonical form.
+func (s *webSite) canonical(id string) (string, bool) {
+	if s.canonID == nil {
+		return id, validNativeID(id)
+	}
+	return s.canonID(id)
 }
 
 // stableRule: the same reply text on polls consecutive reads spanning at
@@ -91,6 +112,25 @@ var webSites = []*webSite{
 		nodes:    claudeNodes,
 		stable:   &stableRule{polls: DefaultClaudeStablePolls, span: DefaultClaudeStableFor},
 		convPath: convURLPattern,
+	},
+	{
+		source:                SourceGemini,
+		label:                 "Gemini",
+		host:                  "gemini.google.com",
+		agent:                 "gemini-web",
+		opPrefix:              "gemini",
+		fileTakesConversation: true,
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewGemini(c)
+			r.Now = now
+			return r
+		},
+		nodes:           geminiNodes,
+		stable:          &stableRule{polls: DefaultGeminiStablePolls, span: DefaultGeminiStableFor},
+		convPath:        geminiURLPattern,
+		canonID:         geminiCanonicalID,
+		noteLostImages:  true,
+		blockedCooldown: DefaultBlockedCooldown,
 	},
 }
 
@@ -150,7 +190,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 }
 
 // WebSiteNames lists the --site values, for help and errors
-// ("chatgpt or claude-ai").
+// ("chatgpt, claude-ai or gemini").
 func WebSiteNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -160,7 +200,7 @@ func WebSiteNames() string {
 }
 
 // SourceNames lists every history source, for errors ("chatgpt,
-// claude-ai, codex or claude-code").
+// claude-ai, gemini, codex or claude-code").
 func SourceNames() string {
 	names := make([]string, len(Sources))
 	for i, s := range Sources {
@@ -169,8 +209,8 @@ func SourceNames() string {
 	return joinList(names, "or")
 }
 
-// WebAgentNames lists the sites' default web agent names ("chatgpt-web or
-// claude-web").
+// WebAgentNames lists the sites' default web agent names ("chatgpt-web,
+// claude-web or gemini-web").
 func WebAgentNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -179,8 +219,8 @@ func WebAgentNames() string {
 	return joinList(names, "or")
 }
 
-// LiveSourcesLabel names the live sources in prose ("ChatGPT and
-// claude.ai").
+// LiveSourcesLabel names the live sources in prose ("ChatGPT, claude.ai
+// and Gemini").
 func LiveSourcesLabel() string {
 	labels := make([]string, len(webSites))
 	for i, s := range webSites {

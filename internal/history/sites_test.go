@@ -18,6 +18,8 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpChatGPTSend: SourceChatGPT, OpChatGPTClose: SourceChatGPT,
 		OpClaudeAIList: SourceClaudeAI, OpClaudeAIDetail: SourceClaudeAI, OpClaudeAIFile: SourceClaudeAI,
 		OpClaudeAISend: SourceClaudeAI, OpClaudeAIClose: SourceClaudeAI,
+		OpGeminiList: SourceGemini, OpGeminiDetail: SourceGemini, OpGeminiFile: SourceGemini,
+		OpGeminiSend: SourceGemini, OpGeminiClose: SourceGemini,
 	}
 	for op, want := range cases {
 		if got := op.source(); got != want {
@@ -77,7 +79,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("grok")
-	if err == nil || err.Error() != `unknown site "grok" (want chatgpt or claude-ai)` {
+	if err == nil || err.Error() != `unknown site "grok" (want chatgpt, claude-ai or gemini)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -136,15 +138,16 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt or claude-ai" || WebAgentNames() != "chatgpt-web or claude-web" || LiveSourcesLabel() != "ChatGPT and claude.ai" {
+	if WebSiteNames() != "chatgpt, claude-ai or gemini" || WebAgentNames() != "chatgpt-web, claude-web or gemini-web" || LiveSourcesLabel() != "ChatGPT, claude.ai and Gemini" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, codex or claude-code" {
+	if SourceNames() != "chatgpt, claude-ai, gemini, codex or claude-code" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
 		SourceChatGPT:  {"chatgpt-web", "ChatGPT", "chatgpt.com"},
 		SourceClaudeAI: {"claude-web", "claude.ai", "claude.ai"},
+		SourceGemini:   {"gemini-web", "Gemini", "gemini.google.com"},
 	}
 	for src, w := range want {
 		if got := [3]string{WebAgentName(src), siteLabel(src), siteOf(src)}; got != w {

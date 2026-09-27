@@ -20,8 +20,8 @@ import (
 func webCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
-		Short: "Run ChatGPT or Claude as a teammate through your logged-in browser",
-		Long: "A web agent makes chatgpt.com or claude.ai a teammate: a request's text is typed into your logged-in\n" +
+		Short: "Run ChatGPT, Claude or Gemini as a teammate through your logged-in browser",
+		Long: "A web agent makes chatgpt.com, claude.ai or gemini.google.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
 			"with generated images attached. It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",
@@ -54,7 +54,7 @@ func webServeCmd() *cobra.Command {
 	var site, configPath, allowPath, statePath, name string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a web agent: answer teammates by asking ChatGPT or Claude in your browser",
+		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude or Gemini in your browser",
 		Long: "Long-polls the relay as the web agent and handles one request at a time:\n" +
 			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
 			"     with no file (or a * entry) any joined agent may ask;\n" +

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { SELECTORS, createSender, pageFill, pageProbe, pageSubmit } from '../send.js';
+import { SELECTORS, SITES, createSender, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
 import { createRunner, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
 // ---- A fake DOM, just enough for the page functions.
@@ -65,6 +65,9 @@ class El {
 
 let convSeq = 0;
 
+// CONV_PATH matches a conversation page's address on any of the sites.
+const CONV_PATH = /\/(?:c|chat|app)\/([A-Za-z0-9_-]+)/;
+
 // FakeSite simulates one chatgpt.com or claude.ai page. opts.match picks
 // which selector in the table the page answers to for each role, so tests
 // can exercise the fallbacks.
@@ -77,7 +80,7 @@ class FakeSite {
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
     this.messages = [];
-    const m = /\/(?:c|chat)\/([A-Za-z0-9_-]+)/.exec(this.href);
+    const m = CONV_PATH.exec(this.href);
     if (m) this.messages.push({ role: 'user', text: 'earlier question' }, { role: 'assistant', text: 'old answer' });
     // answering: the page is still writing an answer when it loads.
     this.generating = Boolean(this.opts.answering);
@@ -172,10 +175,10 @@ class FakeSite {
     if (this.opts.moveTo && this.ticks === this.opts.moveAtTick) this.href = this.opts.moveTo;
     if (!this.generating) return;
     this.ticksSinceSubmit = (this.ticksSinceSubmit || 0) + 1;
-    if (!/\/(?:c|chat)\//.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
-      const id = `new-conv-${++convSeq}`;
+    if (!CONV_PATH.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
+      const id = this.site === 'gemini' ? (++convSeq).toString(16).padStart(16, '0') : `new-conv-${++convSeq}`;
       this.newID = id;
-      this.href = this.site === 'chatgpt' ? `https://chatgpt.com/c/${id}` : `https://claude.ai/chat/${id}`;
+      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, gemini: `https://gemini.google.com/app/${id}` }[this.site];
     }
     const last = this.messages.at(-1);
     if (last.role !== 'assistant') this.messages.push({ role: 'assistant', text: 'Part' });
@@ -674,4 +677,85 @@ test('helloMessage reports the version, unpacked, and the sha256 of each file', 
   const store = await helloMessage({ manifest: { ...manifest, update_url: 'https://clients2.google.com/service/update2/crx' }, getURL: (f) => f, fetch: async () => { throw new Error('x'); } });
   assert.equal(store.hello.unpacked, false);
   assert.equal(store.hello.files['ops.js'], '');
+});
+
+// ---- Gemini.
+
+test('gemini new chat: opens /app in a background tab, types into the Quill composer, returns the URL hex id', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('gemini', { message: 'Draw a fox logo', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://gemini.google.com/app');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['Draw a fox logo']);
+  assert.match(r.conversation_id, /^[0-9a-f]{16}$/);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://gemini.google.com/app/${r.conversation_id}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.deepEqual(await s.close('gemini', r.conversation_id), { closed: 1 });
+});
+
+test('gemini continues /app/<id>; the id is read from /u/<n>/ and /gem/ addresses too', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { neverFinish: true })));
+  const r = await sender(fc).send('gemini', { message: 'and in French', conversation_id: '00000000000000d2' });
+  assert.equal(fc.log.created[0].url, 'https://gemini.google.com/app/00000000000000d2');
+  assert.equal(r.conversation_id, '00000000000000d2');
+  assert.deepEqual(page.submitted, ['and in French']);
+  const re = SITES.gemini.idFrom;
+  assert.equal(re.exec('https://gemini.google.com/u/1/app/00000000000000d2?hl=en')[1], '00000000000000d2');
+  assert.equal(re.exec('https://gemini.google.com/gem/coding-partner/00000000000000d2')[1], '00000000000000d2');
+  assert.equal(re.exec('https://gemini.google.com/app'), null);
+  assert.equal(re.exec('https://gemini.google.com.evil.example/app/00000000000000d2'), null);
+});
+
+test('a send tab sent to a sign-in host is not_logged_in, to /sorry/ is blocked; nothing is typed and the tab closes', async () => {
+  for (const [to, code] of [['https://accounts.google.com/v3/signin/identifier?continue=x', 'not_logged_in'], ['https://www.google.com/sorry/index?continue=x', 'blocked']]) {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: to })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, to);
+    assert.deepEqual(page.submitted, []);
+    assert.equal(fc.log.scripts.length, 0, 'no script in a page on another host');
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+});
+
+test('capture fetches a Gemini image inside the tab the send left open, and only there', async () => {
+  const fc = fakeChrome((url) => new FakeSite('gemini', url, { neverFinish: true }));
+  const s = sender(fc);
+  const r = await s.send('gemini', { message: 'Draw a fox logo', new_chat: true });
+  const IMG = 'https://lh3.googleusercontent.com/gg/dummy-fox-1';
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 9]);
+  const saved = globalThis.fetch;
+  const fetched = [];
+  globalThis.fetch = async (url, init) => {
+    fetched.push([url, init.credentials]);
+    return url === IMG ? new Response(png, { status: 200, headers: { 'content-type': 'image/png' } }) : new Response('', { status: 403 });
+  };
+  try {
+    const before = fc.log.scripts.length;
+    const got = await s.capture('gemini', r.conversation_id, IMG, 1024);
+    assert.deepEqual(got, { ok: true, mime: 'image/png', data: Buffer.from(png).toString('base64') });
+    const inj = fc.log.scripts.slice(before);
+    assert.equal(inj.length, 1);
+    assert.equal(inj[0].func, pageFetchImage);
+    assert.equal(inj[0].world, 'ISOLATED');
+    assert.equal(inj[0].target.tabId, 100);
+    assert.deepEqual(inj[0].args, [IMG, 1024]);
+    assert.deepEqual(fetched, [[IMG, 'include']]);
+    // The page's fetch failing, too large, another conversation, another
+    // host, or after the close: null, and never a throw.
+    assert.equal(await s.capture('gemini', r.conversation_id, 'https://lh3.googleusercontent.com/gg/missing', 1024), null);
+    assert.equal(await s.capture('gemini', r.conversation_id, IMG, 3), null);
+    assert.equal(await s.capture('gemini', '00000000000000ff', IMG), null);
+    const n = fc.log.scripts.length;
+    assert.equal(await s.capture('gemini', r.conversation_id, 'https://evil.example/x.png'), null);
+    assert.equal(fc.log.scripts.length, n, 'no injection for a URL off the image host');
+    await s.close('gemini', r.conversation_id);
+    assert.equal(await s.capture('gemini', r.conversation_id, IMG), null);
+    assert.equal(fc.log.scripts.length, n);
+  } finally {
+    globalThis.fetch = saved;
+  }
 });

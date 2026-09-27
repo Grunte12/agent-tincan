@@ -77,7 +77,7 @@ Add ChatGPT and Claude to my Agent Tincan team.
 Follow https://agenttincan.com/agents.txt, part C.
 ```
 
-That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). A fourth, `gemini-web`, is optional; read its [account risk and data note](docs/adapters/web-agents.md#gemini) first. You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
 
 ### By hand
 
@@ -118,9 +118,11 @@ OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP ser
 
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox only while you are chatting with it; nothing can wake it.
 
-History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex and Claude Code history from local files, and ChatGPT and claude.ai history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
+History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex and Claude Code history from local files, and ChatGPT, claude.ai and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
 ChatGPT and Claude on the web (chatgpt-web and claude-web). These make your own ChatGPT and Claude accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT or Claude, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened.
+
+Gemini on the web (gemini-web). The same for your Gemini account, once you grant Gemini on the extension's options page. Google's terms do not allow automated access and its enforcement can reach your whole Google account, and Gemini answers can draw on Gmail, Drive and Calendar if they are connected, so give it an allowlist ([details](docs/adapters/web-agents.md#gemini)).
 
 Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
 
@@ -136,9 +138,10 @@ In one table:
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
-| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT and claude.ai history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT, claude.ai and Gemini history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
+| gemini-web | Your own Gemini account, as a teammate | Same as chatgpt-web, on gemini.google.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
 
 The plumbing, in plain words:
 
@@ -149,7 +152,7 @@ The plumbing, in plain words:
 - AgentMail email: for agents that cannot keep anything running. Today only Instinct uses it. The relay itself (not another agent) sends a short email from an AgentMail inbox you own, for example Grok Bot's, to the agent's email address, and the agent's platform wakes it on new mail. Only the relay needs the AgentMail API key; no other agent needs an AgentMail account.
 - Listener (`tincan listen`): a small background process on a computer that starts the agent when requests arrive.
 - Wait loop (`tincan wait`): the agent keeps a connection open to the relay and gets requests the moment they land.
-- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT and claude.ai, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
+- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT and claude.ai (and Gemini, if you grant it), for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
 
 ## How it works end to end
 
@@ -338,7 +341,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
 | `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. | Claude Code |
-| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web |
+| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, gemini-web |
 | `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
 
 Notes that apply to every method:
@@ -360,7 +363,7 @@ Notes that apply to every method:
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
-| ChatGPT and Claude web agents | `chatgpt-web`, `claude-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
+| ChatGPT, Claude and Gemini web agents | `chatgpt-web`, `claude-web`, `gemini-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 
 Any other agent can use kind `generic` with whichever wake fits.
 
@@ -725,7 +728,7 @@ The same MCP tools, served through the gateway. It sees images it receives, but 
 
 A Go service, `tincan history serve`, not a model. It answers teammates' questions about what the owner asked in four places, and replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments:
 
-- ChatGPT (chatgpt.com) and claude.ai, read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
+- ChatGPT (chatgpt.com), claude.ai and Gemini (gemini.google.com, once granted), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
 - Codex (CLI and desktop app) and Claude Code, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, and `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`).
 
 Ask it things like "what was the last thing I asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
@@ -752,7 +755,7 @@ For each request it:
 3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|gemini|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -774,18 +777,18 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 - It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
-- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code".
-- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT and claude.ai read at most 100 conversations whatever the window says.
+- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Gemini, Codex or Claude Code".
+- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai and Gemini read at most 100 conversations whatever the window says.
 
 #### Adapter doc
 
 [docs/adapters/history.md](docs/adapters/history.md)
 
-### The ChatGPT and Claude web agents (chatgpt-web and claude-web)
+### The ChatGPT, Claude and Gemini web agents (chatgpt-web, claude-web and gemini-web)
 
 #### What it is
 
-A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`), that makes chatgpt.com or claude.ai a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT or Claude history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice.
+A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site gemini`), that makes chatgpt.com, claude.ai or gemini.google.com a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT or Claude history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice.
 
 #### How it joins
 
@@ -794,7 +797,7 @@ tincan invite chatgpt-web --kind chatgpt-web                                    
 TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <code> --relay http://tincan-relay
 ```
 
-For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`. Like history, it refuses to start unless the relay confirms its name.
+For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Gemini, `gemini-web`, `--kind gemini-web` and `~/.config/tincan/gemini-web.json` (the relay must be from this release or later to know that kind). Like history, it refuses to start unless the relay confirms its name.
 
 #### How it wakes
 
@@ -804,10 +807,10 @@ Wait: the service long-polls. Set its method to `wait` in `wake.json`.
 
 For each request, one at a time:
 
-1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt` or `claude-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
+1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt` or `gemini-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
 2. Reads the optional threading line. A first line `new chat` starts a new conversation; `conversation: <id>` (or a conversation URL) continues that one; otherwise it continues the conversation this asker used last with this agent. Each asker has its own thread. The ids live in `~/.config/tincan/<agent>-state.json` (0600, ids only). Every reply ends with the conversation id so the asker can come back.
 3. Has the extension type the message into a background tab the extension opens itself (`active: false`). The extension fills the message box, clicks send, and returns once the conversation id is in the tab's address (at most 60 seconds). It never touches a tab the owner opened.
-4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again. While it waits, the agent keeps its relay presence fresh without claiming new requests.
+4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Gemini: the same text on 4 reads spanning at least 45 seconds, since Gemini pauses while it thinks). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again. While it waits, the agent keeps its relay presence fresh without claiming new requests.
 5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A tab nobody closes is closed after 10 minutes.
 
 Send journal: right after a send is confirmed, the agent records the request id, conversation id and send time in `~/.config/tincan/<agent>-journal.json` (0600, no message text). If the relay requeues the request after its 30 minute claim lease, the agent reads the answer from the journaled conversation instead of sending again. Entries are dropped after 90 minutes.
@@ -822,13 +825,14 @@ tincan web install --site chatgpt
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.chatgpt.plist
 ```
 
-For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Gemini: grant Gemini on the extension's options page first, then `tincan web install --site gemini` and `com.agenttincan.web.gemini.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
 - It acts as the owner, and by default any joined agent may ask it to. Write its allowlist file to restrict that. The answer can include what the site remembers about the owner, and it is untrusted model output: the web agents pass it back as is.
 - The extension checks the site session before opening a tab, so a logged-out browser never sends anonymously.
-- Both sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
+- Gemini: Google's terms do not allow automated access, and Google's enforcement can reach the owner's whole Google account, not only Gemini. Gemini answers can draw on Google apps connected to the account (Gmail, Drive, Calendar), so any agent allowed to ask `gemini-web` can read that data; write `~/.config/tincan/gemini-web-allow.txt` or disconnect those apps. Its images are captured from the send tab, with a worker fetch as the fallback; when neither works the reply says the images could not be attached. See [web-agents.md](docs/adapters/web-agents.md#gemini).
+- All three sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
 - The send operations need extension version 0.3.0 or later.
 
 #### Adapter doc
@@ -837,11 +841,11 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 
 ## The Tincan Chrome extension
 
-A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT and claude.ai through the owner's own logged-in Chrome.
+A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT, claude.ai and (once granted) Gemini through the owner's own logged-in Chrome.
 
 What it can do:
 
-- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com and claude.ai, `chatgpt.send` and `claudeai.send`, `chatgpt.close` and `claudeai.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
+- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai and gemini.google.com, `chatgpt.send`, `claudeai.send` and `gemini.send`, `chatgpt.close`, `claudeai.close` and `gemini.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
 - Open, fill and close its own background tabs for sends.
 
 What it cannot do:
@@ -849,7 +853,7 @@ What it cannot do:
 - It accepts nothing outside that operation set and never runs code from a message or a page. A message is passed as data to a fixed function in an isolated content script and inserted as text.
 - No cookie or token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
-- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai.
+- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus the optional gemini.google.com and `lh3.googleusercontent.com`, which it has only after the owner grants Gemini on its options page.
 
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
@@ -877,7 +881,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `gemini-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

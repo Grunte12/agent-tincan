@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// live is the read flow the ChatGPT and claude.ai readers share: list
+// live is the read flow the live site readers share: list
 // through the extension, open conversations one at a time while pick needs
 // them, then fetch only the images of the turns that were selected.
 type live struct {
@@ -28,6 +28,9 @@ type live struct {
 	parseDetail func(id string, raw json.RawMessage) (thread, error)
 	// fileArgs maps an image pointer to its file operation arguments.
 	fileArgs func(convID, pointer string) (Op, OpArgs, bool)
+	// canonID, when set, turns a conversation id in any of the site's
+	// forms into the canonical one every store holds.
+	canonID func(id string) (string, bool)
 }
 
 // imageRef is a placeholder image: the source's pointer and a display
@@ -146,6 +149,13 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	}
 	w := l.applied(opts)
 	if q.Mode == ModeConversation {
+		if l.canonID != nil {
+			id, ok := l.canonID(q.ConversationID)
+			if !ok {
+				return Page{}, fmt.Errorf("invalid %s conversation id %q", l.source, q.ConversationID)
+			}
+			q.ConversationID = id
+		}
 		if !validNativeID(q.ConversationID) {
 			return Page{}, fmt.Errorf("invalid %s conversation id %q", l.source, q.ConversationID)
 		}

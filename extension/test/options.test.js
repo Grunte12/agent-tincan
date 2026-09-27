@@ -100,7 +100,7 @@ test('the options page lists sites, shows grants, and grants from the click', as
   const page = renderOptions({ document: doc, permissions: perms });
   await page.ready;
   let r = rows(doc);
-  assert.deepEqual(r.map((x) => [x.site, x.text, x.status]), [['chatgpt', 'ChatGPT', 'Not granted'], ['claudeai', 'claude.ai', 'Granted']]);
+  assert.deepEqual(r.map((x) => [x.site, x.text, x.status]), [['chatgpt', 'ChatGPT', 'Not granted'], ['claudeai', 'claude.ai', 'Granted'], ['gemini', 'Gemini', 'Not granted']]);
   assert.equal(r[0].button.hidden, false);
   assert.equal(r[1].button.hidden, true, 'no grant button for a granted site');
 
@@ -130,6 +130,15 @@ test('the options page lists sites, shows grants, and grants from the click', as
   r = rows(doc);
   assert.equal(r[1].status, 'Not granted');
   assert.equal(r[1].button.disabled, false);
+
+  // Gemini's grant covers its image host too, in one request.
+  perms.answer = true;
+  perms.inGesture = true;
+  r[2].button.click();
+  perms.inGesture = false;
+  assert.deepEqual(perms.requests.at(-1), { origins: ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*'], inGesture: true });
+  await settle();
+  assert.equal(rows(doc)[2].status, 'Granted');
 });
 
 test('the options page is CSP-safe: no inline script, no main-world code', () => {

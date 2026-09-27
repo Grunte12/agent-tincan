@@ -14,13 +14,13 @@ agent. claude-code and generic get one line saying when to add the prefix.
 history is a Go service, not a model: it carries TINCAN_CONFIG like the
 fresh-session kinds, but its path is always ~/.config/tincan/history.json (the
 service's default config), and its block has no standing instructions.
-The web agents (chatgpt-web, claude-web) are Go services too: their config
+The web agents (chatgpt-web, claude-web, gemini-web) are Go services too: their config
 path is always ~/.config/tincan/<kind>.json, the one tincan web install's
 service definition sets.
 */ -}}
 
-{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else if or (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
-{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else if or (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "gemini-web")}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
+{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "gemini-web")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
 {{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
 {{- define "setup.cfghint" -}}
 If another agent already runs on this machine, prefix every tincan command (join, mcp, listen, rejoin) with TINCAN_CONFIG={{template "cfgpath" .}}.
@@ -49,7 +49,7 @@ If your Agent Tincan tools are missing or show 0 tools, or tincan cannot reach t
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web")}} --name {{.Name}}{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history") (eq .Kind "chatgpt-web") (eq .Kind "claude-web") (eq .Kind "gemini-web")}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
@@ -102,14 +102,15 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
-{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
-{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else}}chatgpt{{end}}{{end -}}
+{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
+{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "gemini-web"}}gemini{{else}}chatgpt{{end}}{{end -}}
 
 {{- define "instructions.web" -}}
 {{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer and any generated images attached. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 {{- define "instructions.chatgpt-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.claude-web"}}{{template "instructions.web" .}}{{end -}}
+{{- define "instructions.gemini-web"}}{{template "instructions.web" .}}{{end -}}
 
 {{- define "instructions.generic" -}}
 {{- if eq .Wake "webhook" -}}
@@ -216,9 +217,15 @@ Threading: a first line "new chat" starts a new conversation, "conversation: <id
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
 Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
-{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else}}chatgpt.com{{end}}{{end -}}
+{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "gemini-web"}}gemini.google.com{{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.claude-web"}}{{template "setup.web" .}}{{end -}}
+{{- define "setup.gemini-web"}}{{template "setup.web" .}}
+Gemini is an optional site in the extension: grant it once on the extension's options page (chrome://extensions > Agent Tincan History > Details > Extension options > Grant next to Gemini; it also grants lh3.googleusercontent.com, where Gemini's images are served). Until then tincan web serve --site gemini waits while the extension is connected, checking again every minute, and starts serving as soon as the grant appears; requests get a reply naming the options page.
+Account risk: Google's terms do not allow automated access to Gemini. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Google enforcement is not limited to Gemini and can reach the whole Google account. Decide whether that risk is acceptable before starting it.
+Data reach: Gemini answers can draw on the Google apps connected to {{.OwnerPoss}} account (Gmail, Drive and Calendar among them), so any agent allowed to ask {{.Name}} can read that data through it. Create ~/.config/tincan/{{.Kind}}-allow.txt listing only the agents that should, or disconnect those apps in Gemini's settings.
+It uses the first Google account signed in to Chrome (gemini.google.com/app, not /u/1/); conversations of another signed-in account are not found.
+{{- end -}}
 
 {{- define "setup.generic" -}}
 {{template "setup.tools" .}}
@@ -239,4 +246,5 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.history"}}History service for ChatGPT, claude.ai, Codex and Claude Code chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
+{{- define "title.gemini-web"}}Gemini (gemini.google.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}
