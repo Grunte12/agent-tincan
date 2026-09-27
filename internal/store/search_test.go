@@ -101,17 +101,18 @@ func TestSearchBackfillAndReopen(t *testing.T) {
 func TestSearchCandidateCap(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	old := ask(t, s, "visible", "b", "common")
-	// Give the old request the newest timestamp: the candidate cap must precede
-	// both timestamp ordering and visibility filtering.
+	// Give the old request the newest timestamp: the candidate cap precedes
+	// timestamp ordering but counts only matches the caller may see.
 	if _, err := s.db.Exec("UPDATE requests SET created_at = 9999999999999 WHERE id = ?", old.ID); err != nil {
 		t.Fatal(err)
 	}
 	for range searchCandidateLimit {
 		ask(t, s, "other", "b", "common")
 	}
+	// 2000 newer matches in chains "visible" cannot see do not crowd out its own.
 	hits, err := s.Search(t.Context(), "common", "visible", 50)
-	if err != nil || len(hits) != 0 {
-		t.Fatalf("outside cap: %+v, %v", hits, err)
+	if err != nil || len(hits) != 1 || hits[0].RequestID != old.ID {
+		t.Fatalf("visible match lost behind the cap: %+v, %v", hits, err)
 	}
 	hits, err = s.Search(t.Context(), "common", "", 1)
 	if err != nil || len(hits) != 1 || hits[0].RequestID == old.ID {

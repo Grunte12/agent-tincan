@@ -101,12 +101,15 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
  SELECT rowid,
  CASE WHEN highlight(requests_fts, 2, '[', ']') != body THEN snippet(requests_fts, 2, '[', ']', '…', 24) ELSE '' END AS snippet,
  CASE WHEN highlight(requests_fts, 3, '[', ']') != reply_body THEN snippet(requests_fts, 3, '[', ']', '…', 24) ELSE '' END AS reply_snippet
- FROM requests_fts WHERE requests_fts MATCH ? ORDER BY rowid DESC LIMIT ?
+ FROM requests_fts
+ WHERE requests_fts MATCH ? AND (? = '' OR EXISTS (
+   SELECT 1 FROM requests own JOIN requests step ON step.trace_id = own.trace_id
+   WHERE own.rowid = requests_fts.rowid AND (step.from_agent = ? OR step.to_agent = ?)
+ ))
+ ORDER BY rowid DESC LIMIT ?
  ) c JOIN requests r ON r.rowid = c.rowid
  LEFT JOIN replies p ON p.request_id = r.id
- WHERE (? = '' OR EXISTS (
-   SELECT 1 FROM requests step WHERE step.trace_id = r.trace_id AND (step.from_agent = ? OR step.to_agent = ?)
- )) ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, strings.Join(terms, " AND "), searchCandidateLimit, participant, participant, participant, limit)
+ ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, strings.Join(terms, " AND "), participant, participant, participant, searchCandidateLimit, limit)
 	if err != nil {
 		return nil, err
 	}
