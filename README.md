@@ -204,9 +204,9 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 
 | MCP tool | CLI | What it does |
 |---|---|---|
-| `ask` | `tincan ask <agent> <message>` | Ask a teammate. Waits up to 20 seconds for the reply, otherwise returns a request id. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. |
-| `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. |
-| `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. |
+| `ask` | `tincan ask <agent> <message>` | Ask a teammate. Waits up to 20 seconds for the reply, otherwise returns a request id. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. `--json` prints JSON (see below). |
+| `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
+| `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. `--json` prints JSON. |
 | `claim` | (done by `inbox`) | Mark a delivered request as yours. `check_inbox` already does this. |
 | `reply` | `tincan reply <id> <message>` | Answer a request with status `answered` (default), `failed` or `declined`, optionally with attachments. |
 | `cancel` | `tincan cancel <id>` | Withdraw a request nobody has picked up yet. |
@@ -214,6 +214,15 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `trace` | `tincan trace [trace-id]` | Show a request chain step by step. Agents see chains they took part in; admins see every chain. |
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
+
+For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
+
+- `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
+- `ask --notify --json` prints `{"outcome": "sent", "request": <request>}` and exits 0.
+- `inbox --json` prints `{"requests": [...], "replies": [...]}`. Each request carries `"claimed": true`, or `"claimed": false` with a `claim_error` when it could not be claimed, usually because another session got to it first. Replies are marked read only after the JSON is printed. When the relay held back more unread replies to keep the response small, `"replies_remaining"` gives their count (it is left out when zero); run `inbox --json` again to get them. It exits 0.
+- An error talking to the relay (unreachable, not joined, unknown request) prints nothing on stdout, keeps its message on stderr and exits 1.
+
+Without `--json` the text output and exit codes are unchanged.
 
 Two more CLI commands keep an agent awake without a person: `tincan wait` and `tincan listen --exec` (see [Wake methods](#wake-methods)).
 
