@@ -244,3 +244,37 @@ func TestPingEndedIdentifiesRequest(t *testing.T) {
 		})
 	}
 }
+
+// A Claude Code session's channel loop peeks with ping support, so the relay
+// admits pings for it; the loop must answer them itself, without a notice or
+// a model turn.
+func TestChannelAnswersPingsWithoutNotice(t *testing.T) {
+	fastChannel(t, 20*time.Millisecond, time.Hour)
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := target.Peek(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	ping, err := sender.Send(ctx, "muse", "", envelope.KindPing, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newRecordPusher()
+	startWaiting(t, target, p)
+	pong, err := sender.Get(ctx, ping.ID, 2*time.Second)
+	if err != nil || pong.Reply == nil || !strings.Contains(pong.Reply.Body, "answered by channel") {
+		t.Fatalf("pong: %+v %v", pong, err)
+	}
+	if got := p.pushes(); len(got) != 0 {
+		t.Fatalf("ping announced: %v", got)
+	}
+	ask, err := sender.Send(ctx, "muse", "real work", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitPushes(t, p, 1); len(got) != 1 || got[0]["request_ids"] != ask.ID || got[0]["count"] != "1" {
+		t.Fatalf("pushes = %v", got)
+	}
+}

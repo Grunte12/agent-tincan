@@ -603,6 +603,103 @@ func TestNewInviteRetiresOlderCodeForSameName(t *testing.T) {
 	}
 }
 
+func TestProgressRenewsOnlyActiveClaim(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	req := ask(t, s, "grokbot", "muse", "work")
+	post := func(agent string) error { return s.SetProgress(ctx, req.ID, agent, "working", 30*time.Minute) }
+	if err := post("muse"); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("queued: %v", err)
+	}
+	if _, err := s.Claim(ctx, req.ID, "muse", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(20 * time.Minute)
+	if err := post("grokbot"); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("non-claimer: %v", err)
+	}
+	if err := post("muse"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(15 * time.Minute)
+	if transitions, err := s.Sweep(ctx); err != nil || len(transitions) != 0 {
+		t.Fatalf("sweep: %v %v", transitions, err)
+	}
+	res, err := s.Get(ctx, req.ID, "grokbot")
+	if err != nil || res.Progress == nil || res.Progress.By != "muse" || !res.Progress.At.Equal(c.t.Add(-15*time.Minute)) {
+		t.Fatalf("get: %+v %v", res, err)
+	}
+	steps, err := s.Trace(ctx, req.TraceID)
+	if err != nil || len(steps) != 1 || steps[0].Progress == nil {
+		t.Fatalf("trace: %+v %v", steps, err)
+	}
+	c.advance(16 * time.Minute)
+	if err := post("muse"); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("expired lease: %v", err)
+	}
+	if _, err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, req.ID, "muse", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	res, err = s.Get(ctx, req.ID, "grokbot")
+	if err != nil || res.Progress != nil {
+		t.Fatalf("stale note: %+v %v", res, err)
+	}
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := post("muse"); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("answered: %v", err)
+	}
+}
+
+func TestProgressMigrationAndPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, c := open(t, path)
+	req := ask(t, s, "grokbot", "muse", "work")
+	ctx := context.Background()
+	if _, err := s.Claim(ctx, req.ID, "muse", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetProgress(ctx, req.ID, "muse", "working", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := open(t, path)
+	res, err := reopened.Get(ctx, req.ID, "grokbot")
+	if err != nil || res.Progress == nil || res.Progress.Note != "working" || !res.Progress.At.Equal(c.t) {
+		t.Fatalf("reopened: %+v %v", res, err)
+	}
+}
+
+func TestProgressNotifyStaysLeaseFree(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	req, err := s.Enqueue(ctx, envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindNotify}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, req.ID, "muse", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetProgress(ctx, req.ID, "muse", "working", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(2 * time.Hour)
+	if transitions, err := s.Sweep(ctx); err != nil || len(transitions) != 0 {
+		t.Fatalf("sweep: %v %v", transitions, err)
+	}
+}
+
 func TestUrgentMigrationAndOrdering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "relay.db")
 	s, c := open(t, path)

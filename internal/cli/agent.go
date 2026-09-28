@@ -68,7 +68,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -531,6 +531,25 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	}
 	b.WriteString(client.UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
+}
+
+func progressCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "progress <request-id> <note...>",
+		Short: "Post progress on a claimed request and renew its lease",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, _, err := connect()
+			if err != nil {
+				return err
+			}
+			if err := r.Progress(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
+				return err
+			}
+			cmd.Println("Progress recorded.")
+			return nil
+		},
+	}
 }
 
 func replyCmd() *cobra.Command {

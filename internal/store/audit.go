@@ -151,7 +151,7 @@ func (s *Store) Trace(ctx context.Context, traceID string) ([]TraceStep, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, TraceStep{Request: req, Status: st, Reply: rep})
+		out = append(out, TraceStep{Request: req, Status: st, Reply: rep, Progress: req.Progress})
 	}
 	return out, nil
 }
@@ -169,7 +169,7 @@ func (s *Store) RecentTraces(ctx context.Context, limit int, excludePings bool) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, TraceStep{Request: req, Status: st})
+		out = append(out, TraceStep{Request: req, Status: st, Progress: req.Progress})
 	}
 	return out, rows.Err()
 }

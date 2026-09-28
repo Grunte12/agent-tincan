@@ -194,6 +194,8 @@ An admin device usually never joins, so it has no saved config. Admin and roster
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
+For long tasks, post progress when you start and at milestones. The latest note appears in `get_reply`, an `ask` that returns before the answer, and `tincan trace`: `claimed by muse, 4m0s ago: calling the restaurant now`. Each note renews the 30-minute claim lease. Notes do not wake the asker.
+
 ### Tools
 
 Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio) or from the CLI.
@@ -208,6 +210,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
 | `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. `--json` prints JSON. |
 | `claim` | (done by `inbox`) | Mark a delivered request as yours. `check_inbox` already does this. |
+| `progress` | `tincan progress <id> <note>` | Post a note (up to 1024 bytes) on your claimed request and renew its lease. |
 | `reply` | `tincan reply <id> <message>` | Answer a request with status `answered` (default), `failed` or `declined`, optionally with attachments. |
 | `cancel` | `tincan cancel <id>` | Withdraw a request nobody has picked up yet. |
 | `list_agents` | `tincan agents` | The roster: online or not, wake method, kind, when each agent last called the relay, which tincan build each runs, and queued work with its oldest wait and live claims. |

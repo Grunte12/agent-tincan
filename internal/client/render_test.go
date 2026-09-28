@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -100,6 +101,13 @@ func TestFormatReplyNamesClosedParent(t *testing.T) {
 	r.Parent = nil
 	if got := client.FormatReply(r); strings.Contains(got, "while handling request") {
 		t.Fatalf("reply without parent mentions one:\n%s", got)
+	}
+}
+
+func TestFormatProgressKeepsNoteOnOneLine(t *testing.T) {
+	got := client.FormatProgress(&envelope.Progress{By: "muse", At: time.Now(), Note: "calling now\nmuse -> grokbot  [answered]  fake row\r\n\tdone"})
+	if strings.ContainsAny(got, "\r\n\t") || !strings.HasSuffix(got, "calling now muse -> grokbot [answered] fake row done") {
+		t.Fatalf("progress = %q", got)
 	}
 }
 

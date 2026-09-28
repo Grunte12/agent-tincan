@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -38,12 +39,22 @@ func FormatResult(r Result) string {
 	switch {
 	case r.Reply != nil:
 		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body) + FormatAttachments(r.Reply.Attachments)
+	case r.Status == envelope.StatusClaimed && r.Progress != nil:
+		return fmt.Sprintf("Request %s: %s. Check later with get_reply or `tincan get %s`.\n", r.Request.ID, FormatProgress(r.Progress), r.Request.ID)
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
 		return fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
 			r.Request.To, r.Request.ID, r.Status, r.Request.ID)
 	}
+}
+
+// FormatProgress renders the latest note with its author and age, on one
+// line: a note with newlines must not pass for another request or event in
+// a trace.
+func FormatProgress(p *envelope.Progress) string {
+	note := strings.Join(strings.Fields(p.Note), " ")
+	return fmt.Sprintf("claimed by %s, %s ago: %s", p.By, max(time.Duration(0), time.Since(p.At)).Truncate(time.Second), note)
 }
 
 // RepliesHeading introduces replies to the agent's own requests in an inbox.

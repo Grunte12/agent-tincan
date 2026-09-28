@@ -57,6 +57,9 @@ func traceCmd() *cobra.Command {
 				}
 				out.Traces = filterPingTraces(out.Traces, pings)
 				for _, st := range out.Traces {
+					if st.Progress != nil {
+						cmd.Printf("%s  %s\n", st.Request.TraceID, client.FormatProgress(st.Progress))
+					}
 					cmd.Printf("%s  %s -> %s  %-9s %s\n", st.Request.TraceID, st.Request.From, st.Request.To, st.Status, oneLine(string(st.Request.Kind)+" "+st.Request.Body))
 				}
 				if len(out.Traces) == 0 {
@@ -88,6 +91,9 @@ func formatTrace(tr traceResp) string {
 	fmt.Fprintf(&b, "Trace %s\n", tr.TraceID)
 	for _, st := range tr.Steps {
 		fmt.Fprintf(&b, "%s%s -> %s  [%s]  %s\n", strings.Repeat("  ", max(st.Request.Hop-1, 0)), st.Request.From, st.Request.To, st.Status, oneLine(string(st.Request.Kind)+" "+st.Request.Body))
+		if st.Progress != nil {
+			fmt.Fprintf(&b, "  %s\n", client.FormatProgress(st.Progress))
+		}
 		if st.Reply != nil {
 			fmt.Fprintf(&b, "%s  reply from %s: %s\n", strings.Repeat("  ", max(st.Request.Hop-1, 0)), st.Reply.From, oneLine(st.Reply.Body))
 		}

@@ -151,6 +151,19 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate urgent: %w", err)
 	}
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}} {
+		var exists bool
+		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if !exists {
+			if _, err := s.db.Exec("ALTER TABLE requests ADD COLUMN " + col.name + " " + col.definition); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
@@ -700,6 +713,30 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 	return req, err
 }
 
+// SetProgress updates only a current claim and renews its lease.
+func (s *Store) SetProgress(ctx context.Context, id, claimer, note string, lease time.Duration) error {
+	if len(note) > envelope.MaxProgressNote {
+		return envelope.ErrBodyTooLarge
+	}
+	now := s.now()
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?,
+		lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END
+		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
+		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(lease).UnixMilli(),
+		id, claimer, string(envelope.StatusClaimed), now.UnixMilli())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrWrongState
+	}
+	return nil
+}
+
 // Reply stores the target's answer and closes the request. The reply starts
 // unseen by the asker.
 func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
@@ -760,7 +797,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{Request: req, Status: status, Reply: rep}, nil
+	return Result{Request: req, Status: status, Reply: rep, Progress: req.Progress}, nil
 }
 
 // replyFor returns the stored reply for a request, or nil if none yet.
@@ -868,7 +905,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
-	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0
 		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
 		return nil, err
@@ -900,15 +937,16 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, urgent`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, urgent, progress_note, progress_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
 	var chain, kind, status, atts string
-	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Urgent); err != nil {
+	var created, progressAt int64
+	var note string
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Urgent, &note, &progressAt); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -917,6 +955,9 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var err error
 	if r.Attachments, err = decodeAttachments(atts); err != nil {
 		return envelope.Request{}, "", err
+	}
+	if progressAt != 0 && envelope.Status(status) == envelope.StatusClaimed {
+		r.Progress = &envelope.Progress{Note: note, At: time.UnixMilli(progressAt).UTC(), By: r.To}
 	}
 	r.Kind, r.CreatedAt = envelope.Kind(kind), time.UnixMilli(created).UTC()
 	return r, envelope.Status(status), nil

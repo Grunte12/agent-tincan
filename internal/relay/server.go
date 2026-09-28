@@ -238,6 +238,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/poll", s.handlePoll)
 	mux.HandleFunc("POST /v1/replies/ack", s.handleAckReplies)
 	mux.HandleFunc("POST /v1/requests/{id}/claim", s.handleClaim)
+	mux.HandleFunc("POST /v1/requests/{id}/progress", s.handleProgress)
 	mux.HandleFunc("POST /v1/requests/{id}/reply", s.handleReply)
 	mux.HandleFunc("GET /v1/requests/{id}", s.handleGet)
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
@@ -772,6 +773,40 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, req)
 }
 
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	name := s.agent(w, r)
+	if name == "" {
+		return
+	}
+	var in struct {
+		Note string `json:"note"`
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, err)
+		return
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid progress body"))
+		return
+	}
+	if len(in.Note) > envelope.MaxProgressNote {
+		writeErr(w, http.StatusRequestEntityTooLarge, envelope.ErrBodyTooLarge)
+		return
+	}
+	if strings.TrimSpace(in.Note) == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("note is required"))
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.store.SetProgress(r.Context(), id, name, in.Note, s.cfg.ClaimLease); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	s.record(r.Context(), "progress", id, "", name, store.DetailJSON(map[string]any{"bytes": len(in.Note)}))
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
 	if name == "" {
@@ -835,6 +870,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-wake:
 		case <-deadline.C:
+			res, err = s.store.Get(r.Context(), id, name)
+			if err != nil {
+				writeErr(w, statusFor(err), err)
+				return
+			}
 			writeJSON(w, http.StatusOK, res)
 			return
 		case <-r.Context().Done():

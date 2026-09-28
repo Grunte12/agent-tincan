@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 )
 
@@ -74,6 +75,7 @@ var reannounceAfter = 10 * time.Minute
 // pushWaiting announces teammate requests and replies to this agent's own
 // requests with a short channel notice. It only peeks, so it never claims a
 // request or marks a reply seen: the model takes them by calling check_inbox.
+// Pings are the exception: it claims and answers them without a notice.
 // Every open Claude Code session runs one of these; the first model to call
 // check_inbox gets the items and the others find an empty inbox. An item is
 // announced once per process (an id counts only after a push carrying it
@@ -86,6 +88,10 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 	case <-t.Ready():
 	}
 	var a announcer
+	// Peeks advertise ping support, so this loop answers pings itself, as
+	// listen does; failed pongs retry in the background.
+	var retries client.PongRetries
+	defer retries.Wait()
 	backoff := time.Second
 	for ctx.Err() == nil {
 		w, err := r.Peek(ctx, client.DefaultPollHold)
@@ -95,6 +101,12 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 				sleepCtx(ctx, jitter(backoff))
 				backoff = min(backoff*2, 30*time.Second)
 			}
+			continue
+		}
+		w, pingFailed := answerChannelPings(ctx, r, w, &retries)
+		if pingFailed && w.Total <= 0 {
+			sleepCtx(ctx, jitter(backoff))
+			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
 		backoff = time.Second
@@ -114,6 +126,30 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 			sleepCtx(ctx, waitingRecheck)
 		}
 	}
+}
+
+// answerChannelPings answers the pings a peek lists and returns the peek
+// without them, so they never become a channel notice, and whether any
+// ping failed.
+func answerChannelPings(ctx context.Context, r client.PingResponder, w client.Waiting, retries *client.PongRetries) (client.Waiting, bool) {
+	failed := false
+	rest := w.Pending[:0:0]
+	for _, p := range w.Pending {
+		if p.Kind != envelope.KindPing {
+			rest = append(rest, p)
+			continue
+		}
+		_, retry, err := client.AnswerPings(ctx, r, client.Inbox{Requests: []envelope.Request{{ID: p.ID, Kind: envelope.KindPing}}}, "channel")
+		if err != nil {
+			failed = true
+		}
+		retries.Go(ctx, retry)
+	}
+	w.Pending = rest
+	w.Total = max(w.Total-w.Pings, 0)
+	w.Queued = max(w.Queued-w.Pings, 0)
+	w.Pings = 0
+	return w, failed
 }
 
 // announcer decides when a peek is worth a channel notice.
