@@ -259,3 +259,34 @@ func (c *pushTapConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 	}
 	return msg, err
 }
+
+// tincan wait --timeout holds even while a failed pong is retrying.
+func TestWaitTimeoutBoundsPongRetries(t *testing.T) {
+	old := client.PongRetry
+	client.PongRetry = []time.Duration{10 * time.Second}
+	t.Cleanup(func() { client.PongRetry = old })
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/poll":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"requests":[{"id":"p1","kind":"ping","from":"grokbot","to":"muse"},{"id":"r1","from":"grokbot","to":"muse","body":"work"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			w.Write([]byte(`{}`))
+		default:
+			http.Error(w, `{"error":"relay busy"}`, http.StatusServiceUnavailable)
+		}
+	}))
+	defer ts.Close()
+	r, _ := client.NewRelay(ts.URL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	in, finish, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "r1" {
+		t.Fatalf("wait = %+v, %v", in, err)
+	}
+	finish(context.Background())
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("wait ran %v past a 500ms timeout", d)
+	}
+}

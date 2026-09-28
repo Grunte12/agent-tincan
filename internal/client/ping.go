@@ -104,8 +104,14 @@ func (p *PongRetries) Go(ctx context.Context, retry func(context.Context)) {
 func (p *PongRetries) Wait() { p.wg.Wait() }
 
 // RetryPongs runs deferred pong retries within a bounded background context.
+// They outlive a cancelled caller for up to 30s, but never run past the
+// caller's own deadline (tincan wait --timeout), so a time limit holds.
 func RetryPongs(ctx context.Context, retry func(context.Context)) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	deadline := time.Now().Add(30 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	defer cancel()
 	retry(ctx)
 }

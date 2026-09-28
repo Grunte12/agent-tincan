@@ -61,3 +61,36 @@ func TestAnswerPingsReturnsWorkBeforeRetries(t *testing.T) {
 		t.Fatalf("replies=%d", f.replies)
 	}
 }
+
+func TestRetryPongsStaysWithinCallerDeadline(t *testing.T) {
+	// A distant caller deadline leaves the retries' own 30s bound.
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(time.Hour))
+	defer cancel()
+	var got time.Time
+	RetryPongs(ctx, func(ctx context.Context) { got, _ = ctx.Deadline() })
+	if d := time.Until(got); d > 30*time.Second || d < 25*time.Second {
+		t.Fatalf("retry deadline in %v, want 30s", d)
+	}
+
+	// A nearer one (tincan wait --timeout) bounds them.
+	near := time.Now().Add(time.Second)
+	ctx, cancel = context.WithDeadline(t.Context(), near)
+	defer cancel()
+	RetryPongs(ctx, func(ctx context.Context) { got, _ = ctx.Deadline() })
+	if !got.Equal(near) {
+		t.Fatalf("retry deadline = %v, want the caller's %v", got, near)
+	}
+
+	// Without a caller deadline, retries outlive a cancelled caller, up to
+	// their own bound.
+	ctx, cancel = context.WithCancel(t.Context())
+	cancel()
+	var alive bool
+	RetryPongs(ctx, func(ctx context.Context) {
+		got, _ = ctx.Deadline()
+		alive = ctx.Err() == nil
+	})
+	if !alive || time.Until(got) > 30*time.Second || time.Until(got) < 25*time.Second {
+		t.Fatalf("detached retry: alive=%v deadline in %v", alive, time.Until(got))
+	}
+}
