@@ -1,10 +1,16 @@
 name: ci
 
+# Pull requests run against any base branch, so stacked PRs get checks too.
+# A newer push to a PR cancels that PR's older run. Other runs are grouped
+# by commit, so every push to main still gets its own run.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
