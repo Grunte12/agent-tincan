@@ -45,7 +45,7 @@ func TestAttachmentRoundTripThroughRelay(t *testing.T) {
 	if up.ID == "" || up.MIME != "image/png" || up.Size != int64(len(png)) {
 		t.Fatalf("upload = %+v", up)
 	}
-	req, err := grok.SendAttached(ctx, "instinct", "look at this", envelope.KindAsk, "", []string{up.ID})
+	req, err := grok.SendAttached(ctx, "instinct", "look at this", envelope.KindAsk, "", []string{up.ID}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestReplyAttachedThroughRelay(t *testing.T) {
 	m := attachMesh(t)
 	ctx := t.Context()
 	grok, inst := m.Client(t, "grokbot"), m.Client(t, "instinct")
-	res, err := grok.AskAttached(ctx, "instinct", "send the image", "", nil, 0)
+	res, err := grok.AskAttached(ctx, "instinct", "send the image", "", nil, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,13 +117,13 @@ func TestAttachmentsRefusedClientSideWhenRelayLacksThem(t *testing.T) {
 	if _, err := grok.UploadAttachment(ctx, "a.txt", "text/plain", strings.NewReader("a"), 1); !errors.Is(err, client.ErrAttachmentsUnsupported) {
 		t.Fatalf("upload: err = %v", err)
 	}
-	if _, err := grok.SendAttached(ctx, "instinct", "x", envelope.KindAsk, "", []string{"00000000000000000000"}); !errors.Is(err, client.ErrAttachmentsUnsupported) {
+	if _, err := grok.SendAttached(ctx, "instinct", "x", envelope.KindAsk, "", []string{"00000000000000000000"}, false); !errors.Is(err, client.ErrAttachmentsUnsupported) {
 		t.Fatalf("send: err = %v", err)
 	}
 	if n, _ := m.Store.CountQueued(ctx, "instinct"); n != 0 {
 		t.Fatalf("a refused send queued %d requests", n)
 	}
-	if _, err := grok.SendAttached(ctx, "instinct", "plain", envelope.KindAsk, "", nil); err != nil {
+	if _, err := grok.SendAttached(ctx, "instinct", "plain", envelope.KindAsk, "", nil, false); err != nil {
 		t.Fatalf("plain send: %v", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestOldRelayWithoutCapabilities(t *testing.T) {
 	if err != nil || caps.Attachments {
 		t.Fatalf("capabilities = %+v, %v", caps, err)
 	}
-	if _, err := r.SendAttached(ctx, "instinct", "x", envelope.KindAsk, "", []string{"a1"}); !errors.Is(err, client.ErrAttachmentsUnsupported) {
+	if _, err := r.SendAttached(ctx, "instinct", "x", envelope.KindAsk, "", []string{"a1"}, false); !errors.Is(err, client.ErrAttachmentsUnsupported) {
 		t.Fatalf("send: err = %v", err)
 	}
 	if _, err := r.ReplyAttached(ctx, "r1", "x", envelope.StatusAnswered, []string{"a1"}); !errors.Is(err, client.ErrAttachmentsUnsupported) {

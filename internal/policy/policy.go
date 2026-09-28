@@ -19,18 +19,20 @@ import (
 )
 
 var (
-	ErrCycle       = errors.New("request would loop back to an agent already in this chain")
-	ErrHopLimit    = errors.New("request chain is too long")
-	ErrBadParent   = errors.New("parent request is not one this agent is handling")
-	ErrRateLimited = errors.New("too many requests from this agent; slow down")
+	ErrCycle         = errors.New("request would loop back to an agent already in this chain")
+	ErrHopLimit      = errors.New("request chain is too long")
+	ErrBadParent     = errors.New("parent request is not one this agent is handling")
+	ErrUrgentLimited = errors.New("urgent limit reached; send without --urgent")
+	ErrRateLimited   = errors.New("too many requests from this agent; slow down")
 )
 
 // Config tunes the policy.
 type Config struct {
-	Approval  *Approval
-	HopLimit  int // longest allowed chain; default 4
-	PerMinute int // max new requests per sender per minute; default 30
-	Now       func() time.Time
+	Approval      *Approval
+	UrgentPerHour int // max urgent requests per sender per hour; default 5
+	HopLimit      int // longest allowed chain; default 4
+	PerMinute     int // max new requests per sender per minute; default 30
+	Now           func() time.Time
 }
 
 // Policy implements relay.Preparer.
@@ -38,8 +40,9 @@ type Policy struct {
 	st  *store.Store
 	cfg Config
 
-	mu   sync.Mutex
-	sent map[string][]time.Time
+	mu     sync.Mutex
+	sent   map[string][]time.Time
+	urgent map[string][]time.Time
 }
 
 // New builds a Policy over the relay store.
@@ -50,10 +53,13 @@ func New(st *store.Store, cfg Config) *Policy {
 	if cfg.PerMinute == 0 {
 		cfg.PerMinute = 30
 	}
+	if cfg.UrgentPerHour == 0 {
+		cfg.UrgentPerHour = 5
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Policy{st: st, cfg: cfg, sent: map[string][]time.Time{}}
+	return &Policy{st: st, cfg: cfg, sent: map[string][]time.Time{}, urgent: map[string][]time.Time{}}
 }
 
 // Prepare sets TraceID, Hop, Chain, and ParentID, then applies the loop and
@@ -62,6 +68,9 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	parent, ok, err := p.parent(ctx, req)
 	if err != nil {
 		return err
+	}
+	if req.Kind == envelope.KindPing && ok {
+		return reject(http.StatusBadRequest, errors.New("ping cannot continue a request chain"))
 	}
 	if ok {
 		req.ParentID, req.TraceID, req.Hop = parent.ID, parent.TraceID, parent.Hop+1
@@ -75,8 +84,16 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Hop > p.cfg.HopLimit {
 		return reject(http.StatusConflict, fmt.Errorf("%w: hop %d exceeds %d", ErrHopLimit, req.Hop, p.cfg.HopLimit))
 	}
-	if err := p.rate(req.From); err != nil {
+	at, err := p.rate(req.From, req.Urgent)
+	if err != nil {
 		return err
+	}
+	// Stamp the request with the slot it took, so Refund gives back this
+	// send's slot and not a concurrent one's. Enqueue sets the real time.
+	req.CreatedAt = at
+	// A ping does no work and carries no body, so the gate never holds it.
+	if req.Kind == envelope.KindPing {
+		return nil
 	}
 	held, err := p.cfg.Approval.Held(req)
 	if held {
@@ -84,6 +101,7 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		return nil
 	}
 	if err != nil {
+		p.Refund(*req)
 		return reject(http.StatusServiceUnavailable, err)
 	}
 	return nil
@@ -109,7 +127,21 @@ func (p *Policy) parent(ctx context.Context, req *envelope.Request) (envelope.Re
 	return parent, true, nil
 }
 
-func (p *Policy) rate(sender string) error {
+// Refund returns the urgent slot req took in Prepare, for a send the relay
+// then failed to queue (a bad attachment, say), so a failed send never
+// spends the sender's urgent allowance.
+func (p *Policy) Refund(req envelope.Request) {
+	if !req.Urgent {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i := slices.IndexFunc(p.urgent[req.From], req.CreatedAt.Equal); i >= 0 {
+		p.urgent[req.From] = slices.Delete(p.urgent[req.From], i, i+1)
+	}
+}
+
+func (p *Policy) rate(sender string, urgent bool) (time.Time, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.cfg.Now()
@@ -117,10 +149,19 @@ func (p *Policy) rate(sender string) error {
 	recent := slices.DeleteFunc(p.sent[sender], func(t time.Time) bool { return !t.After(cutoff) })
 	if len(recent) >= p.cfg.PerMinute {
 		p.sent[sender] = recent
-		return reject(http.StatusTooManyRequests, ErrRateLimited)
+		return time.Time{}, reject(http.StatusTooManyRequests, ErrRateLimited)
+	}
+	if urgent {
+		cutoff := now.Add(-time.Hour)
+		recentUrgent := slices.DeleteFunc(p.urgent[sender], func(t time.Time) bool { return !t.After(cutoff) })
+		p.urgent[sender] = recentUrgent
+		if len(recentUrgent) >= p.cfg.UrgentPerHour {
+			return time.Time{}, reject(http.StatusTooManyRequests, ErrUrgentLimited)
+		}
+		p.urgent[sender] = append(recentUrgent, now)
 	}
 	p.sent[sender] = append(recent, now)
-	return nil
+	return now, nil
 }
 
 func reject(code int, err error) error { return &relay.StatusError{Code: code, Err: err} }

@@ -9,6 +9,7 @@
 - Each sender is rate-limited (30 new requests per minute by default).
 - Every send, delivery, claim, reply, rejection, wake, join, rebind, and removal is written to an append-only, hash-chained log. `tincan audit-verify` detects edits.
 - Wake nudges carry only a count and an instruction, never request text.
+- Search has the same visibility as trace: joined agents can search requests and replies only in chains they took part in; admins can search every chain. Visibility is unchanged. Search indexes existing stored bodies, not attachment contents, and results include only attachment names. A `search` audit event records the result count, never query text.
 
 ## Rebuilt machines
 

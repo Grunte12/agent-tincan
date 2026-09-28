@@ -166,7 +166,7 @@ func TestGetJSONEndedWithoutAnswer(t *testing.T) {
 				ttl = 10 * time.Millisecond
 			}
 			m := testrelay.New(t, relay.Config{RequestTTL: ttl})
-			req, err := m.Client(t, "grokbot").Send(ctx, "muse", "do it", envelope.KindAsk, "")
+			req, err := m.Client(t, "grokbot").Send(ctx, "muse", "do it", envelope.KindAsk, "", false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,8 +270,8 @@ func TestInboxJSON(t *testing.T) {
 	ctx := context.Background()
 	req := answered(t, m, "call the garage", "Tue 3pm works")
 	instinct := m.Client(t, "instinct")
-	mine, _ := instinct.Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
-	taken, _ := instinct.Send(ctx, "grokbot", "already handled", envelope.KindAsk, "")
+	mine, _ := instinct.Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "", false)
+	taken, _ := instinct.Send(ctx, "grokbot", "already handled", envelope.KindAsk, "", false)
 	grok := m.Client(t, "grokbot")
 	in, err := grok.Poll(ctx, 0)
 	if err != nil || len(in.Requests) != 2 || len(in.Replies) != 1 {

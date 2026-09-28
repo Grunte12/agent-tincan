@@ -46,7 +46,7 @@ func TestApprovalCommands(t *testing.T) {
 	if err != nil || res.Status != envelope.StatusQueued {
 		t.Fatalf("approved: %+v %v", res, err)
 	}
-	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "another", envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "another", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ func TestOwnerApprovalLifecycle(t *testing.T) {
 	sender, target, admin := m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "admin")
 	send := func() envelope.Request {
 		t.Helper()
-		r, err := sender.Send(t.Context(), "muse", strings.Repeat("界", 210), envelope.KindAsk, "")
+		r, err := sender.Send(t.Context(), "muse", strings.Repeat("界", 210), envelope.KindAsk, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +197,7 @@ func TestApprovalUsesRecordedChainAndFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
-	parent, err := m.Client(t, "grokbot").Send(t.Context(), "instinct", "handle this", envelope.KindAsk, "")
+	parent, err := m.Client(t, "grokbot").Send(t.Context(), "instinct", "handle this", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,14 +216,14 @@ func TestApprovalUsesRecordedChainAndFailsClosed(t *testing.T) {
 	if err := m.Client(t, "instinct").Raw(t.Context(), "POST", "/v1/requests/"+parent.ID+"/reply", map[string]string{"body": "done"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "after corruption", envelope.KindAsk, "")
+	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "after corruption", envelope.KindAsk, "", false)
 	if err != nil || req.Status != envelope.StatusHeld {
 		t.Fatalf("fail closed: %+v %v", req, err)
 	}
 	if err := m.Client(t, "instinct").Cancel(t.Context(), req.ID); err != nil {
 		t.Fatal(err)
 	}
-	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "remove me", envelope.KindAsk, "")
+	req, err = m.Client(t, "instinct").Send(t.Context(), "muse", "remove me", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestHeldAttachmentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := sender.SendAttached(t.Context(), "muse", "", envelope.KindAsk, "", []string{upload.ID})
+	req, err := sender.SendAttached(t.Context(), "muse", "", envelope.KindAsk, "", []string{upload.ID}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestApprovalNotificationFailureKeepsHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
-	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "hello", envelope.KindNotify, "")
+	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "hello", envelope.KindNotify, "", false)
 	if err != nil || req.Status != envelope.StatusHeld {
 		t.Fatalf("held notify: %+v %v", req, err)
 	}
@@ -326,7 +326,7 @@ func TestNeverApprovedContentRemainsPrivate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req, err := sender.SendAttached(t.Context(), "muse", "private body", envelope.KindAsk, "", []string{upload.ID})
+			req, err := sender.SendAttached(t.Context(), "muse", "private body", envelope.KindAsk, "", []string{upload.ID}, false)
 			if err != nil {
 				t.Fatal(err)
 			}

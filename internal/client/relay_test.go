@@ -30,7 +30,7 @@ func TestAskGetsReplyInsideWindow(t *testing.T) {
 		inst.Claim(context.Background(), reqs[0].ID)
 		inst.Reply(context.Background(), reqs[0].ID, "3 rows", envelope.StatusAnswered)
 	}()
-	res, err := grok.Ask(context.Background(), "instinct", "what is in the report", "", 5*time.Second)
+	res, err := grok.Ask(context.Background(), "instinct", "what is in the report", "", 5*time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestAskGetsReplyInsideWindow(t *testing.T) {
 func TestAskWithoutReplyReturnsRequestID(t *testing.T) {
 	m := testrelay.New(t, relay.Config{MaxWait: time.Second})
 	start := time.Now()
-	res, err := m.Client(t, "grokbot").Ask(context.Background(), "muse", "call Joe's Garage", "", time.Second)
+	res, err := m.Client(t, "grokbot").Ask(context.Background(), "muse", "call Joe's Garage", "", time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,11 +59,11 @@ func TestAskWithoutReplyReturnsRequestID(t *testing.T) {
 
 func TestRelayErrorsSurface(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
-	_, err := m.Client(t, "grokbot").Send(context.Background(), "nobody", "x", envelope.KindAsk, "")
+	_, err := m.Client(t, "grokbot").Send(context.Background(), "nobody", "x", envelope.KindAsk, "", false)
 	if !client.IsStatus(err, http.StatusNotFound) {
 		t.Fatalf("want 404 APIError, got %v", err)
 	}
-	_, err = m.Client(t, "admin").Send(context.Background(), "muse", "x", envelope.KindAsk, "")
+	_, err = m.Client(t, "admin").Send(context.Background(), "muse", "x", envelope.KindAsk, "", false)
 	if !client.IsStatus(err, http.StatusForbidden) {
 		t.Fatalf("unjoined sender: want 403, got %v", err)
 	}
@@ -130,7 +130,7 @@ func TestConfiguredAgentSentOnEveryRequest(t *testing.T) {
 	r.Agents(ctx)
 	r.Poll(ctx, 0)
 	r.Peek(ctx, 0)
-	r.Send(ctx, "grokbot", "hi", envelope.KindAsk, "")
+	r.Send(ctx, "grokbot", "hi", envelope.KindAsk, "", false)
 	r.Get(ctx, "r1", 0)
 	r.Claim(ctx, "r1")
 	r.Reply(ctx, "r1", "ok", envelope.StatusAnswered)
@@ -159,12 +159,12 @@ func TestTwoAgentsOnOneMachineThroughClient(t *testing.T) {
 	muse := m.Client(t, "muse")
 	ctx := context.Background()
 	for name, c := range map[string]*client.Relay{"codex": codex, "muse": muse} {
-		req, err := c.Send(ctx, "grokbot", "hi from "+name, envelope.KindAsk, "")
+		req, err := c.Send(ctx, "grokbot", "hi from "+name, envelope.KindAsk, "", false)
 		if err != nil || req.From != name {
 			t.Fatalf("%s send: from %q, %v", name, req.From, err)
 		}
 	}
-	sent, err := m.Client(t, "grokbot").Send(ctx, "codex", "for codex", envelope.KindAsk, "")
+	sent, err := m.Client(t, "grokbot").Send(ctx, "codex", "for codex", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestAskWithoutWaitReportsHeld(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(envelope.Request{ID: "r1", To: "muse", Status: status})
 		}))
 		r, _ := client.NewRelay(srv.URL, "")
-		res, err := r.Ask(t.Context(), "muse", "call the restaurant", "", 0)
+		res, err := r.Ask(t.Context(), "muse", "call the restaurant", "", 0, false)
 		srv.Close()
 		want := envelope.StatusQueued
 		if status == envelope.StatusHeld {
@@ -338,6 +338,91 @@ func TestAskWithoutWaitReportsHeld(t *testing.T) {
 		}
 		if err != nil || res.Status != want {
 			t.Fatalf("relay status %q: ask = %s, %v; want %s", status, res.Status, err, want)
+		}
+	}
+}
+
+func TestProgressOldRelay(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusOK} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/capabilities" {
+					t.Errorf("unexpected call: %s", r.URL.Path)
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, "{}")
+			}))
+			defer srv.Close()
+			r, err := client.NewRelay(srv.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Progress(context.Background(), "r1", "working"); err == nil || !strings.Contains(err.Error(), "upgrade the relay") {
+				t.Fatalf("error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAskReturnsLatestProgress(t *testing.T) {
+	m := testrelay.New(t, relay.Config{MaxWait: time.Second})
+	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
+	done := make(chan error, 1)
+	go func() {
+		in, err := muse.Poll(context.Background(), 2*time.Second)
+		if err != nil {
+			done <- err
+			return
+		}
+		if len(in.Requests) != 1 {
+			done <- fmt.Errorf("requests: %d", len(in.Requests))
+			return
+		}
+		id := in.Requests[0].ID
+		if _, err = muse.Claim(context.Background(), id); err == nil {
+			time.Sleep(100 * time.Millisecond)
+			err = muse.Progress(context.Background(), id, "calling now")
+		}
+		done <- err
+	}()
+	res, err := grok.Ask(context.Background(), "muse", "call restaurant", "", time.Second, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := client.FormatResult(res); !strings.Contains(got, "claimed by muse") || !strings.Contains(got, "calling now") {
+		t.Fatalf("ask: %s", got)
+	}
+}
+
+func TestExplicitUrgencyAcrossSendMethods(t *testing.T) {
+	methods := map[string]func(*client.Relay, bool) (envelope.Request, error){
+		"Send": func(r *client.Relay, urgent bool) (envelope.Request, error) {
+			return r.Send(t.Context(), "muse", "message", envelope.KindAsk, "", urgent)
+		},
+		"Ask": func(r *client.Relay, urgent bool) (envelope.Request, error) {
+			result, err := r.Ask(t.Context(), "muse", "message", "", 0, urgent)
+			return result.Request, err
+		},
+		"SendAttached": func(r *client.Relay, urgent bool) (envelope.Request, error) {
+			return r.SendAttached(t.Context(), "muse", "message", envelope.KindAsk, "", nil, urgent)
+		},
+		"AskAttached": func(r *client.Relay, urgent bool) (envelope.Request, error) {
+			result, err := r.AskAttached(t.Context(), "muse", "message", "", nil, 0, urgent)
+			return result.Request, err
+		},
+	}
+	for name, send := range methods {
+		for _, urgent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/urgent=%v", name, urgent), func(t *testing.T) {
+				m := testrelay.New(t, relay.Config{})
+				req, err := send(m.Client(t, "grokbot"), urgent)
+				if err != nil || req.Urgent != urgent {
+					t.Fatalf("request = %+v, %v; want urgent=%v", req, err, urgent)
+				}
+			})
 		}
 	}
 }
