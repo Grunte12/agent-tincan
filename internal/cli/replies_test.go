@@ -286,8 +286,12 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 		t.Fatalf("second inbox = %q, %v", second.String(), err)
 	}
 
-	// A reply read inside the inline wait: no wake.
+	// A reply read inside the inline wait: no wake. The relay wakes the
+	// inline wait before it calls Replied, so wait for muse's reply call to
+	// return before Flush; otherwise Flush races the nudge it schedules.
+	replied := make(chan struct{})
 	go func() {
+		defer close(replied)
 		time.Sleep(300 * time.Millisecond)
 		reqs, _ := muse.Poll(ctx, 2*time.Second)
 		for _, r := range reqs.Requests {
@@ -299,6 +303,7 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 	if err != nil || res.Reply == nil {
 		t.Fatalf("inline ask = %+v, %v; want the reply inline", res, err)
 	}
+	<-replied
 	w.Flush()
 	if msgs := h.got(); len(msgs) != 1 {
 		t.Fatalf("wakes = %q; a reply read inline must not wake the asker", msgs)
