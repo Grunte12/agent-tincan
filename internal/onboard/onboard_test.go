@@ -457,3 +457,13 @@ func TestOperatorRoutesHistory(t *testing.T) {
 		t.Error("no history routing unless a history agent is on the roster")
 	}
 }
+
+func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: matts()})
+	want := "When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell Matt if you cannot."
+	for _, a := range k.Agents {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("%s instructions lack upgrade guidance: %s", a.Name, a.Instructions)
+		}
+	}
+}

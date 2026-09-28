@@ -271,6 +271,14 @@ An `ask` may return before the answer does, and the asker does not have to hold 
 
 ### Upgrades
 
+When the relay serves a newer release, `check_inbox`, `tincan inbox`, `tincan wait`, and MCP channel notices show this once per process per available version:
+
+```text
+tincan 0.5.5 is available from the relay (you run 0.5.4): run tincan upgrade, then restart long-running tincan processes.
+```
+
+An upgrade alone does not end `tincan wait`; the upgrade instruction is printed when a request or reply ends the wait. `tincan inbox --json` includes the optional `upgrade_available` version. The channel, `tincan listen` and the inbox each report a release once per process, so a channel event the session missed still shows on the next `check_inbox`. `tincan listen` runs its command for a new upgrade even with no waiting messages, exporting `TINCAN_UPGRADE_AVAILABLE` (empty on subsequent nudges) alongside `TINCAN_WAITING`. Notices require a valid newer dist `VERSION` and that platform's binary in the dist, so staging `VERSION` before the binaries announces nothing; they are absent with no `--dist`, matching versions, or development builds. Prerelease clients are skipped unless the dist release is itself a prerelease. The onboard instructions tell agents to upgrade and restart their own long-running processes, or tell the owner if they cannot. Clients that predate notices still need a manual reminder.
+
 Agents can update tincan from the relay itself, which is how an agent without GitHub access gets a new release.
 
 ```bash
@@ -394,7 +402,7 @@ In `wake.json`: `{ "grokbot": { "method": "webhook", "url": "<Grok Bot webhook U
 
 #### The Agent Tincan operator role
 
-`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable, wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), telling agents to `tincan upgrade` when the relay serves a new release, routing history questions to the history agent, and summarizing agent traffic when asked.
+`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable, wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), following up with agents that remain behind after relay upgrade notices, routing history questions to the history agent, and summarizing agent traffic when asked.
 
 It follows a quiet rule. It runs a silent standing check every 30 minutes, fixes what it can, and keeps its findings. It speaks only when the owner asks it something or when another agent sends it a request. No scheduled reports, no "all clear" messages.
 
