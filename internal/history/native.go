@@ -177,6 +177,12 @@ const (
 	OpGeminiFile   Op = "gemini.file"
 	OpGeminiSend   Op = "gemini.send"
 	OpGeminiClose  Op = "gemini.close"
+	// Copilot (copilot.com). There is no file operation; copilot.list
+	// reads the page's sidebar in a tab the extension opens.
+	OpCopilotList   Op = "copilot.list"
+	OpCopilotDetail Op = "copilot.detail"
+	OpCopilotSend   Op = "copilot.send"
+	OpCopilotClose  Op = "copilot.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -396,6 +402,9 @@ func (e *UnavailableError) Error() string {
 		reason = "the Tincan Chrome extension is not connected (install it, then run tincan history install)"
 	case ErrNotLoggedIn:
 		reason = "not logged in to " + site + " in Chrome"
+		if s := siteFor(e.Source); s != nil && s.notLoggedIn != nil {
+			reason = s.notLoggedIn(e.Detail)
+		}
 	case ErrEndpointChanged:
 		reason = site + " changed its API"
 	case ErrTimeout:
@@ -716,8 +725,23 @@ func (c *Client) timeout(op Op) time.Duration {
 		return SendClientTimeout
 	case op.file():
 		return 90 * time.Second
+	case op.readsInTab():
+		return TabReadClientTimeout
 	}
 	return 30 * time.Second
+}
+
+// TabReadClientTimeout bounds a list read the extension makes in a tab of
+// its own (Copilot's sidebar): longer than the extension's 75 second
+// bound on such a read and its 3 second gap between reads, shorter than
+// the native host's 2 minute bound on a request.
+const TabReadClientTimeout = 100 * time.Second
+
+// readsInTab reports whether op is a list read the extension makes by
+// opening a tab (a site with listInTab).
+func (op Op) readsInTab() bool {
+	site, kind, ok := op.resolve()
+	return ok && kind == opList && site.listInTab
 }
 
 func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(NativeResponse) (bool, error)) error {

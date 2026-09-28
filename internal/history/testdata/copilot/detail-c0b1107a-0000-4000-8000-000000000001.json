@@ -1,0 +1,39 @@
+{
+  "conversationId": "c0b1107a-0000-4000-8000-000000000001",
+  "title": "Tin can telephones",
+  "createdAt": "2026-09-20T10:00:00.000Z",
+  "updatedAt": "2026-09-20T10:05:30.000Z",
+  "messages": [
+    {
+      "id": "m0000000-0000-4000-8000-000000000001",
+      "author": "user",
+      "text": "How far can a tin can telephone carry a voice?",
+      "createdAt": "2026-09-20T10:00:00.000Z",
+      "sources": []
+    },
+    {
+      "id": "m0000000-0000-4000-8000-000000000004",
+      "author": "bot",
+      "text": "About **30 metres** with a taut string [1][2].",
+      "createdAt": "2026-09-20T10:00:05.000Z",
+      "sources": [
+        { "title": "Example Physics", "url": "https://physics.example/tin-can" },
+        { "title": "String Lab", "url": "https://strings.example/range" }
+      ]
+    },
+    {
+      "id": "m0000000-0000-4000-8000-000000000005",
+      "author": "user",
+      "text": "And with wire instead of string?",
+      "createdAt": "2026-09-20T10:05:00.000Z",
+      "sources": []
+    },
+    {
+      "id": "m0000000-0000-4000-8000-000000000006",
+      "author": "bot",
+      "text": "Wire carries it further, a few hundred metres.",
+      "createdAt": "2026-09-20T10:05:30.000Z",
+      "sources": []
+    }
+  ]
+}

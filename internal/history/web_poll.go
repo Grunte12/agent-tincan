@@ -40,6 +40,15 @@ const (
 	DefaultGeminiStableFor   = 45 * time.Second
 )
 
+// DefaultCopilotStablePolls and DefaultCopilotStableFor: Copilot's page
+// JSON marks no answer finished, and a web search can hold its text still
+// mid-answer, so a reply counts as finished once the same text is read on
+// 3 consecutive polls spanning at least 20 seconds.
+const (
+	DefaultCopilotStablePolls = 3
+	DefaultCopilotStableFor   = 20 * time.Second
+)
+
 // A 429 while waiting for a reply waits the site's Retry-After, or backs
 // off from RateLimitBackoffStart, doubling up to RateLimitBackoffMax.
 const (
@@ -127,7 +136,7 @@ func (w *WebAgent) stableRule() *stableRule {
 // waitReply reads the conversation on the poll schedule until the reply
 // to this request's message is finished, and returns that read and the id
 // of this request's user message. On a site with a text-stability rule
-// (claude.ai, Gemini), a reply without a stop_reason counts as finished once the
+// (claude.ai, Gemini, Copilot), a reply without a stop_reason counts as finished once the
 // same reply is read on the rule's number of consecutive polls spanning
 // at least its time (see stableRule). onBind, when set,
 // is called once with the user message id when it is first seen. Errors

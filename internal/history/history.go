@@ -1,5 +1,5 @@
 // Package history reads Matt's conversations with ChatGPT, claude.ai, Grok,
-// Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
+// Gemini, Copilot, Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
 // and send back the images from that turn.
 //
 // Every source is an adapter behind Reader. Adapters share one Query shape,
@@ -37,6 +37,7 @@ const (
 	SourceClaudeAI   Source = "claude-ai"
 	SourceGrok       Source = "grok"
 	SourceGemini     Source = "gemini"
+	SourceCopilot    Source = "copilot"
 	SourceGrokCLI    Source = "grok-cli"
 )
 
@@ -565,6 +566,9 @@ type turn struct {
 	reply    Message
 	// replyImages are images the assistant generated in the reply.
 	replyImages []Image
+	// sources are the reply's source links, where the site gives them
+	// (Copilot); a web agent lists them after the answer.
+	sources []webSource
 }
 
 // hasImages reports whether t has images attached to the prompt or

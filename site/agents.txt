@@ -94,8 +94,8 @@ A5. Join this machine's own agent (you), if you are one of the team:
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
-    history, chatgpt-web, claude-web, grok-web, gemini-web, generic.
-    (gemini-cli, grok-cli, grok-web and gemini-web need a relay from this
+    history, chatgpt-web, claude-web, grok-web, gemini-web, copilot-web, generic.
+    (gemini-cli, grok-cli, grok-web, gemini-web and copilot-web need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>.)
 
@@ -286,6 +286,30 @@ C7. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
       owner wants to reach their Gemini (one name per line), or have them
       disconnect Gmail, Drive and Calendar in Gemini's settings.
     - Test: `tincan ask gemini-web "Tincan test: say hello in five words."`
+
+C8. Optional: Microsoft Copilot (copilot-web). Tell your owner first, and go
+    ahead only if they agree: the Microsoft Services Agreement does not allow
+    automated access, and Microsoft's enforcement can reach their whole
+    Microsoft account (Outlook, OneDrive), not only Copilot. It needs a
+    personal Microsoft account; work or school accounts and GitHub Copilot
+    are not supported. Then:
+    - Ask your owner to grant Copilot on the extension's options page
+      (chrome://extensions > Agent Tincan History > Details > Extension
+      options > Grant next to Copilot). It is not granted by default.
+    - Ask your owner to open https://copilot.microsoft.com in this same Chrome,
+      sign in with their personal Microsoft account, and finish any sign-in or
+      terms page Microsoft shows, until copilot.com/chat shows its chats.
+    - Get an invite code with kind copilot-web and join and install it:
+
+        TINCAN_CONFIG=~/.config/tincan/copilot-web.json  tincan join <CODE6> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/copilot-web.json  tincan web install --site copilot
+
+    - Replies end with a "Sources:" list of the answer's links. If Copilot
+      shows a "Verification required" check, the agent says so and waits 5
+      minutes; your owner completes the check in Chrome. Never try to solve it.
+    - Test: `tincan ask copilot-web "Tincan test: say hello in five words."` and
+      `tincan ask history "what was the last thing I asked Copilot?"` (that
+      read opens copilot.com in a background tab for a few seconds).
 
 
 The history agent also reads the owner's Grok CLI (Grok Build) sessions on that

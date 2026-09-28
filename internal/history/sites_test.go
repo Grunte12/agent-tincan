@@ -22,6 +22,8 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpGrokSend: SourceGrok, OpGrokClose: SourceGrok,
 		OpGeminiList: SourceGemini, OpGeminiDetail: SourceGemini, OpGeminiFile: SourceGemini,
 		OpGeminiSend: SourceGemini, OpGeminiClose: SourceGemini,
+		OpCopilotList: SourceCopilot, OpCopilotDetail: SourceCopilot,
+		OpCopilotSend: SourceCopilot, OpCopilotClose: SourceCopilot,
 	}
 	for op, want := range cases {
 		if got := op.source(); got != want {
@@ -81,7 +83,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("perplexity")
-	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai, grok or gemini)` {
+	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai, grok, gemini or copilot)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -143,10 +145,10 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai, grok or gemini" || WebAgentNames() != "chatgpt-web, claude-web, grok-web or gemini-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok and Gemini" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini or copilot" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web or copilot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, grok, gemini, codex, claude-code or grok-cli" {
+	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
@@ -154,6 +156,7 @@ func TestSiteTableNames(t *testing.T) {
 		SourceClaudeAI: {"claude-web", "claude.ai", "claude.ai"},
 		SourceGrok:     {"grok-web", "Grok", "grok.com"},
 		SourceGemini:   {"gemini-web", "Gemini", "gemini.google.com"},
+		SourceCopilot:  {"copilot-web", "Copilot", "copilot.com"},
 	}
 	for src, w := range want {
 		if got := [3]string{WebAgentName(src), siteLabel(src), siteOf(src)}; got != w {

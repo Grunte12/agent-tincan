@@ -150,6 +150,8 @@ ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). Thes
 
 Gemini on the web (gemini-web). The same for your Gemini account, once you grant Gemini on the extension's options page. Google's terms do not allow automated access and its enforcement can reach your whole Google account, and Gemini answers can draw on Gmail, Drive and Calendar if they are connected, so give it an allowlist ([details](docs/adapters/web-agents.md#gemini)).
 
+Copilot on the web (copilot-web). The same for the Microsoft Copilot of a personal Microsoft account (copilot.microsoft.com, now copilot.com), once you grant Copilot on the extension's options page; replies end with a "Sources:" list of the answer's links. The Microsoft Services Agreement does not allow automated access and Microsoft's enforcement can reach your whole Microsoft account, so turn it on only if you accept that ([details](docs/adapters/web-agents.md#copilot)).
+
 Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
 
 In one table:
@@ -171,6 +173,7 @@ In one table:
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
 | gemini-web | Your own Gemini account, as a teammate | Same as chatgpt-web, on gemini.google.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
+| copilot-web | Your own Microsoft Copilot (personal account), as a teammate, with source links | Same as chatgpt-web, on copilot.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
 
 The plumbing, in plain words:
 
@@ -480,7 +483,7 @@ Notes that apply to every method:
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
-| ChatGPT, Claude, Grok and Gemini web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
+| ChatGPT, Claude, Grok, Gemini and Copilot web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `copilot-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 
 Any other agent can use kind `generic` with whichever wake fits.
 
@@ -940,7 +943,7 @@ The same MCP tools, served through the gateway. It sees images it receives, but 
 
 A Go service, `tincan history serve`, not a model. It answers teammates' questions about what the owner asked their AI tools, and replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments:
 
-- ChatGPT (chatgpt.com), claude.ai, and once granted Grok (grok.com) and Gemini (gemini.google.com), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
+- ChatGPT (chatgpt.com), claude.ai, and once granted Grok (grok.com), Gemini (gemini.google.com) and Copilot (copilot.com), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome. Copilot's chat list is read from copilot.com's sidebar in a background tab the extension opens for a few seconds; its conversations come from copilot.com's page data, never its tokens.
 - Codex (CLI and desktop app), Claude Code and Grok CLI, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, and `~/.grok`).
 
 Ask it things like "what was the last thing I asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
@@ -1010,7 +1013,7 @@ tincan invite chatgpt-web --kind chatgpt-web                                    
 TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <code> --relay http://tincan-relay
 ```
 
-For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Grok, `grok-web`, `--kind grok-web` and `~/.config/tincan/grok-web.json`; for Gemini, `gemini-web`, `--kind gemini-web` and `~/.config/tincan/gemini-web.json`. A relay older than the `grok-web` or `gemini-web` kind refuses it and the CLI says so: upgrade the relay, or invite without `--kind` and use `tincan onboard --kind <name>=<kind>`. Like history, it refuses to start unless the relay confirms its name.
+For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Grok, `grok-web`, `--kind grok-web` and `~/.config/tincan/grok-web.json`; for Gemini, `gemini-web`, `--kind gemini-web` and `~/.config/tincan/gemini-web.json`; for Copilot, `copilot-web`, `--kind copilot-web` and `~/.config/tincan/copilot-web.json`. A relay older than the `grok-web`, `gemini-web` or `copilot-web` kind refuses it and the CLI says so: upgrade the relay, or invite without `--kind` and use `tincan onboard --kind <name>=<kind>`. Like history, it refuses to start unless the relay confirms its name.
 
 #### How it wakes
 
@@ -1020,11 +1023,11 @@ Wait: the service long-polls. Set its method to `wait` in `wake.json`.
 
 For each request, one at a time:
 
-1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt`, `grok-web-allow.txt` or `gemini-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
+1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt`, `grok-web-allow.txt`, `gemini-web-allow.txt` or `copilot-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
 2. Reads the optional threading line. A first line `new chat` starts a new conversation; `conversation: <id>` (or a conversation URL) continues that one; otherwise it continues the conversation this asker used last with this agent. Each asker has its own thread. The ids live in `~/.config/tincan/<agent>-state.json` (0600, ids only). Every reply ends with the conversation id so the asker can come back.
 3. Has the extension type the message into a background tab the extension opens itself (`active: false`). The extension fills the message box, clicks send, and returns once the conversation id is in the tab's address (at most 60 seconds). It never touches a tab the owner opened.
-4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Grok: the answer marked `partial: false` with nothing left in flight; Gemini: the same text on 4 reads spanning at least 45 seconds, since Gemini pauses while it thinks). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again; so does a Grok answer that ends on the plan's usage limit, which also holds Grok back for 15 minutes. Each site's cooldown is its own. While it waits, the agent keeps its relay presence fresh without claiming new requests.
-5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A Grok or Gemini image the extension cannot fetch is left out and the reply says so. A tab nobody closes is closed after 10 minutes.
+4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Grok: the answer marked `partial: false` with nothing left in flight; Gemini: the same text on 4 reads spanning at least 45 seconds, since Gemini pauses while it thinks; Copilot: the same text on 3 reads spanning at least 20 seconds). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again; so does a Grok answer that ends on the plan's usage limit, which also holds Grok back for 15 minutes. Each site's cooldown is its own. While it waits, the agent keeps its relay presence fresh without claiming new requests.
+5. Replies with the answer text (up to 64 KB; Copilot's ends with a `Sources:` list of up to 10 links) and the generated images (up to 8) as attachments, then has the extension close the tab. A Grok or Gemini image the extension cannot fetch is left out and the reply says so. A tab nobody closes is closed after 10 minutes.
 
 Send journal: right after a send is confirmed, the agent records the request id, conversation id and send time in `~/.config/tincan/<agent>-journal.json` (0600, no message text). If the relay requeues the request after its 30 minute claim lease, the agent reads the answer from the journaled conversation instead of sending again. Entries are dropped after 90 minutes.
 
@@ -1038,14 +1041,15 @@ tincan web install --site chatgpt
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.chatgpt.plist
 ```
 
-For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Grok: first grant Grok on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options), then `tincan web install --site grok` and `com.agenttincan.web.grok.plist`; `tincan web serve --site grok` refuses to start while the extension is connected without that grant. For Gemini: grant Gemini on the extension's options page first, then `tincan web install --site gemini` and `com.agenttincan.web.gemini.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`, `tincan-grok-web.log`, `tincan-gemini-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Grok: first grant Grok on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options), then `tincan web install --site grok` and `com.agenttincan.web.grok.plist`; `tincan web serve --site grok` refuses to start while the extension is connected without that grant. For Gemini: grant Gemini on the extension's options page first, then `tincan web install --site gemini` and `com.agenttincan.web.gemini.plist`. For Copilot: grant Copilot there first and sign in once at https://copilot.microsoft.com with a personal Microsoft account, then `tincan web install --site copilot` and `com.agenttincan.web.copilot.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`, `tincan-grok-web.log`, `tincan-gemini-web.log`, `tincan-copilot-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
 - It acts as the owner, and by default any joined agent may ask it to. Write its allowlist file to restrict that. The answer can include what the site remembers about the owner, and it is untrusted model output: the web agents pass it back as is.
 - The extension checks the site session before opening a tab, so a logged-out browser never sends anonymously.
 - Gemini: Google's terms do not allow automated access, and Google's enforcement can reach the owner's whole Google account, not only Gemini. Gemini answers can draw on Google apps connected to the account (Gmail, Drive, Calendar), so any agent allowed to ask `gemini-web` can read that data; write `~/.config/tincan/gemini-web-allow.txt` or disconnect those apps. Its images are captured from the send tab, with a worker fetch as the fallback; when neither works the reply says the images could not be attached. See [web-agents.md](docs/adapters/web-agents.md#gemini).
-- All four sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
+- Copilot: the Microsoft Services Agreement does not allow automated access, and Microsoft's enforcement can reach the owner's whole Microsoft account. It needs a personal Microsoft account; a sign-in, terms or work-account page in its tab means nothing is sent and the reply says what to finish in Chrome. A "Verification required" human check is never touched: the reply says to complete it in Chrome, and Copilot is held back for 5 minutes. See [web-agents.md](docs/adapters/web-agents.md#copilot).
+- All five sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
 - The ChatGPT and Claude send operations need extension version 0.3.0 or later; Grok and Gemini need 0.4.0 and the site granted on its options page.
 - When the site is not granted, the reply names the options page (`permission_missing`). When the site shows an anti-bot check, the reply says to open the site in Chrome and complete it (`blocked`). A session that lands on a sign-in page is `not_logged_in`, and nothing is sent.
 
@@ -1097,7 +1101,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `copilot-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

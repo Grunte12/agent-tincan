@@ -39,11 +39,12 @@ const (
 	KindClaudeWeb    = "claude-web"
 	KindGrokWeb      = "grok-web"
 	KindGeminiWeb    = "gemini-web"
+	KindCopilotWeb   = "copilot-web"
 	KindGeneric      = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindCopilotWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -73,6 +74,7 @@ var runtimeNames = map[string]string{
 	"claude-web":  KindClaudeWeb,
 	"grok-web":    KindGrokWeb,
 	"gemini-web":  KindGeminiWeb,
+	"copilot-web": KindCopilotWeb,
 }
 
 // defaultWake is the wake method a kind normally uses.
@@ -92,6 +94,7 @@ var defaultWake = map[string]string{
 	KindClaudeWeb:    "wait",
 	KindGrokWeb:      "wait",
 	KindGeminiWeb:    "wait",
+	KindCopilotWeb:   "wait",
 	KindGeneric:      "none",
 }
 
@@ -292,7 +295,7 @@ func isService(kind string) bool {
 
 // isWebKind reports whether kind is one of the web agents.
 func isWebKind(kind string) bool {
-	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb
+	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindCopilotWeb
 }
 
 func agentBlock(d agentData) (AgentBlock, error) {

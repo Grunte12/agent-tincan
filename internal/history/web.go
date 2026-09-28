@@ -1,7 +1,8 @@
 package history
 
 // Web agents make ChatGPT (chatgpt.com), Claude (claude.ai), Grok
-// (grok.com) and Gemini (gemini.google.com) teammates:
+// (grok.com), Gemini (gemini.google.com) and Copilot (copilot.com)
+// teammates:
 // a request's body is typed into the owner's logged-in site through the
 // Tincan Chrome extension, and the reply comes back as the answer, with
 // generated images attached. See docs/adapters/web-agents.md.
@@ -118,7 +119,8 @@ type WebAgent struct {
 	// ClaudeStablePolls and ClaudeStableFor override the site's
 	// text-stability rule (claude.ai's DefaultClaudeStablePolls and
 	// DefaultClaudeStableFor, Gemini's DefaultGeminiStablePolls and
-	// DefaultGeminiStableFor; ChatGPT has none): a reply the site does not
+	// DefaultGeminiStableFor, Copilot's DefaultCopilotStablePolls and
+	// DefaultCopilotStableFor; ChatGPT and Grok have none): a reply the site does not
 	// mark finished counts as finished once the same text is read on this
 	// many consecutive polls, spanning at least this long. Zero keeps the
 	// site's rule.
@@ -850,8 +852,9 @@ var errReplyUnreadable = errors.New("the reply could not be read")
 
 // readReply builds the answer from the finished read: the reply to this
 // request's user message (userID), with its generated images fetched
-// through the file operation. generated is how many images the reply
-// had before any failed to fetch; lost is how many of the reply's images
+// through the file operation. A reply with source links (Copilot) ends
+// with their sourcesFooter. generated is how many images the reply had
+// before any failed to fetch; lost is how many of the reply's images
 // could not be fetched.
 func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw json.RawMessage) (text string, conv []Conversation, generated, lost int, err error) {
 	l := w.live()
@@ -869,14 +872,18 @@ func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw jso
 		return "", nil, 0, 0, fmt.Errorf("%w: this request's turn is not in the conversation", errReplyUnreadable)
 	}
 	t := th.turns[i]
+	text = t.reply.Text
+	if f := sourcesFooter(t.sources); f != "" {
+		text = strings.TrimSpace(text) + "\n\n" + f
+	}
 	if len(t.replyImages) == 0 {
-		return t.reply.Text, nil, 0, 0, nil
+		return text, nil, 0, 0, nil
 	}
 	c := []Conversation{{Source: w.Site, ID: convID, Messages: []Message{{Role: RoleAssistant, Images: t.replyImages}}}}
 	c = l.resolve(ctx, c)
 	lost = max(len(t.replyImages)-imageCount(c), 0)
 	capImages(c)
-	return t.reply.Text, c, len(t.replyImages), lost, nil
+	return text, c, len(t.replyImages), lost, nil
 }
 
 // missingImagesNote is the note on a reply whose generated images could

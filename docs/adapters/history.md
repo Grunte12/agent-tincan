@@ -1,17 +1,17 @@
 # History agent
 
-The `history` agent answers teammates' questions about what the owner (you) asked in seven places: ChatGPT (chatgpt.com), claude.ai, Grok (grok.com), Gemini (gemini.google.com), Codex (CLI and desktop app), Claude Code and Grok CLI (xAI's Grok Build, the `grok` command). Ask it things like "what was the last thing I asked ChatGPT? send the image" or "find my recent Codex thread about the relay" (your name in place of "I" works too) and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
+The `history` agent answers teammates' questions about what the owner (you) asked in eight places: ChatGPT (chatgpt.com), claude.ai, Grok (grok.com), Gemini (gemini.google.com), Microsoft Copilot (copilot.com, a personal Microsoft account), Codex (CLI and desktop app), Claude Code and Grok CLI (xAI's Grok Build, the `grok` command). Ask it things like "what was the last thing I asked ChatGPT? send the image" or "find my recent Codex thread about the relay" (your name in place of "I" works too) and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
 
 It is a Go service, `tincan history serve`, that runs on your Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
 1. Checks access. By default any agent joined to your relay may ask. If you wrote an allowlist file, every agent in the request's chain, as the relay recorded it, must be on it; otherwise it declines and names the agent.
 2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text. A request that is already a structured query (see [Structured queries](#structured-queries)) skips this step and never reaches a model.
-3. Reads the source: Codex, Claude Code and Grok CLI from their local logs, ChatGPT, claude.ai, Grok and Gemini live through the Tincan Chrome extension in your logged-in Chrome. Grok is read only once you grant the extension grok.com on its options page (see [Install](#install)), and Gemini only once it is granted there too (see [web-agents.md](web-agents.md#gemini) for how Gemini is read).
+3. Reads the source: Codex, Claude Code and Grok CLI from their local logs, ChatGPT, claude.ai, Grok, Gemini and Copilot live through the Tincan Chrome extension in your logged-in Chrome. Grok is read only once you grant the extension grok.com on its options page (see [Install](#install)), and Gemini and Copilot only once they are granted there too (see [web-agents.md](web-agents.md#gemini) for how Gemini is read and [web-agents.md](web-agents.md#copilot) for Copilot). Reading Copilot's chat list opens copilot.com in a background tab of the extension's own for a few seconds, like a send, because the list has no data the extension may fetch; each conversation is then read from copilot.com's page data with your cookies. The extension never reads Copilot's tokens.
 4. Fills in a fixed reply template and attaches the images.
 
 By default, lookups cover the 50 most recent conversations per source, up to 30 days old. You can change that window (see [Window](#window)).
 
-It answers about what you typed, not what your agents typed. Codex `codex exec` runs, Claude Code SDK runs and grok-cli wake runs are left out, and so are the ChatGPT, claude.ai, Grok and Gemini conversations that the chatgpt-web, claude-web, grok-web and gemini-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
+It answers about what you typed, not what your agents typed. Codex `codex exec` runs, Claude Code SDK runs and grok-cli wake runs are left out, and so are the ChatGPT, claude.ai, Grok, Gemini and Copilot conversations that the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
 
 ## Grok CLI
 
@@ -54,7 +54,7 @@ For the history service, write `~/.config/tincan/history-window.json`:
 {"days": 90, "max": 100}
 ```
 
-Both fields are optional; a missing one keeps its default. `days` is 1 to 3650 and `max` is 1 to 200. ChatGPT, claude.ai, Grok and Gemini read at most 100 conversations whatever `max` says, because that is all the extension lists. Grok's list comes in pages, and the extension reads at most 5 pages per list, so if grok.com returns short pages a Grok list can hold fewer conversations than asked for. The file is reread for every request, right after the allowlist check, so edits take effect without a restart. `tincan history serve --window-file <path>` reads another file. The startup log describes the window, for example `window: the last 50 conversations, up to 30 days (default, no file at ~/.config/tincan/history-window.json)`.
+Both fields are optional; a missing one keeps its default. `days` is 1 to 3650 and `max` is 1 to 200. ChatGPT, claude.ai, Grok, Gemini and Copilot read at most 100 conversations whatever `max` says, because that is all the extension lists. Copilot's list is its sidebar, which has no dates: it is taken in the sidebar's order (newest first), each conversation's own time comes from reading it, and the day window stops the scan at the first conversation read that is older than it. A Copilot list (`tincan history copilot --list`) shows no dates. Grok's list comes in pages, and the extension reads at most 5 pages per list, so if grok.com returns short pages a Grok list can hold fewer conversations than asked for. The file is reread for every request, right after the allowlist check, so edits take effect without a restart. `tincan history serve --window-file <path>` reads another file. The startup log describes the window, for example `window: the last 50 conversations, up to 30 days (default, no file at ~/.config/tincan/history-window.json)`.
 
 With no file, the service uses the default window. A file that is present but cannot be read, is not that JSON shape (unknown fields included), or has a value out of bounds fails every history request with "The history agent could not use its window file (history-window.json)" until you fix it, and the log says why. It never falls back to the default, so a window you narrowed never silently widens.
 
@@ -75,7 +75,7 @@ The JSON may also start on the marker line: `query: {"source": "codex", "mode": 
 
 The object takes only these fields, the same schema the query step produces:
 
-- `source`: `chatgpt`, `claude-ai`, `grok`, `gemini`, `codex`, `claude-code` or `grok-cli` (required). `grok` is your own Grok chats on grok.com; `grok-cli` is your Grok CLI sessions on this machine. `gemini` is the Gemini app and website (gemini.google.com), not the Gemini CLI.
+- `source`: `chatgpt`, `claude-ai`, `grok`, `gemini`, `copilot`, `codex`, `claude-code` or `grok-cli` (required). `grok` is your own Grok chats on grok.com; `grok-cli` is your Grok CLI sessions on this machine. `gemini` is the Gemini app and website (gemini.google.com), not the Gemini CLI. `copilot` is Microsoft Copilot with a personal Microsoft account (copilot.microsoft.com, now copilot.com), not GitHub Copilot.
 - `mode`: `latest`, `search` or `conversation` (required).
 - `terms`: the words to search for, up to 8 of up to 100 bytes each, none blank (only with `search`).
 - `conversation_id`: the conversation to read (only with `conversation`).
@@ -87,7 +87,7 @@ Structured queries never reach a model. The allowlist check still runs first, ex
 
 ## Install
 
-The only human step is installing the Tincan Chrome extension from the Chrome Web Store with its standard permission dialog (it asks for chatgpt.com, claude.ai and native messaging). Grok is optional and asks nothing at install: to let history read your Grok chats, open `chrome://extensions` > Agent Tincan History > Details > Extension options and click Grant for Grok (grok.com and its image host, assets.grok.com). Until then a Grok question is answered with that step. Gemini is optional the same way: click Grant for Gemini there, which also grants its image host. Until the store listing is live, load the extension unpacked:
+The only human step is installing the Tincan Chrome extension from the Chrome Web Store with its standard permission dialog (it asks for chatgpt.com, claude.ai and native messaging). Grok is optional and asks nothing at install: to let history read your Grok chats, open `chrome://extensions` > Agent Tincan History > Details > Extension options and click Grant for Grok (grok.com and its image host, assets.grok.com). Until then a Grok question is answered with that step. Gemini is optional the same way: click Grant for Gemini there, which also grants its image host. So is Copilot: click Grant for Copilot (copilot.com and copilot.microsoft.com). Until the store listing is live, load the extension unpacked:
 
 1. Download `tincan-history-extension.zip` from the release page and unzip it into a folder you will keep, for example `~/tincan-extension`. Chrome loads it from there every time, so do not delete it. (From a repo checkout, `extension/` works the same way; see `extension/README.md`.)
 2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked, and pick that folder.
@@ -148,7 +148,7 @@ Replies and what to do:
 - "Declined: X is not on the history allowlist": add X to `~/.config/tincan/history-allow.txt` if you want it to have access.
 - "Declined: this request came through X, which is not on the history allowlist": an allowed agent was asked by X and passed the question on. Ask X's owner, or add X.
 - "Declined: the history agent could not read its allowlist": fix the file's permissions or the bad name in it. The log says which.
-- "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
+- "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
 - "The structured query was not valid" or "The structured query is too long": the request started with a `query:` line but its JSON was not one object with only the accepted fields in bounds, or the request was over 4000 bytes. The reply lists the fields; see [Structured queries](#structured-queries).
 - "its query step failed": `codex exec` did not run. Check that `codex` is on the service's `PATH` and logged in (`codex login status`), then see `~/Library/Logs/tincan-history.log`.
 - "No Codex history was found on this machine" (on the CLI, "no Codex history found in ~/.codex"; the same for Claude Code and Grok CLI): that tool has not been used on this machine yet, or keeps its history elsewhere (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`; the service reads them from its own environment).
@@ -158,6 +158,8 @@ Replies and what to do:
 - "source unavailable: grok: the Tincan Chrome extension has no access to grok.com": grant Grok on the extension's options page (see [Install](#install)).
 - "source unavailable: gemini: the Tincan Chrome extension has no access to gemini.google.com": grant Gemini on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options).
 - "source unavailable: gemini: gemini.google.com showed an anti-bot check": Google showed its "unusual traffic" page. Open gemini.google.com in Chrome and complete it; Gemini reads are held back for 5 minutes after one.
+- "source unavailable: copilot: not signed in to Copilot in Chrome": open https://copilot.microsoft.com in Chrome, sign in with a personal Microsoft account and finish any sign-in or terms page Microsoft shows. A work or school account is not supported.
+- "source unavailable: copilot: the Tincan Chrome extension has no access to copilot.com": grant Copilot on the extension's options page.
 - "source unavailable: ...: chatgpt.com changed its API": the site changed its internal endpoints; the extension needs an update.
 - "source unavailable: ...: Chrome did not answer in time": Chrome was busy or asleep; ask again.
 - "The images could not be attached: this relay does not support attachments": upgrade the relay. The text answer is still correct.

@@ -1,20 +1,20 @@
 # Agent Tincan History extension
 
 Manifest V3 extension that lets the `history` agent read ChatGPT, claude.ai,
-Grok and Gemini conversations, and the `chatgpt-web`, `claude-web`, `grok-web`
-and `gemini-web` agents send to them, through the user's own logged-in Chrome. Its service worker runs a fixed set of
+Grok, Gemini and Copilot conversations, and the `chatgpt-web`, `claude-web`,
+`grok-web`, `gemini-web` and `copilot-web` agents send to them, through the user's own logged-in Chrome. Its service worker runs a fixed set of
 operations (`ops.js`) for the native host `com.agenttincan.history`
 (`tincan history native-host`) and returns JSON, with images as base64 in
 chunks of at most 384 KiB. It accepts nothing else and never runs code from a
 message or a page. The ChatGPT access token is read from `/api/auth/session`
 inside the worker and never leaves it.
 
-The send operations (`chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, in `send.js`) open a
+The send operations (`chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `copilot.send`, in `send.js`) open a
 background tab of their own, fill the message box through fixed page functions
 injected with `chrome.scripting` (message as an argument, isolated world),
 click send, and return once the conversation id is in the tab's address. They
 never watch the page for the answer: the Go side reads the conversation until
-the answer is finished, then calls `chatgpt.close`, `claudeai.close`, `grok.close` or `gemini.close`, which
+the answer is finished, then calls `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close` or `copilot.close`, which
 close only the tab a send left open for that conversation (any such tab is
 closed after 10 minutes regardless). A send tab the site moves to another
 host is never typed into: Google's `/sorry/` page is `blocked`, any other host
@@ -68,7 +68,8 @@ upgrade asks for nothing new; the owner can still withhold them in Chrome's
 site access settings. Sites added later go under `optional_host_permissions`
 (Grok: `https://grok.com/*` and `https://assets.grok.com/*`, granted together;
 Gemini: `https://gemini.google.com/*` and `https://lh3.googleusercontent.com/*`,
-its image host, granted together) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
+its image host, granted together; Copilot: `https://copilot.com/*` and
+`https://copilot.microsoft.com/*`, where it starts, granted together) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in
 `SITE_ACCESS`, shows whether all its origins are granted (a site with only
 its page origins granted shows as granted with images and files needing
@@ -113,6 +114,29 @@ URL's hex (`/app/<id>`); the `c_` prefix is added only here. If a live check
 shows the worker's requests are refused, the fetch can move into an
 extension-opened tab's isolated world: `geminiRPC` is the one place it
 happens.
+
+## Copilot (copilot.com)
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `copilot.list` | `count` | Opens `https://copilot.com/chat` in a background tab of its own, waits for a signed-in page, reads the sidebar's chat links (`#m365-copilot-chats-section a[href*="/chat/conversation/"]`: the UUID from the href, the title from `aria-label` or the text) with the fixed isolated-world function `pageCopilotList`, scrolls the last link into view for more until it has `count`, nothing more loads, or 10 rounds (then `more: true`), and closes the tab. A signed-in page with no chat list after 10 seconds is an empty list. Returns `{conversations: [{id, title}], more?}`. |
+| `copilot.detail` | `id` (a lowercase UUID) | `GET https://copilot.com/chat/conversation/<id>` from the worker with `accept: application/json` and the owner's cookies (no token). Keeps only `store.rawConversationResponse`'s `conversationId`, `chatName`, `createTimeUtc`, `updateTimeUtc` and each user or bot message without a `messageType`: its `messageId`, `author`, `text`, `createdAt` and `sourceAttributions` as `{title: providerDisplayName, url: seeMoreUrl}` (http and https only, each URL once, at most 50). Everything else in the answer, including `reconnectToken` and the telemetry that carries token-like strings, is dropped here (`copilotConversation`). |
+| `copilot.send` | `message`, `conversation_id?`, `new_chat?` | Opens `https://copilot.com/chat` or `/chat/conversation/<id>` in a background tab, waits for the composer and a signed-in mark, types with `insertText`, clicks Send (or presses Enter), and returns the UUID from the tab's address. |
+| `copilot.close` | `conversation_id` | Closes the tab a Copilot send left open. |
+
+copilot.com has no account check the worker may call without a token, so the
+send and list tabs are the session gate: the page must stay on copilot.com and
+show a signed-in mark (the sidebar's chat list or the account button) before
+anything is typed or read. A tab that moves to a Microsoft sign-in or terms
+page (login.live.com, login.microsoftonline.com, account.live.com), or to any
+host whose address Chrome hides from the extension, is `not_logged_in`; one
+on a Microsoft 365 host is `not_logged_in` with "work or school account".
+Copilot's "Verification required" human-check dialog, or a Cloudflare
+challenge frame, is `blocked` before typing and after the click; the widget
+is never touched. Tab reads run one at a time with the site's sends, at most
+75 seconds each and at least 3 seconds apart. `copilotJSON` is the one place
+copilot.com's JSON is fetched, if it ever has to move into an
+extension-opened tab's isolated world.
 
 ## Failure codes
 

@@ -1,7 +1,7 @@
 package history
 
 // The live sites: everything that differs between chatgpt.com, claude.ai,
-// grok.com and gemini.google.com, in one table. Adding a site is one entry here plus its
+// grok.com, gemini.google.com and copilot.com, in one table. Adding a site is one entry here plus its
 // reader file; nothing else branches on which site it is.
 
 import (
@@ -62,6 +62,14 @@ type webSite struct {
 	// this long after it showed an anti-bot check, so the agent does not
 	// keep tripping it on the owner's account.
 	blockedCooldown time.Duration
+	// listInTab: the list operation reads the site's page in a tab the
+	// extension opens (Copilot's sidebar), so it gets
+	// TabReadClientTimeout.
+	listInTab bool
+	// notLoggedIn, when set, is the reason a not_logged_in error gives
+	// for the site, from the extension's detail: what the owner has to
+	// do in Chrome.
+	notLoggedIn func(detail string) string
 }
 
 // canonical returns id in the site's canonical form.
@@ -156,6 +164,35 @@ var webSites = []*webSite{
 		noteLostImages:  true,
 		blockedCooldown: DefaultBlockedCooldown,
 	},
+	{
+		source:   SourceCopilot,
+		label:    "Copilot",
+		host:     "copilot.com",
+		agent:    "copilot-web",
+		opPrefix: "copilot",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewCopilot(c)
+			r.Now = now
+			return r
+		},
+		nodes:           copilotNodes,
+		stable:          &stableRule{polls: DefaultCopilotStablePolls, span: DefaultCopilotStableFor},
+		convPath:        copilotConvPath,
+		canonID:         copilotCanonicalID,
+		blockedCooldown: DefaultBlockedCooldown,
+		listInTab:       true,
+		notLoggedIn:     copilotNotLoggedIn,
+	},
+}
+
+// copilotNotLoggedIn is the not_logged_in reason for Copilot: a work or
+// school account landing gets its own; any other (a Microsoft sign-in or
+// terms page, or a page with no account) says to finish it in Chrome.
+func copilotNotLoggedIn(detail string) string {
+	if strings.Contains(detail, "work or school account") {
+		return "Copilot opened with a work or school account; copilot-web needs a personal Microsoft account, so sign in to copilot.com in Chrome with a personal Microsoft account"
+	}
+	return "not signed in to Copilot in Chrome; open https://copilot.microsoft.com in Chrome, sign in with a personal Microsoft account and finish any Microsoft sign-in or terms prompt"
 }
 
 // grokConvPath is grok.com's conversation path, /c/<id>.
@@ -221,7 +258,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 }
 
 // WebSiteNames lists the --site values, for help and errors
-// ("chatgpt, claude-ai, grok or gemini").
+// ("chatgpt, claude-ai, grok, gemini or copilot").
 func WebSiteNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {

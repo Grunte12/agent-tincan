@@ -31,6 +31,12 @@
 // and picks the image by response and position (see geminiImageURL), then
 // asks the sender to capture it in the tab its send left open, and falls
 // back to fetching it here.
+//
+// Copilot (copilot.com): a conversation is its page route's JSON (Accept:
+// application/json, the owner's cookies, no token), cut down here to the
+// fields the Go side reads (copilotConversation). Its chat list has no
+// such JSON, so the sender reads it from the page's sidebar in a tab of
+// its own.
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
@@ -69,6 +75,9 @@ export const SITE_ACCESS = Object.freeze({
   claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
   grok: Object.freeze({ label: 'Grok', origins: Object.freeze(['https://grok.com/*', 'https://assets.grok.com/*']), pageOrigins: Object.freeze(['https://grok.com/*']), required: false }),
   gemini: Object.freeze({ label: 'Gemini', origins: Object.freeze(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']), pageOrigins: Object.freeze(['https://gemini.google.com/*']), required: false }),
+  // copilot.microsoft.com is where Copilot starts; it sends the browser on
+  // to copilot.com, where the extension's tabs open.
+  copilot: Object.freeze({ label: 'Copilot', origins: Object.freeze(['https://copilot.com/*', 'https://copilot.microsoft.com/*']), pageOrigins: Object.freeze(['https://copilot.com/*']), required: false }),
 });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
@@ -114,6 +123,11 @@ const GROK_FILE_RE = /^([A-Za-z0-9][A-Za-z0-9-]{0,99})_(0|[1-9][0-9]?)$/;
 const GEMINI = 'https://gemini.google.com';
 // GEMINI_ID_RE is a Gemini conversation id as its URL shows it.
 const GEMINI_ID_RE = /^[0-9a-f]{8,64}$/;
+// COPILOT_ID_RE is a Copilot conversation id: the UUID in its URL.
+const COPILOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const COPILOT = 'https://copilot.com';
+// COPILOT_MAX_SOURCES caps the sources kept per Copilot message.
+const COPILOT_MAX_SOURCES = 50;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -141,6 +155,10 @@ const SPEC = Object.freeze({
   'gemini.file': Object.freeze({ file_id: 'id', conversation_id: 'id' }),
   'gemini.send': SEND_SPEC,
   'gemini.close': CLOSE_SPEC,
+  'copilot.list': Object.freeze({ count: 'count' }),
+  'copilot.detail': Object.freeze({ id: 'id' }),
+  'copilot.send': SEND_SPEC,
+  'copilot.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -371,6 +389,54 @@ async function check(res, url, notFound, sniffMs = BODY_TEXT_MS) {
   if (res.status === 404 || res.status === 410) throw new OpError(notFound ? 'not_found' : 'endpoint_changed', where);
   if (res.status === 429) throw new OpError('rate_limited', where, retryAfterSeconds(res));
   throw new OpError('http_error', where);
+}
+
+// copilotId checks a Copilot conversation id (the URL's UUID).
+function copilotId(id) {
+  if (typeof id !== 'string' || !COPILOT_ID_RE.test(id)) throw bad('invalid Copilot conversation id');
+  return id;
+}
+
+// copilotConversation keeps only what the Go side reads from a Copilot
+// conversation page's JSON: the id, title and times, and each user or bot
+// message's id, author, text, time and source links. Everything else in
+// the answer (reconnectToken, the telemetry and state blobs, which carry
+// token-like strings) is dropped here and never returned or logged.
+// Messages with a messageType (tool context, search queries, suggestions)
+// and other authors are not content and are left out.
+export function copilotConversation(raw, id) {
+  const r = raw && typeof raw === 'object' && raw.store && typeof raw.store === 'object' ? raw.store.rawConversationResponse : null;
+  if (!r || typeof r !== 'object' || !Array.isArray(r.messages)) throw new OpError('endpoint_changed', 'unexpected conversation answer');
+  const text = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const messages = [];
+  for (const m of r.messages) {
+    if (!m || typeof m !== 'object' || (m.messageType !== undefined && m.messageType !== null)) continue;
+    if (m.author !== 'user' && m.author !== 'bot') continue;
+    const sources = [];
+    const seen = new Set();
+    for (const s of Array.isArray(m.sourceAttributions) ? m.sourceAttributions : []) {
+      const url = text(s && s.seeMoreUrl, 2048);
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      sources.push({ title: text(s.providerDisplayName, 300), url });
+      if (sources.length >= COPILOT_MAX_SOURCES) break;
+    }
+    messages.push({
+      id: typeof m.messageId === 'string' && ID_RE.test(m.messageId) ? m.messageId : '',
+      author: m.author,
+      text: text(m.text, 512 * 1024),
+      createdAt: text(m.createdAt, 64) || text(m.timestamp, 64),
+      sources,
+    });
+  }
+  const cid = typeof r.conversationId === 'string' ? r.conversationId.toLowerCase() : '';
+  return {
+    conversationId: COPILOT_ID_RE.test(cid) ? cid : id,
+    title: text(r.chatName, 300),
+    createdAt: text(r.createTimeUtc, 64),
+    updatedAt: text(r.updateTimeUtc, 64),
+    messages,
+  };
 }
 
 // geminiId checks a Gemini conversation id (the URL's hex).
@@ -677,6 +743,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return u.hostname === 'assets.grok.com' || u.hostname === 'grok.com' ? u.href : null;
   }
 
+  // copilotJSON is the one place copilot.com's JSON is fetched: from this
+  // worker, with the owner's cookies and an Accept header asking the
+  // app's page route for its data instead of its HTML. No token is read or
+  // sent. If copilot.com ever refuses the worker, this is the function to
+  // swap for the same fetch in the isolated world of an extension-opened
+  // copilot.com tab.
+  async function copilotJSON(url) {
+    return getJSON(url, { headers: { accept: 'application/json' } }, true);
+  }
+
   async function claudeOrgId() {
     if (claudeOrg) return claudeOrg;
     const orgs = await getJSON(`${CLAUDE}/api/organizations`, {});
@@ -932,6 +1008,25 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       await geminiAuth(true);
       return sender.send('gemini', a);
     },
+    // Copilot's chat list has no JSON the extension may read (the app gets
+    // it with a bearer token the extension never touches), so the sender
+    // reads it from the sidebar of copilot.com/chat in a background tab of
+    // its own, with a fixed isolated-world function.
+    async 'copilot.list'(a) {
+      if (!sender || typeof sender.readList !== 'function') throw new OpError('unsupported', 'this extension build cannot read Copilot');
+      return sender.readList('copilot', a.count);
+    },
+    async 'copilot.detail'(a) {
+      return copilotConversation(await copilotJSON(`${COPILOT}/chat/conversation/${encodeURIComponent(copilotId(a.id))}`), a.id);
+    },
+    // There is no cookie-only account check to run first, so the send's
+    // session gate is its tab: it must stay on copilot.com and show a
+    // signed-in account before anything is typed (send.js).
+    async 'copilot.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      if (a.conversation_id !== undefined) copilotId(a.conversation_id);
+      return sender.send('copilot', a);
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -948,6 +1043,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'gemini.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('gemini', a.conversation_id);
+    },
+    async 'copilot.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('copilot', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).

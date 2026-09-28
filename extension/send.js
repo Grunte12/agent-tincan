@@ -1,7 +1,9 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send, grok.send, gemini.send) and the matching close operations
-// (chatgpt.close, claudeai.close, grok.close, gemini.close), plus the
-// in-page image capture gemini.file asks for (capture).
+// claudeai.send, grok.send, gemini.send, copilot.send) and the matching
+// close operations (chatgpt.close, claudeai.close, grok.close,
+// gemini.close, copilot.close), plus the in-page image capture gemini.file
+// asks for (capture) and the Copilot chat list read copilot.list asks for
+// (readList).
 //
 // ChatGPT, claude.ai and grok.com guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
@@ -9,7 +11,8 @@
 //
 //   1. open https://chatgpt.com/ (or /c/<id>), https://claude.ai/new (or
 //      /chat/<id>), https://grok.com/ (or /c/<id>) or
-//      https://gemini.google.com/app (or /app/<id>) with
+//      https://gemini.google.com/app (or /app/<id>) or
+//      https://copilot.com/chat (or /chat/conversation/<id>) with
 //      chrome.tabs.create({active: false});
 //   2. inject the fixed page functions below with chrome.scripting
 //      (isolated world, func + args only) to fill the composer, verify the
@@ -31,6 +34,11 @@
 // the image host sees the same request the page's own would make. It never
 // draws the page's <img> onto a canvas: a cross-origin image taints it.
 //
+// readList opens copilot.com/chat in a background tab of its own, reads the
+// sidebar's chat links with a fixed isolated-world function (scrolling the
+// list for more), and closes the tab. It reads links and titles only,
+// never a token or a cookie.
+//
 // The message is data only: it is passed as an argument to a fixed function
 // and inserted as text. Nothing from a message or a page is ever executed.
 // Selectors drift, so every one lives in SELECTORS, each with fallbacks.
@@ -43,6 +51,11 @@ export const ID_WAIT_MS = 60 * 1000;
 // KEEP_TAB_MS is how long a finished send's tab may stay open waiting for
 // its close operation.
 export const KEEP_TAB_MS = 10 * 60 * 1000;
+// READ_TIMEOUT_MS bounds one Copilot tab read (load, scrolling included),
+// under the Go client's wait for it; READ_GAP_MS is the least time between
+// the end of one of a site's tab reads and the start of the next.
+export const READ_TIMEOUT_MS = 75 * 1000;
+export const READ_GAP_MS = 3000;
 
 // SELECTORS is the one table of page selectors, tried in order. login and
 // loginPaths mean the page is logged out; blocked, where a site has it,
@@ -98,6 +111,36 @@ export const SELECTORS = Object.freeze({
     login: ['a[href*="accounts.google.com/ServiceLogin"]', 'a[href*="accounts.google.com/v3/signin"]'],
     loginPaths: [],
   }),
+  // copilot.com (where copilot.microsoft.com sends a personal Microsoft
+  // account): the composer is a contenteditable span that takes
+  // insertText, and a Send button appears once there is text (Enter is the
+  // fallback). A signed-out or unfinished session goes to a Microsoft
+  // sign-in or terms page on another host; signedIn must also show before
+  // anything is typed, so a page that offers the composer without an
+  // account is never used. Its chat list has no JSON the extension may
+  // read, so readList reads the sidebar in a tab of its own.
+  copilot: Object.freeze({
+    composer: ['#m365-chat-editor-target-element', '[role="textbox"][aria-label="Message Copilot"]', 'span[contenteditable="true"][aria-label*="Copilot" i]'],
+    send: ['button[aria-label="Send"]', 'button[data-testid="sendButton"]', 'button[aria-label="Submit message"]'],
+    stop: ['button[aria-label*="Stop generating" i]', 'button[aria-label="Stop"]'],
+    streaming: [],
+    assistant: ['[data-testid="markdown-reply"]'],
+    user: ['[data-testid="chatQuestion"]'],
+    login: ['a[href*="login.live.com"]', 'a[href*="login.microsoftonline.com"]', 'button[aria-label="Sign in"]'],
+    loginPaths: ['/signin', '/login'],
+    signedIn: ['#m365-copilot-chats-section', '#mectrl_main_trigger', 'button[aria-label*="Account manager" i]'],
+    // Copilot's human check is a "Verification required" dialog around a
+    // Turnstile widget; it is detected, never touched.
+    blocked: ['iframe[src*="challenges.cloudflare.com"]'],
+    dialog: ['[role="dialog"]', '[role="alertdialog"]'],
+    blockedText: ['Verification required', 'Verify you are human'],
+    // read is what readList looks for: the sidebar's chat list and its
+    // links.
+    read: Object.freeze({
+      chats: ['#m365-copilot-chats-section'],
+      chat: ['a[href*="/chat/conversation/"]'],
+    }),
+  }),
 });
 
 // SITES says where each site's pages are and how to read a conversation id
@@ -124,6 +167,17 @@ export const SITES = Object.freeze({
     newURL: 'https://gemini.google.com/app',
     convURL: (id) => `https://gemini.google.com/app/${encodeURIComponent(id)}`,
     idFrom: /^https:\/\/gemini\.google\.com\/(?:u\/\d{1,2}\/)?(?:app|gem\/[A-Za-z0-9_-]{1,128})\/([0-9a-f]{8,64})(?:[/?#]|$)/,
+  }),
+  // A Copilot id is the conversation's UUID. hiddenIsAway: a loaded tab
+  // whose address Chrome hides is on a host the extension has no access
+  // to (a Microsoft sign-in or terms page), so it is off the site.
+  // workHosts are where a work or school account lands.
+  copilot: Object.freeze({
+    newURL: 'https://copilot.com/chat',
+    convURL: (id) => `https://copilot.com/chat/conversation/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/copilot\.com\/chat\/conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/?#]|$)/,
+    hiddenIsAway: true,
+    workHosts: Object.freeze(['cloud.microsoft', 'office.com', 'microsoft365.com']),
   }),
 });
 
@@ -161,7 +215,10 @@ export function pageProbe(sel) {
   return {
     href: String(location.href || ''),
     loggedOut: Boolean(q(sel.login)) || sel.loginPaths.some((p) => path === p || path.startsWith(p + '/')),
-    blocked: Array.isArray(sel.blocked) && (Boolean(q(sel.blocked)) || /^just a moment/i.test(String(document.title || ''))),
+    signedIn: !Array.isArray(sel.signedIn) || Boolean(q(sel.signedIn)),
+    blocked:
+      (Array.isArray(sel.blocked) && (Boolean(q(sel.blocked)) || /^just a moment/i.test(String(document.title || '')))) ||
+      (Array.isArray(sel.blockedText) && qa(sel.dialog || []).some((d) => sel.blockedText.some((t) => textOf(d).includes(t)))),
     composer: Boolean(composer),
     composerEmpty: draft.trim() === '',
     generating: Boolean(q(sel.stop)) || Boolean(q(sel.streaming)),
@@ -317,6 +374,53 @@ export async function pageFetchImage(url, maxBytes) {
   }
 }
 
+// pageCopilotList reads the sidebar's chat list: each link to
+// /chat/conversation/<id>, with its title (the link's aria-label, else its
+// text). found is false while the list is not on the page. With scroll set
+// it then scrolls the last link into view, so more chats load for the
+// next read.
+export function pageCopilotList(sel, scroll) {
+  let box = null;
+  for (const s of sel.chats) {
+    try {
+      box = document.querySelector(s);
+    } catch {
+      box = null;
+    }
+    if (box) break;
+  }
+  if (!box) return { found: false, conversations: [] };
+  let links = [];
+  for (const s of sel.chat) {
+    try {
+      links = Array.from(box.querySelectorAll(s));
+    } catch {
+      links = [];
+    }
+    if (links.length) break;
+  }
+  const conversations = [];
+  const seen = new Set();
+  for (const a of links) {
+    let path = '';
+    try {
+      const u = new URL(a.getAttribute('href') || '', location.href);
+      if (u.host === location.host) path = u.pathname;
+    } catch {
+      continue;
+    }
+    const m = /^\/chat\/conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/.exec(path);
+    if (!m || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    const title = String(a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim();
+    conversations.push({ id: m[1], title });
+  }
+  if (scroll && links.length && typeof links[links.length - 1].scrollIntoView === 'function') {
+    links[links.length - 1].scrollIntoView({ block: 'end' });
+  }
+  return { found: true, conversations };
+}
+
 // ---- The sender, run in the service worker.
 
 function str(v, n) {
@@ -330,6 +434,7 @@ function cleanProbe(r) {
   return {
     href: str(o.href, 4096),
     loggedOut: o.loggedOut === true,
+    signedIn: o.signedIn === true,
     blocked: o.blocked === true,
     composer: o.composer === true,
     composerEmpty: o.composerEmpty === true,
@@ -352,6 +457,38 @@ function elsewhere(url, site) {
   return u.host === new URL(site).host ? null : u;
 }
 
+// awayError is the error for a tab the site sent off its host, or null
+// while it is on it (or still loading): Google's /sorry/ anti-bot page is
+// blocked, a work or school account's landing (cfg.workHosts) and any
+// other host (a sign-in or terms page) not_logged_in. On a site with
+// hiddenIsAway, a loaded tab whose address Chrome hides counts as another
+// host too: the extension can see the address of its granted hosts only.
+function awayError(t, cfg) {
+  const host = new URL(cfg.newURL).host;
+  const away = elsewhere(t.url, cfg.newURL);
+  if (away) {
+    if (away.pathname.startsWith('/sorry/')) return new OpError('blocked', `the page went to ${away.host}`);
+    const work = (cfg.workHosts || []).some((h) => away.hostname === h || away.hostname.endsWith('.' + h));
+    if (work) return new OpError('not_logged_in', `work or school account: the page went to ${away.host}`);
+    return new OpError('not_logged_in', `the page went to ${away.host}`);
+  }
+  if (cfg.hiddenIsAway && t.url === '' && t.status === 'complete') {
+    return new OpError('not_logged_in', `the page left ${host} for a sign-in or terms page`);
+  }
+  return null;
+}
+
+// cleanList keeps a Copilot sidebar read's conversations.
+function cleanList(r) {
+  const o = r && typeof r === 'object' ? r : {};
+  const out = [];
+  for (const c of Array.isArray(o.conversations) ? o.conversations.slice(0, 1000) : []) {
+    const id = str(c && c.id, 64);
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) out.push({ id, title: str(c.title, 300) });
+  }
+  return { found: o.found === true, conversations: out };
+}
+
 // createSender returns {send(site, args), close(site, conversationId),
 // capture(site, conversationId, url), busy(), closeAllKept()}.
 // tabs and scripting are chrome.tabs and chrome.scripting (or fakes). Sends
@@ -371,6 +508,10 @@ export function createSender({
   idWaitMs = ID_WAIT_MS,
   keepMs = KEEP_TAB_MS,
   settleMs = 1500,
+  readMs = READ_TIMEOUT_MS,
+  readGapMs = READ_GAP_MS,
+  listRounds = 10,
+  listWaitMs = 10000,
 }) {
   // owned: tabs being driven by a send, the only ones that may be
   // scripted. kept: finished sends' tabs, tab id -> {site, id, timer},
@@ -378,7 +519,10 @@ export function createSender({
   const owned = new Set();
   const kept = new Map();
   const queues = {};
-  // inflight counts sends accepted and not yet settled, queued ones too.
+  // lastRead is when each site's last tab read ended.
+  const lastRead = {};
+  // inflight counts sends and tab reads accepted and not yet settled,
+  // queued ones too.
   let inflight = 0;
 
   // inject runs func in tabId's isolated world. Only a tab a send is
@@ -432,6 +576,54 @@ export function createSender({
     return { closed };
   }
 
+  // onSite reads tabId's address and fails when the site sent the tab to
+  // another host (awayError). Nothing is typed or read there. Every poll
+  // after the page loaded goes through it, so a redirect in the middle of
+  // a send or a read stops it too.
+  async function onSite(tabId, cfg) {
+    const t = await tabURL(tabId);
+    const err = awayError(t, cfg);
+    if (err) throw err;
+    return t;
+  }
+
+  // load waits for tabId's page to load and be usable: signed in (on a
+  // site with signedIn selectors, their mark is on the page), not an
+  // anti-bot check, and ready(page). A page that shows its login marks is
+  // not_logged_in at once; one that never shows the signed-in mark is
+  // not_logged_in when loadBy passes; one that is never ready fails with
+  // notReady().
+  async function load(tabId, cfg, sel, { loadBy, late, ready, notReady }) {
+    const host = new URL(cfg.newURL).host;
+    // An anti-bot interstitial can be transient (a challenge that passes
+    // by itself and reloads the page), so a blocked page is polled like a
+    // loading one and is an error only if it is still blocked when the
+    // load time runs out.
+    let page = null;
+    let blocked = false;
+    for (;;) {
+      // While loading, a tab on another host gets one short settle before
+      // it fails: a logged-in Google session can pass through
+      // accounts.google.com and come straight back.
+      if (awayError(await tabURL(tabId), cfg)) await sleep(settleMs);
+      const t = await onSite(tabId, cfg);
+      blocked = false;
+      if (t.status === 'complete') {
+        page = cleanProbe(await inject(tabId, pageProbe, [sel]));
+        blocked = page.blocked;
+        if (!blocked && page.loggedOut) throw new OpError('not_logged_in', `logged out of ${host}`);
+        if (!blocked && page.signedIn && ready(page)) return page;
+      }
+      if (now() >= loadBy) {
+        if (blocked) throw new OpError('blocked', `anti-bot check on ${host}`);
+        if (page && !page.signedIn) throw new OpError('not_logged_in', `no signed-in account on ${host}`);
+        if (late()) throw new OpError('timeout', 'the page did not load in time');
+        throw notReady();
+      }
+      await sleep(pollMs);
+    }
+  }
+
   async function run(site, args) {
     const cfg = SITES[site];
     const sel = SELECTORS[site];
@@ -445,21 +637,10 @@ export function createSender({
     const tab = await tabs.create({ url: target, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('send_failed', 'could not open a tab');
     owned.add(tab.id);
-    // onSite reads the tab's address and fails when the site sent the tab
-    // to another host: Google's /sorry/ anti-bot page is blocked, anything
-    // else (a sign-in page) not_logged_in. Nothing is typed there. Every
-    // poll after the page loaded goes through it, so a redirect in the
-    // middle of a send stops the send too.
-    const onSite = async () => {
-      const t = await tabURL(tab.id);
-      const away = elsewhere(t.url, cfg.newURL);
-      if (away) throw new OpError(away.pathname.startsWith('/sorry/') ? 'blocked' : 'not_logged_in', `the page went to ${away.host}`);
-      return t;
-    };
     // urlId is the conversation id in the tab's address right now, '' when
     // there is none; it checks the host first (onSite).
     const urlId = async () => {
-      const m = cfg.idFrom.exec((await onSite()).url);
+      const m = cfg.idFrom.exec((await onSite(tab.id, cfg)).url);
       return m ? m[1] : '';
     };
     let done = false;
@@ -470,34 +651,13 @@ export function createSender({
     let clicked = false;
     try {
       // 1. Page load, then a composer (or a login page).
-      const loadBy = Math.min(deadline, start + loadMs);
-      // An anti-bot interstitial can be transient (a challenge that passes
-      // by itself and reloads the page), so a blocked page is polled like a
-      // loading one and is an error only if it is still blocked when the
-      // load time runs out.
       const blockedErr = () => new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
-      let page = null;
-      let blocked = false;
-      for (;;) {
-        // While loading, a tab on another host gets one short settle before
-        // it fails: a logged-in Google session can pass through
-        // accounts.google.com and come straight back.
-        if (elsewhere((await tabURL(tab.id)).url, cfg.newURL)) await sleep(settleMs);
-        const t = await onSite();
-        blocked = false;
-        if (t.status === 'complete') {
-          page = cleanProbe(await inject(tab.id, pageProbe, [sel]));
-          blocked = page.blocked;
-          if (!blocked && page.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
-          if (!blocked && page.composer) break;
-        }
-        if (now() >= loadBy) {
-          if (blocked) throw blockedErr();
-          if (late()) throw new OpError('timeout', 'the page did not load in time');
-          throw new OpError('composer_not_found', 'no message box on the page');
-        }
-        await sleep(pollMs);
-      }
+      const page = await load(tab.id, cfg, sel, {
+        loadBy: Math.min(deadline, start + loadMs),
+        late,
+        ready: (p) => p.composer,
+        notReady: () => new OpError('composer_not_found', 'no message box on the page'),
+      });
       if (existing) {
         const m = cfg.idFrom.exec(page.href);
         if (!m || m[1] !== existing) throw new OpError('not_found', 'conversation not found');
@@ -579,19 +739,100 @@ export function createSender({
     }
   }
 
+  // enqueue runs fn after everything queued for site before it has
+  // settled: a site's sends and tab reads run one at a time.
+  function enqueue(site, fn) {
+    const prev = queues[site] || Promise.resolve();
+    inflight++;
+    const p = prev
+      .catch(() => {})
+      .then(fn)
+      .finally(() => {
+        inflight--;
+      });
+    queues[site] = p;
+    return p;
+  }
+
+  // readTab opens url in a background tab of the extension's own, waits
+  // for the page to load signed in, then calls step(tabId, late) once a
+  // poll until it returns {result}, and closes the tab. Each read starts
+  // at least readGapMs after the site's last one ended, so reads keep a
+  // human pace.
+  async function readTab(site, url, step) {
+    const cfg = SITES[site];
+    const sel = SELECTORS[site];
+    const wait = (lastRead[site] ?? -Infinity) + readGapMs - now();
+    if (wait > 0) await sleep(wait);
+    const start = now();
+    const deadline = start + readMs;
+    const late = () => now() >= deadline;
+    const tab = await tabs.create({ url, active: false });
+    if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('timeout', 'could not open a tab');
+    owned.add(tab.id);
+    try {
+      await load(tab.id, cfg, sel, {
+        loadBy: Math.min(deadline, start + loadMs),
+        late,
+        ready: () => true,
+        notReady: () => new OpError('timeout', 'the page did not load in time'),
+      });
+      for (;;) {
+        await onSite(tab.id, cfg);
+        const r = await step(tab.id, late);
+        if (r) return r.result;
+        await sleep(pollMs);
+      }
+    } finally {
+      owned.delete(tab.id);
+      lastRead[site] = now();
+      await removeTab(tab.id);
+    }
+  }
+
+  // readList reads up to count conversations from the sidebar's chat
+  // list on copilot.com/chat, scrolling it to load more until it has count,
+  // nothing more loads, or listRounds. more is set when it stopped at
+  // listRounds or the time limit while the list was still growing. A
+  // signed-in page with no chat list after listWaitMs has no chats.
+  async function readList(site, count) {
+    const sel = SELECTORS[site];
+    const cfg = SITES[site];
+    return enqueue(site, () => {
+      const seen = new Map();
+      let still = 0;
+      let rounds = 0;
+      let since = -1;
+      const step = async (tabId, late) => {
+        const r = cleanList(await inject(tabId, pageCopilotList, [sel.read, true]));
+        if (!r.found) {
+          if (since < 0) since = now();
+          if (now() - since >= listWaitMs || late()) return { result: { conversations: [] } };
+          return null;
+        }
+        const before = seen.size;
+        for (const c of r.conversations) if (!seen.has(c.id)) seen.set(c.id, c);
+        rounds++;
+        still = seen.size === before ? still + 1 : 0;
+        const list = [...seen.values()];
+        if (list.length >= count || still >= 2) return { result: { conversations: list.slice(0, count) } };
+        if (rounds >= listRounds || late()) return { result: { conversations: list, more: true } };
+        return null;
+      };
+      return readTab(site, cfg.newURL, step);
+    });
+  }
+
   return {
     // send runs after any earlier send to the same site has finished.
     send(site, args) {
-      const prev = queues[site] || Promise.resolve();
-      inflight++;
-      const p = prev
-        .catch(() => {})
-        .then(() => run(site, args))
-        .finally(() => {
-          inflight--;
-        });
-      queues[site] = p;
-      return p;
+      return enqueue(site, () => run(site, args));
+    },
+    // readList reads Copilot's chat list from its rendered sidebar (see
+    // above).
+    readList(site, count) {
+      if (site !== 'copilot') return Promise.reject(new OpError('bad_request', 'unknown site'));
+      return readList(site, count);
     },
     // close closes the tabs a finished send to conversationId left open,
     // and only those. It reports how many it closed.
