@@ -572,6 +572,22 @@ func TestInviteKindAppliedOnJoinAndAdminSetsKind(t *testing.T) {
 	}
 }
 
+// The command-woken Gemini teammate's kind is one the relay accepts, on an
+// invite and when an admin sets it.
+func TestRelayAcceptsGeminiCLIKind(t *testing.T) {
+	h := newHarness(t, Config{})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"gemini-cli","kind":"gemini-cli"}`, http.StatusOK, &inv)
+	h.do(strangerAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	if k := kinds(t, h); k["gemini-cli"] != "gemini-cli" {
+		t.Fatalf("kinds after join = %v", k)
+	}
+	h.do(macAddr, "PUT", "/v1/agents/muse/kind", `{"kind":"gemini-cli"}`, http.StatusOK, nil)
+	if k := kinds(t, h); k["muse"] != "gemini-cli" {
+		t.Fatalf("kinds after admin set = %v", k)
+	}
+}
+
 // The local admin socket can set a kind too.
 func TestLocalAdminSocketCanSetKind(t *testing.T) {
 	h := newHarness(t, Config{})

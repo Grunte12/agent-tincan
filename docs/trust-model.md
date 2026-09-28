@@ -44,7 +44,7 @@ The `history` agent reads the owner's own conversations in ChatGPT, claude.ai, G
 - Live reads go through the Tincan Chrome extension with the owner's existing session. The extension runs only its own fixed operations and accepts nothing else; no cookie or token leaves the browser, and Chrome is never quit or restarted.
 - Images it returns are relay attachments and follow the retention above.
 
-By default any joined agent can read the owner's chat history. If some of your agents should not, write the allowlist file and keep it to agents you would trust with your history. Remember that an allowed agent that reads untrusted content can still be talked into asking. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on the owner's machine (for example the Codex wake, which looks up prior threads with `tincan history codex`) can read local Codex and Claude Code history directly, consistent with the full trust between joined agents.
+By default any joined agent can read the owner's chat history. If some of your agents should not, write the allowlist file and keep it to agents you would trust with your history. Remember that an allowed agent that reads untrusted content can still be talked into asking. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on the owner's machine (for example the Codex wake, which looks up prior threads with `tincan history codex`, or a gemini-cli wake, whose engine runs shell commands with approval off) can read local Codex and Claude Code history directly, consistent with the full trust between joined agents.
 
 ## The web agents
 
@@ -61,6 +61,15 @@ The `chatgpt-web`, `claude-web`, `grok-web` and `gemini-web` agents act as the o
 - The state file keeps only which conversation each asker used last (0600), never message text.
 - Account terms: OpenAI, Anthropic and xAI prohibit automated access to their apps. The web agents act only as the owner, on the owner's own account, one request at a time at a human-paced poll cadence, with a per-site cooldown after a rate or plan limit; a site can still limit or suspend an account it believes is automated, so the owner turns each one on knowingly (grok-web's setup says so).
 - The site's answer is untrusted content: the web agents reply with it as is. An agent that acts on a web agent's answer is reading model output, with the risk described below.
+
+## Command-woken CLI agents
+
+The `codex` and `gemini-cli` teammates are coding agents that `tincan listen --exec` starts headless, with tool approval off, whenever requests are waiting. A teammate's request can therefore run commands on that machine with no one confirming them, which is the full trust between joined agents applied to a shell.
+
+- A wake starts its engine wired only to its own teammate. The gemini-cli wake (on the shared wake library, `examples/lib/tincan-wake-lib.sh`) reads its engine's MCP config before each run and refuses to run unless there is exactly one agent-tincan server, pinned to the wake's own `TINCAN_CONFIG`, and no other server the operator has not allowed. That guards against misconfiguration, not against the model: an engine with a shell can still run `tincan` with another co-located agent's `TINCAN_CONFIG` and act as that agent. Allowlists that name agents (such as the history allowlist) keep agents apart only when they run on different machines. A wake that cannot run (identity mismatch, expired login, missing API key, repeated failures) backs off, leaves requests queued, and tells the operator teammate once.
+- Writes are confined where the engine allows it. Codex runs in its `workspace-write` sandbox, and the gemini-cli wake's Gemini CLI engine in its `--sandbox` (seatbelt on macOS); both write only in their working directory and write roots the operator opened, which the wake canonicalizes and checks against allowed roots. Gemini CLI's documented default profile (`permissive-open`) also allows writes to temp and cache directories; this wake has not verified that list. Reads are unrestricted and the network is open in both.
+- Secrets in the environment reach the model. The Gemini CLI engine needs `GEMINI_API_KEY` in its environment, so a command the model runs can read the key and, with the network open, send it anywhere.
+- Antigravity (`agy`, the gemini-cli default engine) documents no sandbox. The wake runs it only when the owner sets `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes to the owner's files. See [docs/adapters/gemini-cli.md](adapters/gemini-cli.md).
 
 ## What it deliberately does not do
 

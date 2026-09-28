@@ -93,10 +93,11 @@ A5. Join this machine's own agent (you), if you are one of the team:
         tincan join <CODE> --relay http://tincan-relay
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
-    claude-code, chatgpt, hermes, openclaw, codex, history, chatgpt-web,
-    claude-web, grok-web, gemini-web, generic. (grok-web and gemini-web need
-    a relay from this release or later; on an older relay invite without
-    --kind and run tincan onboard --kind <name>=<kind>.)
+    claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, history,
+    chatgpt-web, claude-web, grok-web, gemini-web, generic. (gemini-cli,
+    grok-web and gemini-web need a relay from this release or later; on an
+    older relay invite without --kind and run
+    tincan onboard --kind <name>=<kind>.)
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
     muse, instinct, codex, claude-code, hermes). For each one:
@@ -154,6 +155,17 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Claude Code:   claude mcp add --scope user agent-tincan -- tincan mcp --channel
     - Codex:         codex mcp add agent-tincan -- tincan mcp
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
+    - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env
+                     TINCAN_CONFIG=<full path of your config>. This is the gemini-cli
+                     teammate's normal setup (a Google account, no API key). Its wake
+                     runs agy only when the listener is started with the opt-in on its
+                     command line, since agy has no sandbox and nothing limits its writes:
+                     TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=<your config> \
+                       tincan listen --exec ~/bin/gemini-wake.sh
+                     (see "Set up with a Google account (no API key)" in
+                     docs/adapters/gemini-cli.md)
+    - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
+                     (only with a paid Gemini API key)
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}

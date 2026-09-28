@@ -201,13 +201,13 @@ func TestEmptyRosterAndOffline(t *testing.T) {
 
 func TestRecipes(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL})
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "history", "generic", "second-agent", "relay-host"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "history", "generic", "second-agent", "relay-host"} {
 		r := recipe(t, k, kind)
 		if r.Title == "" || len(r.Steps) < 2 {
 			t.Errorf("recipe %s too thin: %+v", kind, r)
 		}
 	}
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "history", "generic"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "gemini-cli", "history", "generic"} {
 		r := recipe(t, k, kind)
 		all := strings.Join(r.Steps, "\n")
 		inv := strings.Index(all, "tincan invite <name> --kind "+kind)
@@ -288,6 +288,49 @@ func TestCodexSetupUsesWakeScript(t *testing.T) {
 	}
 }
 
+// gemini-cli is a command-woken fresh-session kind with two engines: its
+// block explains both, pins TINCAN_CONFIG in the MCP add step, and wakes
+// through the gemini wake script.
+func TestGeminiCLIBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "gemini-cli", Kind: KindGeminiCLI}}})
+	a := block(t, k, "gemini-cli")
+	if a.Kind != KindGeminiCLI || a.Wake != "command" {
+		t.Fatalf("block kind %q wake %q, want gemini-cli and command", a.Kind, a.Wake)
+	}
+	if !strings.Contains(a.Instructions, "drain the whole inbox") {
+		t.Errorf("gemini-cli instructions lack the fresh-session rules:\n%s", a.Instructions)
+	}
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{
+		"agy mcp add", "gemini mcp add", "TINCAN_CONFIG", "~/.config/tincan/gemini-cli.json",
+		"GEMINI_API_KEY", "TINCAN_GEMINI_ENGINE", "2026-06-18", "trust",
+		"examples/gemini-cli/gemini-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x",
+		"TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh",
+		"TINCAN_GEMINI_ALLOW_UNCONFINED", "--sandbox",
+		"TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh",
+		"Set up with a Google account (no API key)", "tincan-gemini-cli-wake/backoff", "tincan ask gemini-cli",
+		`method "command"`, "docs/adapters/gemini-cli.md",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("gemini-cli setup missing %q:\n%s", want, setup)
+		}
+	}
+	// The Google-account path (agy and its opt-in) comes before the API-key one.
+	if strings.Index(setup, "agy mcp add") > strings.Index(setup, "gemini mcp add") ||
+		strings.Index(setup, "TINCAN_GEMINI_ALLOW_UNCONFINED=1") > strings.Index(setup, "GEMINI_API_KEY") {
+		t.Errorf("gemini-cli setup does not lead with the agy path:\n%s", setup)
+	}
+	// The runtime name alone maps to the kind, and the recipe invites with it.
+	k = build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "gemini-cli"}}})
+	if b := block(t, k, "gemini-cli"); b.Kind != KindGeminiCLI {
+		t.Fatalf("runtime name gemini-cli resolved to %q", b.Kind)
+	}
+	r := recipe(t, k, KindGeminiCLI)
+	if !strings.Contains(r.Title, "Gemini") || !strings.Contains(strings.Join(r.Steps, "\n"), "tincan invite <name> --kind gemini-cli") {
+		t.Fatalf("gemini-cli recipe: %+v", r)
+	}
+}
+
 var (
 	codeShape = regexp.MustCompile(`\b[A-Z2-9]{4}-[A-Z2-9]{4}\b`)
 	secretish = regexp.MustCompile(`(?i)(https://hooks\.|agentmail_key"\s*:\s*"[^<]|sk-[a-z0-9]{8})`)
@@ -298,6 +341,7 @@ func TestRenderedOutputHygiene(t *testing.T) {
 		build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: append(matts(),
 			Member{Name: "hermes", Wake: "webhook"}, Member{Name: "openclaw", Wake: "webhook"},
 			Member{Name: "codex", Wake: "command"}, Member{Name: "chatgpt", Wake: "none"},
+			Member{Name: "gemini-cli", Wake: "command", Kind: KindGeminiCLI},
 			Member{Name: "zed", Wake: "command"}, Member{Name: "q", Wake: "none"},
 			Member{Name: "history", Wake: "wait", Kind: "history"})}),
 		build(t, Options{Offline: true}),
