@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -150,7 +151,18 @@ type onboardIn struct {
 	Section  string            `json:"section,omitempty" jsonschema:"operator, agents, recipes, or all (default all)"`
 	Operator string            `json:"operator,omitempty" jsonschema:"the agent that runs the Agent Tincan operator prompt, e.g. grokbot"`
 	Owner    string            `json:"owner,omitempty" jsonschema:"the person who owns the team, used in the generated text"`
-	Kinds    map[string]string `json:"kinds,omitempty" jsonschema:"agent name to kind (vm-webhook, e2b-email, proxy-sandbox, claude-code, chatgpt, hermes, openclaw, codex, history, generic), overriding the stored kind"`
+	Kinds    map[string]string `json:"kinds,omitempty"` // described by onboardSchema
+}
+
+// onboardSchema is onboardIn's input schema with the kinds description built
+// from onboard.Kinds, so the list a model sees never falls behind.
+func onboardSchema() *jsonschema.Schema {
+	s, err := jsonschema.For[onboardIn](nil)
+	if err != nil {
+		panic(fmt.Errorf("onboard schema: %w", err))
+	}
+	s.Properties["kinds"].Description = "agent name to kind (" + strings.Join(onboard.Kinds, ", ") + "), overriding the stored kind"
+	return s
 }
 
 type noIn struct{}
@@ -412,7 +424,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			}
 			return text(out.String())
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "onboard", Description: "Get the Agent Tincan setup kit as JSON: the operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents or hosting the relay. Read-only."},
+	mcp.AddTool(s, &mcp.Tool{Name: "onboard", Description: "Get the Agent Tincan setup kit as JSON: the operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents or hosting the relay. Read-only.", InputSchema: onboardSchema()},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in onboardIn) (*mcp.CallToolResult, any, error) {
 			o := onboard.Options{Owner: in.Owner, Operator: in.Operator, KindOverrides: in.Kinds}
 			if based, ok := b.(interface{ Base() string }); ok {

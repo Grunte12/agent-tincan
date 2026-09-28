@@ -59,6 +59,36 @@ func call(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any)
 	return b.String()
 }
 
+// The onboard tool's kinds argument lists every kind onboarding knows, so a
+// new kind never needs a second hand-kept list.
+func TestOnboardToolListsEveryKind(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	res, err := session(t, m, "grokbot").ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "onboard" {
+			continue
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		raw, _ := json.Marshal(tool.InputSchema)
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		desc := schema.Properties["kinds"].Description
+		if want := strings.Join(onboard.Kinds, ", "); !strings.Contains(desc, want) {
+			t.Fatalf("kinds description %q lacks %q", desc, want)
+		}
+		return
+	}
+	t.Fatal("no onboard tool")
+}
+
 func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	res, err := session(t, m, "grokbot").ListTools(t.Context(), nil)
