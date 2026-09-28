@@ -97,11 +97,29 @@ func rateLimitBackoff(n int) time.Duration {
 	return min(d, RateLimitBackoffMax)
 }
 
+// stableRule is the site's text-stability rule with the agent's
+// overrides, or nil when the site has none.
+func (w *WebAgent) stableRule() *stableRule {
+	site := w.site().stable
+	if site == nil {
+		return nil
+	}
+	r := *site
+	if w.ClaudeStablePolls > 0 {
+		r.polls = w.ClaudeStablePolls
+	}
+	if w.ClaudeStableFor > 0 {
+		r.span = w.ClaudeStableFor
+	}
+	return &r
+}
+
 // waitReply reads the conversation on the poll schedule until the reply
 // to this request's message is finished, and returns that read and the id
-// of this request's user message. A claude.ai reply without a stop_reason
-// counts as finished once the same reply is read on ClaudeStablePolls
-// consecutive polls spanning at least ClaudeStableFor. onBind, when set,
+// of this request's user message. On a site with a text-stability rule
+// (claude.ai), a reply without a stop_reason counts as finished once the
+// same reply is read on the rule's number of consecutive polls spanning
+// at least its time (see stableRule). onBind, when set,
 // is called once with the user message id when it is first seen. Errors
 // that will not clear (logged out, the API changed, the extension gone)
 // end the wait at once, as does a later user turn with no reply to this
@@ -116,14 +134,7 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 	if dl, ok := ctx.Deadline(); ok {
 		budgetEnd = clock.Now().Add(time.Until(dl))
 	}
-	stablePolls := w.ClaudeStablePolls
-	if stablePolls <= 0 {
-		stablePolls = DefaultClaudeStablePolls
-	}
-	stableFor := w.ClaudeStableFor
-	if stableFor <= 0 {
-		stableFor = DefaultClaudeStableFor
-	}
+	stable := w.stableRule()
 	op := w.live().detailOp
 	prev, seen := "", 0
 	var first time.Time
@@ -163,11 +174,11 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 				return raw, a.bound, nil
 			}
 			switch {
-			case !p.found || w.Site != SourceClaudeAI:
+			case !p.found || stable == nil:
 				prev, seen = "", 0
 			case p.sig == prev:
 				seen++
-				if seen >= stablePolls && clock.Now().Sub(first) >= stableFor {
+				if seen >= stable.polls && clock.Now().Sub(first) >= stable.span {
 					return raw, a.bound, nil
 				}
 			default:

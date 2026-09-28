@@ -11,11 +11,11 @@ import (
 // MaxUnseenReplies bounds how many unseen replies one call returns.
 const MaxUnseenReplies = 50
 
-// replyStatuses are the terminal statuses a reply sets; only these requests
-// carry a reply the asker can see.
-var replyStatuses = []any{string(envelope.StatusAnswered), string(envelope.StatusFailed), string(envelope.StatusDeclined)}
+// replyStatuses are the states that carry a reply the asker can see,
+// including an interim clarification question.
+var replyStatuses = []any{string(envelope.StatusAnswered), string(envelope.StatusFailed), string(envelope.StatusDeclined), string(envelope.StatusNeedsInput)}
 
-const replyStatusIn = `status IN (?, ?, ?)`
+const replyStatusIn = `status IN (?, ?, ?, ?)`
 
 // migrateReplySeen adds reply_seen_at to a requests table created before
 // replies were tracked as seen by the asker. Replies already stored are
@@ -57,8 +57,8 @@ const ParentPreviewChars = 1000
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(args, MaxUnseenReplies)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments,
-		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), COALESCE(substr(par.body, 1, ?), ''), COALESCE(par.status, '')
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments, q.reply_generation,
+		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), CASE WHEN par.was_held = 1 AND par.approved = 0 AND par.from_agent != q.from_agent THEN 'waiting for the owner''s approval' ELSE COALESCE(substr(par.body, 1, ?), '') END, COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
 		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
 		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+`
@@ -74,7 +74,7 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 		var repCreated int64
 		var par envelope.Parent
 		var parStatus, repAtts string
-		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &repAtts, &par.ID, &par.From, &par.Body, &parStatus}})
+		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &repAtts, &rep.Generation, &par.ID, &par.From, &par.Body, &parStatus}})
 		if err != nil {
 			return nil, err
 		}
@@ -82,7 +82,7 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 			return nil, err
 		}
 		rep.RequestID, rep.Status, rep.CreatedAt = req.ID, envelope.Status(repStatus), time.UnixMilli(repCreated).UTC()
-		res := envelope.Result{Request: req, Status: st, Reply: &rep}
+		res := envelope.Result{Request: req, Status: st, Reply: &rep, Exchanges: req.Exchanges}
 		if par.ID != "" {
 			par.Status = envelope.Status(parStatus)
 			res.Parent = &par
@@ -122,8 +122,15 @@ func (s *Store) AgentsWithUnseenReplies(ctx context.Context) ([]string, error) {
 }
 
 // MarkRepliesSeen records that agent has seen the replies to the requests in
-// ids. Ids agent did not send, or that have no reply yet, are left alone.
-func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string) error {
+// ids, or to the matching generations in acks. Ids agent did not send,
+// or that have no reply yet, are left alone.
+func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string, acks ...envelope.ReplyAck) error {
+	for _, ack := range acks {
+		_, err := s.db.ExecContext(ctx, `UPDATE requests SET reply_seen_at = ? WHERE from_agent = ? AND id = ? AND reply_generation = ? AND reply_seen_at = 0 AND `+replyStatusIn, append([]any{s.now().UnixMilli(), agent, ack.ID, ack.Generation}, replyStatuses...)...)
+		if err != nil {
+			return err
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}

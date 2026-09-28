@@ -40,7 +40,7 @@ func TestWaitRetriesTransientErrors(t *testing.T) {
 	r, _ := client.NewRelay(ts.URL, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	in, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
+	in, _, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
 	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "r1" {
 		t.Fatalf("wait = %+v, %v after %d calls", in, err, calls.Load())
 	}
@@ -52,7 +52,7 @@ func TestWaitStopsWhenNotJoined(t *testing.T) {
 	}))
 	defer ts.Close()
 	r, _ := client.NewRelay(ts.URL, "")
-	if _, err := waitForInbox(context.Background(), r, 0, client.RepliesKeep); !client.IsStatus(err, http.StatusForbidden) {
+	if _, _, err := waitForInbox(context.Background(), r, 0, client.RepliesKeep); !client.IsStatus(err, http.StatusForbidden) {
 		t.Fatalf("want 403, got %v", err)
 	}
 }
@@ -63,7 +63,7 @@ func TestListenRunsCommandWithoutTakingRequests(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "nudged")
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		m.Client(t, "grokbot").Send(context.Background(), "muse", "call Joe's Garage", envelope.KindAsk, "")
+		m.Client(t, "grokbot").Send(context.Background(), "muse", "call Joe's Garage", envelope.KindAsk, "", false)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -105,7 +105,7 @@ func TestChannelAnnouncesRequestWithoutClaiming(t *testing.T) {
 	defer cs.Close()
 	startWaiting(t, m.Client(t, "muse"), ch)
 	inst := m.Client(t, "instinct")
-	sent, _ := inst.Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	sent, _ := inst.Send(ctx, "muse", "call the dentist", envelope.KindAsk, "", false)
 	select {
 	case params := <-got:
 		for _, want := range []string{"1 Agent Tincan item waiting from instinct", "check_inbox", `"from":"instinct"`, `"count":"1"`, sent.ID} {
@@ -197,7 +197,7 @@ func TestChannelDoesNotRepushSamePending(t *testing.T) {
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	first, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	first, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "", false)
 	p := newRecordPusher()
 	startWaiting(t, m.Client(t, "muse"), p)
 	if got := waitPushes(t, p, 1); len(got) != 1 || got[0]["request_ids"] != first.ID {
@@ -207,7 +207,7 @@ func TestChannelDoesNotRepushSamePending(t *testing.T) {
 	if got := p.pushes(); len(got) != 1 {
 		t.Fatalf("same pending set pushed again: %v", got)
 	}
-	second, _ := m.Client(t, "grokbot").Send(ctx, "muse", "book a table", envelope.KindAsk, "")
+	second, _ := m.Client(t, "grokbot").Send(ctx, "muse", "book a table", envelope.KindAsk, "", false)
 	got := waitPushes(t, p, 2)
 	if len(got) != 2 || got[1]["count"] != "2" || got[1]["request_ids"] != first.ID+","+second.ID || got[1]["from"] != "instinct,grokbot" {
 		t.Fatalf("pushes after a new request = %v", got)
@@ -225,7 +225,7 @@ func TestChannelReannouncesAfterQuietPeriod(t *testing.T) {
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	sent, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	sent, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "", false)
 	p := newRecordPusher()
 	startWaiting(t, m.Client(t, "muse"), p)
 	got := waitPushes(t, p, 2)
