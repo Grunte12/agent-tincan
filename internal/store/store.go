@@ -723,10 +723,21 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 
 // PendingRequests names up to limit of agent's queued requests, urgent
 // first and then oldest, without delivering them or reading their bodies.
+// Queued pings come first and have their own limit, so a backlog of other
+// requests never hides a ping from a peek-based responder.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
+	out, err := s.pendingRequests(ctx, agent, "kind = ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	rest, err := s.pendingRequests(ctx, agent, "kind != ?", limit)
+	return append(out, rest...), err
+}
+
+func (s *Store) pendingRequests(ctx context.Context, agent, kindCond string, limit int) ([]envelope.Pending, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
-		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
-		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
+		WHERE to_agent = ? AND status = ? AND expires_at > ? AND `+kindCond+` ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli(), string(envelope.KindPing), limit)
 	if err != nil {
 		return nil, err
 	}

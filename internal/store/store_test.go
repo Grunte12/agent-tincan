@@ -860,3 +860,24 @@ func TestQueueStatsUsesStatusIndex(t *testing.T) {
 		t.Fatalf("plan does not use requests_status_to:\n%s", strings.Join(plan, "\n"))
 	}
 }
+
+func TestPendingRequestsListsPingsBeyondCap(t *testing.T) {
+	s, c := open(t, ":memory:")
+	var asks []envelope.Request
+	for range 3 {
+		asks = append(asks, ask(t, s, "a", "b", "work"))
+		c.advance(time.Second)
+	}
+	ping, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Kind: envelope.KindPing, Hop: 1, Chain: []string{}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingRequests(t.Context(), "b", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 3 || pending[0].ID != ping.ID || pending[0].Kind != envelope.KindPing ||
+		pending[1].ID != asks[0].ID || pending[2].ID != asks[1].ID {
+		t.Fatalf("pending = %+v", pending)
+	}
+}
