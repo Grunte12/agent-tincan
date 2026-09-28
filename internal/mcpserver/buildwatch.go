@@ -70,7 +70,17 @@ type BuildWatch struct {
 	disk     string      // version of the file at stamp; "" until one is read
 	reading  bool        // a version read is running outside mu
 	told     map[string]bool
+
+	// A file whose version read failed is retried after retryAt, backing
+	// off with each failure.
+	failed   os.FileInfo
+	failures int
+	retryAt  time.Time
 }
+
+// maxRetryWait caps the backoff between version reads of a file that
+// failed to report one.
+const maxRetryWait = time.Hour
 
 func stampOf(path string) os.FileInfo {
 	fi, err := os.Stat(path)
@@ -136,19 +146,28 @@ func (w *BuildWatch) Notice(ctx context.Context, kind string) string {
 		return ""
 	}
 	if !sameFile(st, w.stamp) {
-		// Run the new file without holding mu, so other tool calls go on
-		// meanwhile; they skip the look while this read runs.
-		w.reading = true
-		w.mu.Unlock()
-		v, err := w.ReadVersion(ctx, w.path)
-		w.mu.Lock()
-		w.reading = false
-		// Either way this file has been looked at: a build that cannot
-		// report its version is not run again until it is replaced.
-		w.stamp = st
-		if err != nil {
+		if sameFile(st, w.failed) && now.Before(w.retryAt) {
 			return ""
 		}
+		// Run the new file without holding mu, so other tool calls go on
+		// meanwhile; they skip the look while this read runs. The read
+		// outlives a cancelled tool call, so a cancel is not a failure.
+		w.reading = true
+		w.mu.Unlock()
+		v, err := w.ReadVersion(context.WithoutCancel(ctx), w.path)
+		w.mu.Lock()
+		w.reading = false
+		if err != nil {
+			// Try this file again later, backing off so a build that
+			// cannot report its version does not slow every look.
+			if !sameFile(st, w.failed) {
+				w.failed, w.failures = st, 0
+			}
+			w.failures++
+			w.retryAt = now.Add(min(w.Every<<min(w.failures-1, 10), maxRetryWait))
+			return ""
+		}
+		w.stamp, w.failed, w.failures = st, nil, 0
 		w.disk = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	}
 	running := strings.TrimPrefix(w.running, "v")

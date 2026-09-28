@@ -212,24 +212,57 @@ func TestReplacementWithSameStampIsSeen(t *testing.T) {
 	}
 }
 
-// A build that cannot report its version is run once, not on every look.
-func TestFailedVersionReadNotRepeated(t *testing.T) {
+// A build that fails to report its version is tried again, backing off,
+// so the notice still comes once it answers.
+func TestFailedVersionReadRetriedWithBackoff(t *testing.T) {
 	b := newFakeBinary(t, "0.6.0")
 	w := b.watch("0.6.0")
+	var fail atomic.Bool
+	fail.Store(true)
 	w.ReadVersion = func(context.Context, string) (string, error) {
 		b.execs.Add(1)
-		return "", context.DeadlineExceeded
+		if fail.Load() {
+			return "", context.DeadlineExceeded
+		}
+		return "0.7.0", nil
 	}
 	w.Notice(t.Context(), mcpserver.HostGeneric)
 	b.replace(t, "0.7.0")
-	for range 3 {
+	for range 6 {
 		b.advance(2 * time.Minute)
 		if n := w.Notice(t.Context(), mcpserver.HostGeneric); n != "" {
 			t.Fatalf("notice without a version: %q", n)
 		}
 	}
-	if n := b.execs.Load(); n != 1 {
-		t.Fatalf("ran the binary %d times, want 1", n)
+	// Looks every 2 minutes with a backoff of 1, 2, 4 and 8 minutes read
+	// at 2, 4, 6 and 10 minutes, skipping 8 and 12.
+	if n := b.execs.Load(); n != 4 {
+		t.Fatalf("ran the binary %d times in 6 looks, want 4", n)
+	}
+	fail.Store(false)
+	b.advance(time.Hour)
+	if n := w.Notice(t.Context(), mcpserver.HostGeneric); !strings.Contains(n, "tincan 0.7.0") {
+		t.Fatalf("no notice once the build answers: %q", n)
+	}
+}
+
+// A tool call cancelled during the read does not cancel the read.
+func TestCancelledCallStillReadsVersion(t *testing.T) {
+	b := newFakeBinary(t, "0.6.0")
+	w := b.watch("0.6.0")
+	w.ReadVersion = func(ctx context.Context, _ string) (string, error) {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "0.7.0", nil
+	}
+	w.Notice(t.Context(), mcpserver.HostGeneric)
+	b.replace(t, "0.7.0")
+	b.advance(2 * time.Minute)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if n := w.Notice(ctx, mcpserver.HostGeneric); !strings.Contains(n, "tincan 0.7.0") {
+		t.Fatalf("cancelled call lost the read: %q", n)
 	}
 }
 
