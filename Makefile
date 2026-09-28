@@ -18,11 +18,15 @@
 #                       notary service and wait for the verdict
 #   make release-mac  - dist + sign-mac + notarize-mac, checksums regenerated
 #                       after signing
+#   make release VERSION=x.y.z NOTES=<file> - the whole release: checks, local
+#                       tag, dist, sign, notarize, verified checksums, store
+#                       zip, then push the tag, the GitHub release and the
+#                       Chrome Web Store upload. DRY_RUN=1 prints the steps.
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -X main.Version=$(VERSION)
 
-.PHONY: build test vet lint spike extension extension-test store dist checksums sign-mac notarize-mac release-mac
+.PHONY: build test vet lint spike extension extension-test store dist checksums sign-mac notarize-mac release-mac release
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o tincan ./cmd/tincan
@@ -123,3 +127,66 @@ notarize-mac:
 release-mac: dist sign-mac notarize-mac
 	$(MAKE) checksums
 	cd dist && shasum -a 256 -c checksums.txt
+
+# make release VERSION=x.y.z NOTES=<file> runs the whole release from a clean
+# checkout of the remote's main. Nothing public happens until every asset is
+# built, signed, notarized and verified: the tag is created locally first
+# (and deleted again if a later step fails before the push), then pushed,
+# then the GitHub release and the Chrome Web Store upload follow. The store
+# upload is skipped, not failed, when extension/manifest.json is not newer
+# than the store's version. DRY_RUN=1 runs the read-only checks, reports any
+# that would stop the release, and prints every step without running it.
+#
+#   RELEASE_REMOTE  where the tag goes and main is compared (default origin;
+#                   a URL works)
+#   RELEASE_BRANCH  HEAD must equal this branch on RELEASE_REMOTE (default
+#                   main; empty skips the check)
+#   RELEASE_REPO    the GitHub repo for gh release create
+#   SIGN=0          skip sign-mac and notarize-mac (no Mac certificate)
+#   CWS=0           skip the Chrome Web Store upload
+#   RELEASE_TINCAN  how to run the release tools (default go run ./cmd/tincan)
+RELEASE_REMOTE ?= origin
+RELEASE_BRANCH ?= main
+RELEASE_REPO ?= mvanhorn/agent-tincan
+RELEASE_TINCAN ?= go run ./cmd/tincan
+RELEASE_ASSETS := dist/checksums.txt dist/tincan-history-extension.zip dist/tincan_darwin_amd64 dist/tincan_darwin_arm64 dist/tincan_linux_amd64 dist/tincan_linux_arm64
+SIGN ?= 1
+CWS ?= 1
+DRY_RUN ?=
+
+release:
+	@set -e; \
+	dry='$(filter-out 0,$(DRY_RUN))'; \
+	if [ "$(origin VERSION)" != "command line" ]; then echo "make release: VERSION=x.y.z is required" >&2; exit 1; fi; \
+	v='$(VERSION)'; \
+	echo "$$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$' || { echo "make release: VERSION must be x.y.z or x.y.z-pre, without a leading v (got $$v)" >&2; exit 1; }; \
+	tag="v$$v"; \
+	fail() { if [ -n "$$dry" ]; then echo "make release: dry run, the release would stop here: $$*" >&2; else echo "make release: $$*" >&2; exit 1; fi; }; \
+	run() { echo "+ $$*"; if [ -z "$$dry" ]; then "$$@"; fi; }; \
+	[ -n "$(NOTES)" ] || fail "NOTES=<file> is required (the release notes)"; \
+	[ -z "$(NOTES)" ] || [ -f "$(NOTES)" ] || fail "notes file $(NOTES) does not exist"; \
+	[ -z "$$(git status --porcelain)" ] || fail "the working tree is not clean"; \
+	if [ -n "$(RELEASE_BRANCH)" ]; then \
+		remote_head=$$(git ls-remote "$(RELEASE_REMOTE)" "refs/heads/$(RELEASE_BRANCH)" | cut -f1); \
+		[ "$$(git rev-parse HEAD)" = "$$remote_head" ] || fail "HEAD is not $(RELEASE_BRANCH) on $(RELEASE_REMOTE) ($${remote_head:-unreadable}); check it out, or set RELEASE_BRANCH= to release this commit"; \
+	fi; \
+	if git rev-parse -q --verify "refs/tags/$$tag" >/dev/null; then fail "tag $$tag already exists locally"; fi; \
+	remote_tag=$$(git ls-remote --tags "$(RELEASE_REMOTE)" "refs/tags/$$tag") || fail "cannot read the tags on $(RELEASE_REMOTE)"; \
+	[ -z "$$remote_tag" ] || fail "tag $$tag already exists on $(RELEASE_REMOTE)"; \
+	if [ -z "$$dry" ]; then command -v gh >/dev/null || fail "gh is not on PATH"; fi; \
+	pre=; case "$$v" in *-*) pre=--prerelease;; esac; \
+	pushed=; \
+	cleanup() { if [ -z "$$dry" ] && [ -z "$$pushed" ] && git rev-parse -q --verify "refs/tags/$$tag" >/dev/null; then echo "make release: stopped before the tag was pushed; deleting the local tag $$tag" >&2; git tag -d "$$tag" >/dev/null; fi; }; \
+	trap cleanup EXIT; \
+	run git tag -a "$$tag" -m "$$tag"; \
+	run $(MAKE) dist VERSION=$$v; \
+	if [ "$(SIGN)" != 0 ]; then run $(MAKE) sign-mac notarize-mac VERSION=$$v; fi; \
+	run $(MAKE) checksums; \
+	run sh -c 'cd dist && shasum -a 256 -c checksums.txt'; \
+	run $(MAKE) store; \
+	if [ "$(CWS)" != 0 ]; then run $(RELEASE_TINCAN) release-tools cws-upload --dry-run $(STORE_ZIP); fi; \
+	run git push "$(RELEASE_REMOTE)" "refs/tags/$$tag"; \
+	pushed=1; \
+	run gh release create "$$tag" --repo "$(RELEASE_REPO)" --verify-tag --title "$$tag" --notes-file "$(NOTES)" $$pre $(RELEASE_ASSETS); \
+	if [ "$(CWS)" != 0 ]; then run $(RELEASE_TINCAN) release-tools cws-upload --publish $(STORE_ZIP); fi; \
+	if [ -n "$$dry" ]; then echo "make release: dry run; nothing was run"; else echo "make release: released $$tag"; fi
