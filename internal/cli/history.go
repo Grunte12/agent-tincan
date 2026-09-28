@@ -47,13 +47,13 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <chatgpt|claude-ai|grok|codex|claude-code>",
-		Short: "Read the owner's ChatGPT, claude.ai, Grok, Codex or Claude Code history",
-		Long: "Read the owner's ChatGPT, claude.ai, Grok, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web, claude-web and grok-web agents sent into) are left out unless --all is given.\n" +
-			"chatgpt, claude-ai and grok are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
+		Use:   "history <chatgpt|claude-ai|grok|gemini|codex|claude-code>",
+		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex or Claude Code history",
+		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web, claude-web, grok-web and gemini-web agents sent into) are left out unless --all is given.\n" +
+			"chatgpt, claude-ai, grok and gemini are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
 			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
-			"(ChatGPT, claude.ai and Grok read at most 100). When that window cut the answer short, a note says so on stderr.",
+			"(ChatGPT, claude.ai, Grok and Gemini read at most 100). When that window cut the answer short, a note says so on stderr.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modes := 0
@@ -271,7 +271,7 @@ func historyServeCmd() *cobra.Command {
 			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query,\n" +
 			"     unless the request is already one (a \"query:\" first line and JSON), which is checked in Go and never reaches a model;\n" +
-			"  3. the matching source is read (ChatGPT and claude.ai through the Tincan Chrome extension);\n" +
+			"  3. the matching source is read (ChatGPT, claude.ai and Gemini through the Tincan Chrome extension);\n" +
 			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
 			"Retrieved chat content is never sent to an LLM. The allowlist file is reread for every request.\n" +
 			"The owner's window file ({\"days\": N, \"max\": N}) sets how far back lookups go and is also reread for every request;\n" +

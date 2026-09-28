@@ -9,7 +9,7 @@ import (
 // a fixed per-site config path matching tincan web install's service, and
 // setup that says they act as the owner in the site.
 func TestWebAgentKinds(t *testing.T) {
-	for kind, site := range map[string]string{KindChatGPTWeb: "chatgpt", KindClaudeWeb: "claude-ai", KindGrokWeb: "grok"} {
+	for kind, site := range map[string]string{KindChatGPTWeb: "chatgpt", KindClaudeWeb: "claude-ai", KindGrokWeb: "grok", KindGeminiWeb: "gemini"} {
 		k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: kind, Wake: "wait"}}})
 		a := block(t, k, kind)
 		if a.Kind != kind || a.Wake != "wait" {
@@ -46,7 +46,7 @@ func TestWebAgentKinds(t *testing.T) {
 			t.Errorf("%s recipe has no title", kind)
 		}
 	}
-	if !KnownKind(KindChatGPTWeb) || !KnownKind(KindClaudeWeb) || !KnownKind(KindGrokWeb) {
+	if !KnownKind(KindChatGPTWeb) || !KnownKind(KindClaudeWeb) || !KnownKind(KindGrokWeb) || !KnownKind(KindGeminiWeb) {
 		t.Fatal("web kinds not known to the relay's kind check")
 	}
 }
@@ -82,5 +82,38 @@ func TestGrokWebSetup(t *testing.T) {
 	other := strings.Join(block(t, k, "chatgpt-web").Setup, "\n")
 	if strings.Contains(other, "Grant for") || strings.Contains(other, "xAI") {
 		t.Errorf("chatgpt-web setup carries grok steps:\n%s", other)
+	}
+}
+
+// gemini-web's setup carries what is particular to Gemini: the Google
+// account risk, granting the site on the extension's options page, and the
+// reach into connected Google apps that makes an allowlist advisable.
+func TestGeminiWebSetup(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "gemini-web", Wake: "wait"}}})
+	a := block(t, k, KindGeminiWeb)
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{
+		"gemini.google.com",
+		"options page",
+		"Gmail, Drive and Calendar",
+		"gemini-web-allow.txt",
+		"Google's terms",
+		"whole Google account",
+		"com.agenttincan.web.gemini.plist",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("gemini-web setup missing %q:\n%s", want, setup)
+		}
+	}
+	if !strings.Contains(a.Instructions, "Gemini (gemini.google.com)") {
+		t.Errorf("instructions: %s", a.Instructions)
+	}
+	if r := recipe(t, k, KindGeminiWeb); !strings.Contains(r.Title, "Gemini") {
+		t.Errorf("title %q", r.Title)
+	}
+	// The other web agents' setup does not carry Gemini's notes.
+	c := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "claude-web", Wake: "wait"}}}), KindClaudeWeb)
+	if strings.Contains(strings.Join(c.Setup, "\n"), "Gmail") {
+		t.Error("claude-web setup carries the Gemini data note")
 	}
 }

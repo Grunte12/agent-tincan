@@ -19,6 +19,18 @@
 // ChatGPT's access token is read from /api/auth/session inside this worker
 // and used only for the Authorization header of the next requests. It is
 // never returned, logged or stored.
+//
+// Gemini has no JSON API of its own: the worker fetches the app page
+// (/app) for its per-session values (SNlM0e, cfb2h, FdrFJe), keeps them in
+// memory for a few minutes, and calls the app's batchexecute endpoint with
+// two fixed rpcids, MaZiqc (list, a page at a time) and hNvQHb (read one
+// conversation). The decoded inner payloads go back as data; the Go side
+// reads their positions. Gemini conversation ids travel as the URL's hex;
+// the "c_" batchexecute wants is added here only. Images are fetched by
+// gemini.file, which never takes a URL: it reads the conversation again
+// and picks the image by response and position (see geminiImageURL), then
+// asks the sender to capture it in the tab its send left open, and falls
+// back to fetching it here.
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
@@ -30,6 +42,14 @@ export const CHUNK_BYTES = 384 * 1024;
 export const MAX_MESSAGE_BYTES = 32 * 1024;
 // EXTENSION_FILES are the files the hello message reports hashes of, so the
 // native host can tell when the unpacked files on disk have changed.
+// Gemini: list page size, the most pages one list reads, and how long
+// the app page's session values are reused before it is fetched again.
+export const GEMINI_PAGE_SIZE = 13;
+export const GEMINI_MAX_PAGES = 10;
+export const GEMINI_SESSION_MS = 10 * 60 * 1000;
+// GEMINI_IMAGE_PREFIX is where Gemini's images are served from; an image
+// URL anywhere else is never fetched.
+export const GEMINI_IMAGE_PREFIX = 'https://lh3.googleusercontent.com/';
 export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js', 'options.html', 'options.js', 'icon16.png', 'icon48.png', 'icon128.png']);
 
 // SITE_ACCESS is each site's host access, keyed by its op prefix: origins
@@ -48,6 +68,7 @@ export const SITE_ACCESS = Object.freeze({
   chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), pageOrigins: Object.freeze(['https://chatgpt.com/*']), required: true }),
   claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
   grok: Object.freeze({ label: 'Grok', origins: Object.freeze(['https://grok.com/*', 'https://assets.grok.com/*']), pageOrigins: Object.freeze(['https://grok.com/*']), required: false }),
+  gemini: Object.freeze({ label: 'Gemini', origins: Object.freeze(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']), pageOrigins: Object.freeze(['https://gemini.google.com/*']), required: false }),
 });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
@@ -90,6 +111,9 @@ const GROK_ASSETS = 'https://assets.grok.com/';
 export const GROK_MAX_PAGES = 5;
 // A grok.file id is <response id>_<index in generatedImageUrls>.
 const GROK_FILE_RE = /^([A-Za-z0-9][A-Za-z0-9-]{0,99})_(0|[1-9][0-9]?)$/;
+const GEMINI = 'https://gemini.google.com';
+// GEMINI_ID_RE is a Gemini conversation id as its URL shows it.
+const GEMINI_ID_RE = /^[0-9a-f]{8,64}$/;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -112,6 +136,11 @@ const SPEC = Object.freeze({
   'chatgpt.close': CLOSE_SPEC,
   'claudeai.close': CLOSE_SPEC,
   'grok.close': CLOSE_SPEC,
+  'gemini.list': Object.freeze({ count: 'count' }),
+  'gemini.detail': Object.freeze({ id: 'id' }),
+  'gemini.file': Object.freeze({ file_id: 'id', conversation_id: 'id' }),
+  'gemini.send': SEND_SPEC,
+  'gemini.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -122,7 +151,9 @@ export const MAX_RETRY_AFTER_S = 3600;
 
 export class OpError extends Error {
   // retryAfter, for rate_limited, is the site's Retry-After in whole
-  // seconds when it sent one.
+  // seconds when it sent one. clicked, set by a send, means the send
+  // button had been clicked before the failure, so the message may have
+  // been sent.
   constructor(code, message, retryAfter) {
     super(message);
     this.code = code;
@@ -131,13 +162,15 @@ export class OpError extends Error {
 }
 
 // errorFrame is the failure frame for an error thrown by an operation:
-// its code and message (retry_after too for a rate limit), or a bare
+// its code and message (retry_after too for a rate limit, clicked for a
+// send that failed after its click), or a bare
 // internal error for anything that is not an OpError, so no unexpected
 // detail leaves the extension.
 export function errorFrame(e) {
   if (!(e instanceof OpError)) return { ok: false, error: { code: 'internal', message: 'internal error' } };
   const error = { code: e.code, message: e.message };
   if (e.retryAfter !== undefined) error.retry_after = e.retryAfter;
+  if (e.clicked === true) error.clicked = true;
   return { ok: false, error };
 }
 
@@ -340,6 +373,114 @@ async function check(res, url, notFound, sniffMs = BODY_TEXT_MS) {
   throw new OpError('http_error', where);
 }
 
+// geminiId checks a Gemini conversation id (the URL's hex).
+function geminiId(id) {
+  if (typeof id !== 'string' || !GEMINI_ID_RE.test(id)) throw bad('invalid Gemini conversation id');
+  return id;
+}
+
+// GEMINI_NOT_FOUND is the error code batchexecute puts in place of an
+// hNvQHb payload when the conversation is missing or deleted (live, with
+// a BardErrorInfo detail): ["wrb.fr","hNvQHb",null,null,null,[5,...]].
+const GEMINI_NOT_FOUND = 5;
+
+// parseBatchexecute reads a batchexecute answer: a ")]}'" guard, then
+// length-prefixed chunks, one of which holds [["wrb.fr", rpcid,
+// "<inner JSON>", ...]], and returns the decoded inner payload. When the
+// site answered with no payload it puts an error code at [5][0] instead
+// (3 for a payload it could not take): code 5 on hNvQHb is not_found, and
+// anything else (another code, no code, no answer for the rpcid) is
+// endpoint_changed. A null payload is never an answer.
+export function parseBatchexecute(text, rpcid) {
+  if (typeof text !== 'string') throw new OpError('endpoint_changed', `no ${rpcid} answer`);
+  const body = text.replace(/^\)\]\}'\s*/, '');
+  for (const line of body.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('[')) continue;
+    let v;
+    try {
+      v = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(v)) continue;
+    for (const e of v) {
+      if (!Array.isArray(e) || e[0] !== 'wrb.fr' || e[1] !== rpcid) continue;
+      if (e[2] === null || e[2] === undefined) {
+        const code = Array.isArray(e[5]) && Number.isInteger(e[5][0]) ? e[5][0] : null;
+        if (code === GEMINI_NOT_FOUND && rpcid === 'hNvQHb') throw new OpError('not_found', 'conversation not found');
+        throw new OpError('endpoint_changed', code === null ? `no ${rpcid} payload` : `${rpcid} error ${code}`);
+      }
+      if (typeof e[2] !== 'string') throw new OpError('endpoint_changed', `unexpected ${rpcid} answer`);
+      try {
+        return JSON.parse(e[2]);
+      } catch {
+        throw new OpError('endpoint_changed', `malformed ${rpcid} payload`);
+      }
+    }
+  }
+  throw new OpError('endpoint_changed', `no ${rpcid} answer`);
+}
+
+// geminiImageURLs lists a response candidate's image URLs the way the Go
+// side counts them: every string in its arrays, outside its text at
+// position 1, that starts with GEMINI_IMAGE_PREFIX, first occurrence
+// first, depth first.
+export function geminiImageURLs(cand) {
+  const out = [];
+  const walk = (v) => {
+    if (typeof v === 'string') {
+      if (v.startsWith(GEMINI_IMAGE_PREFIX) && !out.includes(v)) out.push(v);
+    } else if (Array.isArray(v)) {
+      for (const e of v) walk(e);
+    }
+  };
+  if (Array.isArray(cand)) cand.forEach((e, i) => i !== 1 && walk(e));
+  return out;
+}
+
+// geminiImageURL finds image n of response candidate rc in an hNvQHb
+// payload (turns at [0], each turn's candidates at [3][0], a candidate's
+// id at [0]), and returns it only when it is a plain https URL on the
+// image host. Anything else is null.
+export function geminiImageURL(inner, rc, n) {
+  const turns = Array.isArray(inner) && Array.isArray(inner[0]) ? inner[0] : [];
+  for (const t of turns) {
+    const cands = Array.isArray(t) && Array.isArray(t[3]) && Array.isArray(t[3][0]) ? t[3][0] : [];
+    for (const c of cands) {
+      if (!Array.isArray(c) || c[0] !== rc) continue;
+      const raw = geminiImageURLs(c)[n];
+      if (!raw) return null;
+      let u;
+      try {
+        u = new URL(raw);
+      } catch {
+        return null;
+      }
+      if (u.protocol !== 'https:' || u.hostname !== 'lh3.googleusercontent.com' || u.username || u.password || u.port) return null;
+      return u.href;
+    }
+  }
+  return null;
+}
+
+// decodeImage checks a captured image (base64 from a page) and returns its
+// bytes, or null.
+export function decodeImage(r) {
+  if (!r || r.ok !== true || typeof r.mime !== 'string' || !r.mime.startsWith('image/') || typeof r.data !== 'string') return null;
+  if (r.data.length > Math.ceil(MAX_FILE_BYTES / 3) * 4 + 4) return null;
+  let bin;
+  try {
+    bin = atob(r.data);
+  } catch {
+    return null;
+  }
+  if (bin.length === 0 || bin.length > MAX_FILE_BYTES) return null;
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return { bytes, mime: r.mime.split(';')[0].trim().toLowerCase() };
+}
+
 function b64(bytes) {
   let s = '';
   for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -358,6 +499,9 @@ function b64(bytes) {
 // (BODY_TEXT_MS unless a test shortens it).
 export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS }) {
   let claudeOrg = null;
+  let geminiSession = null;
+  // geminiReq is batchexecute's _reqid: a counter, as the app keeps one.
+  let geminiReq = Math.floor(Math.random() * 9000) + 1000;
   let reloadPending = false;
 
   // scheduleReload reloads once the sender is idle, or at the cap after
@@ -438,9 +582,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return bytes;
   }
 
-  async function emitFile(url, init, emit) {
+  // emitFile fetches an image and emits it in chunks. With host set, an
+  // answer that ended anywhere else after redirects is refused, as
+  // getJSON does.
+  async function emitFile(url, init, emit, host = null) {
     const res = await send(url, init);
     await check(res, url, true, sniffMs);
+    if (host) {
+      const at = finalURL(res, url);
+      if (!at || at.host !== host) throw new OpError('not_logged_in', `redirected to ${at ? at.host : 'an unknown host'}`);
+    }
     const declared = Number(res.headers.get('content-length') || 0);
     if (declared > MAX_FILE_BYTES) throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
     const mime = contentType(res);
@@ -449,6 +600,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     }
     const bytes = await readCapped(res);
     if (bytes.length === 0) throw new OpError('endpoint_changed', 'empty file');
+    emitBytes(bytes, mime, emit);
+  }
+
+  function emitBytes(bytes, mime, emit) {
     for (let seq = 0, off = 0; off < bytes.length; seq++, off += CHUNK_BYTES) {
       const end = Math.min(off + CHUNK_BYTES, bytes.length);
       emit({ ok: true, mime, size: bytes.length, chunk: { seq, last: end === bytes.length, data: b64(bytes.subarray(off, end)) } });
@@ -533,6 +688,75 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     }
     claudeOrg = chat.uuid;
     return claudeOrg;
+  }
+
+  // geminiAuth returns the app page's session values: the at token, the
+  // build label and the session id. They stay in this closure, are never
+  // returned, and are fetched again after GEMINI_SESSION_MS or when
+  // fresh is set.
+  async function geminiAuth(fresh) {
+    if (!fresh && geminiSession && Date.now() - geminiSession.t < GEMINI_SESSION_MS) return geminiSession;
+    geminiSession = null;
+    const url = `${GEMINI}/app`;
+    const res = await send(url, { credentials: 'include' });
+    await check(res, url, false);
+    const at = finalURL(res, url);
+    if (at && at.host !== new URL(url).host) throw new OpError('not_logged_in', `redirected to ${at.host}`);
+    let html;
+    try {
+      html = await res.text();
+    } catch {
+      throw new OpError('network', 'could not read the Gemini app page');
+    }
+    const token = /"SNlM0e":"([^"\\]{1,512})"/.exec(html);
+    if (!token) throw new OpError('not_logged_in', 'no Gemini session on the app page');
+    const bl = /"cfb2h":"([^"\\]{1,256})"/.exec(html);
+    if (!bl) throw new OpError('endpoint_changed', 'no build label on the Gemini app page');
+    const fsid = /"FdrFJe":"(-?\d{1,32})"/.exec(html);
+    geminiSession = { at: token[1], bl: bl[1], fsid: fsid ? fsid[1] : '', t: Date.now() };
+    return geminiSession;
+  }
+
+  // geminiRPC calls one batchexecute rpcid with payload and returns the
+  // decoded inner payload (see parseBatchexecute). A 400 or 401 first
+  // fetches the session values again, once.
+  async function geminiRPC(rpcid, payload) {
+    for (let attempt = 0; ; attempt++) {
+      const s = await geminiAuth(attempt > 0);
+      const q = new URLSearchParams({ rpcids: rpcid, 'source-path': '/app', bl: s.bl });
+      if (s.fsid) q.set('f.sid', s.fsid);
+      q.set('hl', 'en');
+      q.set('_reqid', String(geminiReq));
+      geminiReq += 100000;
+      q.set('rt', 'c');
+      const url = `${GEMINI}/_/BardChatUi/data/batchexecute?${q}`;
+      const body = new URLSearchParams({ 'f.req': JSON.stringify([[[rpcid, JSON.stringify(payload), null, 'generic']]]), at: s.at });
+      const res = await send(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+        body: body.toString(),
+      });
+      if ((res.status === 400 || res.status === 401) && attempt === 0) {
+        geminiSession = null;
+        continue;
+      }
+      await check(res, url, false);
+      const at = finalURL(res, url);
+      if (at && at.host !== new URL(url).host) throw new OpError('not_logged_in', `redirected to ${at.host}`);
+      let text;
+      try {
+        text = await res.text();
+      } catch {
+        throw new OpError('network', `could not read the ${rpcid} answer`);
+      }
+      return parseBatchexecute(text, rpcid);
+    }
+  }
+
+  // geminiRead reads conversation id (URL hex) with hNvQHb.
+  async function geminiRead(id) {
+    return geminiRPC('hNvQHb', [`c_${geminiId(id)}`, 10, null, 1, [0], [4], null, 1]);
   }
 
   const handlers = {
@@ -654,6 +878,60 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       await grokSession();
       return sender.send('grok', a);
     },
+    // The list reads MaZiqc a page at a time, passing each page's token
+    // for the next, until it has count conversations or a page carries
+    // no next-page token. An error row on any page is endpoint_changed,
+    // never an early end: a partial list is not returned as complete.
+    async 'gemini.list'(a) {
+      const pages = [];
+      let token = null;
+      let seen = 0;
+      for (let i = 0; i < GEMINI_MAX_PAGES; i++) {
+        const inner = await geminiRPC('MaZiqc', [GEMINI_PAGE_SIZE, token, [0, null, 1]]);
+        if (!Array.isArray(inner)) throw new OpError('endpoint_changed', 'unexpected MaZiqc payload');
+        pages.push(inner);
+        seen += Array.isArray(inner[2]) ? inner[2].length : 0;
+        token = typeof inner[1] === 'string' && inner[1] !== '' ? inner[1] : null;
+        if (!token || seen >= a.count) break;
+      }
+      return { pages };
+    },
+    async 'gemini.detail'(a) {
+      return geminiRead(a.id);
+    },
+    // gemini.file: file_id is "<response candidate id>-<n>". The image is
+    // captured in the tab the send left open when there is one (the
+    // isolated world's fetch, with the page's cookies), else fetched
+    // here with the image host's grant. Its <img> is never drawn to a
+    // canvas: a cross-origin image taints it.
+    async 'gemini.file'(a, emit) {
+      const conv = geminiId(a.conversation_id);
+      const m = /^([A-Za-z0-9][A-Za-z0-9_-]{0,120})-(\d{1,2})$/.exec(a.file_id);
+      if (!m) throw bad('invalid Gemini image id');
+      const url = geminiImageURL(await geminiRead(conv), m[1], Number(m[2]));
+      if (!url) throw new OpError('not_found', 'image not found in the conversation');
+      if (sender && typeof sender.capture === 'function') {
+        let got = null;
+        try {
+          got = decodeImage(await sender.capture('gemini', conv, url, MAX_FILE_BYTES));
+        } catch {
+          got = null;
+        }
+        if (got) {
+          emitBytes(got.bytes, got.mime, emit);
+          return undefined;
+        }
+      }
+      await emitFile(url, { credentials: 'include' }, emit, new URL(GEMINI_IMAGE_PREFIX).host);
+      return undefined;
+    },
+    // The session values are fetched fresh for a send, as for claude.ai.
+    async 'gemini.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      if (a.conversation_id !== undefined) geminiId(a.conversation_id);
+      await geminiAuth(true);
+      return sender.send('gemini', a);
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -666,6 +944,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'grok.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('grok', a.conversation_id);
+    },
+    async 'gemini.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('gemini', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).
@@ -701,6 +983,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
         if (result !== undefined) emit({ ok: true, result });
       } catch (e) {
         if (e instanceof OpError && e.code === 'not_logged_in') claudeOrg = null;
+        if (e instanceof OpError && (e.code === 'not_logged_in' || e.code === 'blocked')) geminiSession = null;
         throw e;
       }
     },

@@ -170,6 +170,13 @@ const (
 	OpChatGPTClose  Op = "chatgpt.close"
 	OpClaudeAIClose Op = "claudeai.close"
 	OpGrokClose     Op = "grok.close"
+	// Gemini (gemini.google.com). gemini.file takes the conversation id
+	// and "<response candidate id>-<n>", never a URL.
+	OpGeminiList   Op = "gemini.list"
+	OpGeminiDetail Op = "gemini.detail"
+	OpGeminiFile   Op = "gemini.file"
+	OpGeminiSend   Op = "gemini.send"
+	OpGeminiClose  Op = "gemini.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -296,6 +303,9 @@ type NativeError struct {
 	// RetryAfter is the site's Retry-After, in seconds, on a rate_limited
 	// error when the extension could read it (zero when unknown).
 	RetryAfter int `json:"retry_after,omitempty"`
+	// Clicked is set on a send that failed after its send button was
+	// clicked: the message may have been sent.
+	Clicked bool `json:"clicked,omitempty"`
 }
 
 // NativeChunk is one piece of a file's bytes, base64.
@@ -362,6 +372,9 @@ type UnavailableError struct {
 	// RetryAfter is how long to wait before asking the site again, for
 	// ErrRateLimited (zero when the site did not say).
 	RetryAfter time.Duration
+	// Clicked: a send failed after its send button was clicked, so the
+	// message may have been sent anyway.
+	Clicked bool
 }
 
 // siteOf is a site's host, for error text (the source name for a site
@@ -454,19 +467,34 @@ func clampRetryAfterSeconds(secs int) time.Duration {
 // locally after a 429 that carried no Retry-After.
 const DefaultRateLimitCooldown = 30 * time.Second
 
+// DefaultBlockedCooldown is how long every request to a site with a
+// blockedCooldown (Gemini) is refused locally after it showed an anti-bot
+// check: time for the owner to clear it in Chrome, without the agent
+// tripping it again meanwhile.
+const DefaultBlockedCooldown = 5 * time.Minute
+
 // SiteCooldown remembers, per site, until when requests must not go to it
-// because it rate-limited the account. The zero value is ready to use.
+// because it rate-limited the account or showed an anti-bot check. The
+// zero value is ready to use.
 type SiteCooldown struct {
 	// Now is the clock (time.Now when nil).
 	Now   func() time.Time
 	mu    sync.Mutex
 	until map[Source]time.Time
+	// blocked marks a cooldown whose end was last set by an anti-bot
+	// check rather than a rate limit.
+	blocked map[Source]bool
 }
 
 func (c *SiteCooldown) now() time.Time { return orNow(c.Now) }
 
 // Note starts (or extends) src's cooldown to at least d from now.
-func (c *SiteCooldown) Note(src Source, d time.Duration) {
+func (c *SiteCooldown) Note(src Source, d time.Duration) { c.note(src, d, false) }
+
+// NoteBlocked starts (or extends) src's cooldown after an anti-bot check.
+func (c *SiteCooldown) NoteBlocked(src Source, d time.Duration) { c.note(src, d, true) }
+
+func (c *SiteCooldown) note(src Source, d time.Duration, blocked bool) {
 	if d <= 0 {
 		return
 	}
@@ -474,10 +502,19 @@ func (c *SiteCooldown) Note(src Source, d time.Duration) {
 	defer c.mu.Unlock()
 	if c.until == nil {
 		c.until = map[Source]time.Time{}
+		c.blocked = map[Source]bool{}
 	}
 	if t := c.now().Add(d); t.After(c.until[src]) {
 		c.until[src] = t
+		c.blocked[src] = blocked
 	}
+}
+
+// Blocked reports whether src's running cooldown is an anti-bot one.
+func (c *SiteCooldown) Blocked(src Source) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.until[src].After(c.now()) && c.blocked[src]
 }
 
 // Remaining is how much of src's cooldown is left (zero when none).
@@ -495,8 +532,18 @@ func (c *SiteCooldown) Remaining(src Source) time.Duration {
 // process.
 var sharedCooldown = &SiteCooldown{}
 
-// fromNativeError maps an extension error code to a typed error.
+// fromNativeError maps an extension error code to a typed error, and
+// carries a send's clicked mark over.
 func fromNativeError(s Source, ne *NativeError) error {
+	err := nativeErrorKind(s, ne)
+	var ue *UnavailableError
+	if ne.Clicked && errors.As(err, &ue) {
+		ue.Clicked = true
+	}
+	return err
+}
+
+func nativeErrorKind(s Source, ne *NativeError) error {
 	detail := clip(ne.Message, 200)
 	switch ne.Code {
 	case "not_logged_in":
@@ -566,8 +613,22 @@ func (c *Client) cooldown() *SiteCooldown {
 }
 
 // CooldownRemaining is how long requests to src are still held back after
-// a rate limit (zero when they are not).
+// a rate limit or an anti-bot check (zero when they are not).
 func (c *Client) CooldownRemaining(src Source) time.Duration { return c.cooldown().Remaining(src) }
+
+// cooldownError is the error a request to src gets during its cooldown:
+// a rate limit carrying the time left, or, after an anti-bot check, that
+// check again. It is nil when src is not cooling down.
+func (c *Client) cooldownError(src Source) error {
+	left := c.cooldown().Remaining(src)
+	if left <= 0 {
+		return nil
+	}
+	if c.cooldown().Blocked(src) {
+		return unavailable(src, ErrBlocked, "requests to it are held back for another "+left.Round(time.Second).String())
+	}
+	return &UnavailableError{Source: src, Kind: ErrRateLimited, Detail: "cooling down after a rate limit", RetryAfter: left}
+}
 
 // hitsSite reports whether op makes a request to the site. Closing a tab
 // does not, so it runs during a cooldown.
@@ -670,10 +731,12 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	if c.Channel == nil {
 		return unavailable(src, ErrExtensionNotConnected, "")
 	}
-	// A site that rate-limited the account is not asked again until its
-	// cooldown ends.
-	if left := c.cooldown().Remaining(src); left > 0 && op.hitsSite() {
-		return &UnavailableError{Source: src, Kind: ErrRateLimited, Detail: "cooling down after a rate limit", RetryAfter: left}
+	// A site that rate-limited the account (or showed an anti-bot check)
+	// is not asked again until its cooldown ends.
+	if op.hitsSite() {
+		if cerr := c.cooldownError(src); cerr != nil {
+			return cerr
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
@@ -687,6 +750,11 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 			after = DefaultRateLimitCooldown
 		}
 		c.cooldown().Note(src, after)
+	}
+	if errors.Is(err, ErrBlocked) {
+		if site := siteFor(src); site != nil && site.blockedCooldown > 0 {
+			c.cooldown().NoteBlocked(src, site.blockedCooldown)
+		}
 	}
 	var ue *UnavailableError
 	switch {
@@ -771,9 +839,14 @@ func (c *Client) Send(ctx context.Context, src Source, message, convID string, n
 		return SendResult{}, err
 	}
 	var r SendResult
-	if err := json.Unmarshal(raw, &r); err != nil || !validNativeID(r.ConversationID) {
+	if err := json.Unmarshal(raw, &r); err != nil {
 		return SendResult{}, unavailable(src, ErrEndpointChanged, "unexpected send answer")
 	}
+	id, ok := site.canonical(r.ConversationID)
+	if !ok || !validNativeID(id) {
+		return SendResult{}, unavailable(src, ErrEndpointChanged, "unexpected send answer")
+	}
+	r.ConversationID = id
 	return r, nil
 }
 

@@ -36,6 +36,7 @@ const (
 	SourceChatGPT    Source = "chatgpt"
 	SourceClaudeAI   Source = "claude-ai"
 	SourceGrok       Source = "grok"
+	SourceGemini     Source = "gemini"
 )
 
 // Sources lists every valid Source: the live sites, in the site table's
