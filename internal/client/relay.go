@@ -334,6 +334,17 @@ func (in Inbox) ReplyIDs() []string {
 	return ids
 }
 
+// ReplyAcks identifies the exact reply generations returned by this poll.
+func (in Inbox) ReplyAcks() []envelope.ReplyAck {
+	acks := make([]envelope.ReplyAck, 0, len(in.Replies))
+	for _, r := range in.Replies {
+		if r.Reply != nil {
+			acks = append(acks, envelope.ReplyAck{ID: r.Request.ID, Generation: r.Reply.Generation})
+		}
+	}
+	return acks
+}
+
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
 	Pings            int    `json:"pings,omitempty"`
@@ -352,7 +363,7 @@ type Waiting struct {
 // Poll waits up to hold for requests addressed to this agent or unseen
 // replies to its own requests. It takes the requests. The replies stay
 // unseen until the caller, having shown them to its agent, passes
-// in.ReplyIDs() to AckReplies. An empty Inbox means nothing arrived in time.
+// in.ReplyAcks() to AckReplies. An empty Inbox means nothing arrived in time.
 func (r *Relay) Poll(ctx context.Context, hold time.Duration) (Inbox, error) {
 	return r.PollReplies(ctx, hold, RepliesTake)
 }
@@ -368,12 +379,28 @@ func (r *Relay) PollReplies(ctx context.Context, hold time.Duration, replies str
 
 // AckReplies marks the replies to the requests in ids as seen, once the
 // agent has been shown them. The relay ignores ids that are not this
-// agent's own requests. An empty ids makes no call.
-func (r *Relay) AckReplies(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+// agent's own requests. Generation acknowledgements only mark the matching
+// reply seen. Empty ids and acks make no call.
+func (r *Relay) AckReplies(ctx context.Context, ids []string, acks ...envelope.ReplyAck) error {
+	// A reply with no generation came from a relay that predates generations
+	// (or was stored before it learned them). Acknowledge it by id, which
+	// every relay understands; an older relay ignores the acks field.
+	var gen []envelope.ReplyAck
+	for _, ack := range acks {
+		if ack.Generation == 0 {
+			ids = append(ids, ack.ID)
+		} else {
+			gen = append(gen, ack)
+		}
+	}
+	if len(ids) == 0 && len(gen) == 0 {
 		return nil
 	}
-	return r.call(ctx, r.api, "POST", "/v1/replies/ack", map[string][]string{"ids": ids}, nil)
+	body := map[string]any{"ids": ids}
+	if len(gen) > 0 {
+		body["acks"] = gen
+	}
+	return r.call(ctx, r.api, "POST", "/v1/replies/ack", body, nil)
 }
 
 // Peek waits up to hold for requests or unseen replies without taking
@@ -407,9 +434,7 @@ func (r *Relay) Progress(ctx context.Context, id, note string) error {
 
 // Reply answers a request.
 func (r *Relay) Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error) {
-	var out envelope.Reply
-	err := r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/reply", map[string]any{"body": body, "status": status}, &out)
-	return out, err
+	return r.ReplyAttached(ctx, id, body, status, nil)
 }
 
 // Cancel withdraws a request this agent sent.

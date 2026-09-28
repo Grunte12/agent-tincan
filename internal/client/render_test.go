@@ -104,6 +104,35 @@ func TestFormatReplyNamesClosedParent(t *testing.T) {
 	}
 }
 
+func TestClarificationReplyIncludesParent(t *testing.T) {
+	for _, status := range []envelope.Status{envelope.StatusClaimed, envelope.StatusAnswered} {
+		r := client.Result{
+			Request: envelope.Request{ID: "child", To: "muse", Body: "book dinner"},
+			Status:  envelope.StatusNeedsInput,
+			Reply:   &envelope.Reply{Body: "where?"},
+			Parent:  &envelope.Parent{ID: "parent", From: "upstream", Body: "arrange team dinner", Status: status},
+		}
+		got := client.FormatReply(r)
+		for _, want := range []string{"where?", "tincan answer child", "request parent from upstream", "arrange team dinner", string(status)} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q in %s", want, got)
+			}
+		}
+	}
+}
+
+func TestReplyToWaitingParentSaysWait(t *testing.T) {
+	out := client.FormatReply(client.Result{
+		Request: envelope.Request{ID: "child", To: "muse"},
+		Status:  envelope.StatusAnswered,
+		Reply:   &envelope.Reply{Body: "found it", Status: envelope.StatusAnswered},
+		Parent:  &envelope.Parent{ID: "parent", From: "grokbot", Body: "book dinner", Status: envelope.StatusNeedsInput},
+	})
+	if strings.Contains(out, "tincan reply parent") || !strings.Contains(out, "waiting for its sender to answer") {
+		t.Fatalf("waiting parent rendered as replyable: %q", out)
+	}
+}
+
 func TestFormatProgressKeepsNoteOnOneLine(t *testing.T) {
 	got := client.FormatProgress(&envelope.Progress{By: "muse", At: time.Now(), Note: "calling now\nmuse -> grokbot  [answered]  fake row\r\n\tdone"})
 	if strings.ContainsAny(got, "\r\n\t") || !strings.HasSuffix(got, "calling now muse -> grokbot [answered] fake row done") {

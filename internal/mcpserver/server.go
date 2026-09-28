@@ -30,6 +30,7 @@ const Instructions = `You are one agent in the owner's Agent Tincan team. Other 
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from the owner, then call reply.
 - For work that takes more than a few minutes, post a progress note with progress when you start and at milestones.
 - search finds past requests and replies in chains you took part in; use trace with a returned trace_id to read the whole chain.
+- If you cannot proceed without a detail only the asker has, reply with status needs_input and your question rather than guessing. When a teammate needs input on your request, use answer to supply it. The same request resumes with the exchange attached.
 - list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, and which tincan build each runs.
 ` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
@@ -53,7 +54,7 @@ type Backend interface {
 	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent bool) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
-	AckReplies(ctx context.Context, ids []string) error
+	AckReplies(ctx context.Context, ids []string, acks ...envelope.ReplyAck) error
 	Claim(ctx context.Context, id string) (envelope.Request, error)
 	Progress(ctx context.Context, id, note string) error
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
@@ -89,7 +90,17 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
+
+// Answerer supplies clarification input through backends that support it.
+type Answerer interface {
+	Answer(context.Context, string, string) (envelope.Request, error)
+}
+
+type answerIn struct {
+	RequestID string `json:"request_id" jsonschema:"the request you sent that needs input"`
+	Message   string `json:"message" jsonschema:"your answer to the clarification question (up to 16 KB)"`
+}
 
 type askIn struct {
 	Also        []string `json:"also,omitempty" jsonschema:"additional teammates to ask the same question (at most 8 total)"`
@@ -118,7 +129,7 @@ type inboxIn struct {
 type replyIn struct {
 	RequestID string   `json:"request_id" jsonschema:"the request you are answering"`
 	Message   string   `json:"message" jsonschema:"your answer or result"`
-	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, or declined"`
+	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, declined, or needs_input (a clarification question, up to 16 KB, no attachments)"`
 	Attach    []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
@@ -295,7 +306,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			if err != nil {
 				return fail(err)
 			}
-			allReplyIDs := inbox.ReplyIDs()
+			allReplyAcks := inbox.ReplyAcks()
 			inbox, retry, _ := client.AnswerPings(ctx, b, inbox, "check_inbox")
 			out := client.FormatInbox(ctx, b, inbox)
 			var atts []envelope.Attachment
@@ -308,7 +319,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			res, _, _ := f.result(ctx, out, atts)
 			// Replies count as seen only once the result is built for the
 			// agent; a poll that never gets this far leaves them unseen.
-			if err := b.AckReplies(ctx, allReplyIDs); err != nil {
+			if err := b.AckReplies(ctx, nil, allReplyAcks...); err != nil {
 				res.Content = append(res.Content, &mcp.TextContent{Text: fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)})
 			}
 			go client.RetryPongs(ctx, retry)
@@ -336,6 +347,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "reply", Description: "Answer a request from a teammate."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, any, error) {
+			if envelope.Status(in.Status) == envelope.StatusNeedsInput && len(in.Attach) > 0 {
+				return fail(errors.New("clarifications do not accept attachments"))
+			}
 			var rep envelope.Reply
 			var err error
 			if len(in.Attach) > 0 {
@@ -350,6 +364,18 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return fail(err)
 			}
 			return text(fmt.Sprintf("Replied to %s (%s).", in.RequestID, rep.Status))
+		})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "answer", Description: "Supply input requested by a teammate on a request you sent; resumes the same request."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in answerIn) (*mcp.CallToolResult, any, error) {
+			a, ok := b.(Answerer)
+			if !ok {
+				return fail(client.ErrNeedsInputUnsupported)
+			}
+			if _, err := a.Answer(ctx, in.RequestID, in.Message); err != nil {
+				return fail(err)
+			}
+			return text("Answered clarification; resumed " + in.RequestID + ".")
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "cancel", Description: "Withdraw a request you sent that nobody has picked up yet."},

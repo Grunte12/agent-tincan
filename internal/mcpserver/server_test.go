@@ -321,7 +321,7 @@ func (r *recorder) Poll(context.Context, time.Duration) (client.Inbox, error) {
 	return client.Inbox{}, nil
 }
 
-func (r *recorder) AckReplies(context.Context, []string) error {
+func (r *recorder) AckReplies(context.Context, []string, ...envelope.ReplyAck) error {
 	r.calls = append(r.calls, "AckReplies")
 	return nil
 }

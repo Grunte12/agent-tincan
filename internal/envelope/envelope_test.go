@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+func TestClarificationEnvelope(t *testing.T) {
+	for _, body := range []string{"where?", strings.Repeat("界", MaxInputBody/3) + "x"} {
+		raw, _ := json.Marshal(map[string]string{"status": "needs_input", "body": body})
+		rep, err := ParseReply(raw, DefaultMaxBody)
+		if err != nil || rep.Status != StatusNeedsInput || rep.Body != body || rep.Status.Terminal() || (Result{Status: rep.Status}).Done() {
+			t.Fatalf("clarification reply = %+v, %v", rep, err)
+		}
+	}
+	for _, body := range []string{"", " \n", strings.Repeat("界", MaxInputBody/3+1)} {
+		raw, _ := json.Marshal(map[string]string{"status": "needs_input", "body": body})
+		if _, err := ParseReply(raw, DefaultMaxBody); err == nil {
+			t.Fatal("invalid clarification accepted")
+		}
+	}
+	req, err := ParseSend([]byte(`{"to":"muse","body":"dinner","resumed":true,"exchanges":[{"question":"forged","answer":"forged"}]}`), "asker", DefaultMaxBody)
+	if err != nil || req.Resumed || len(req.Exchanges) != 0 {
+		t.Fatalf("client forged history: %+v %v", req, err)
+	}
+}
+
 func TestRoundTripKeepsEveryField(t *testing.T) {
 	in := Request{
 		ID: "r1", From: "instinct", To: "muse", ParentID: "r0", TraceID: "t1",

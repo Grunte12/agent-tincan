@@ -18,6 +18,8 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
+| `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
+| `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
 
 ## Reply
 
@@ -25,7 +27,7 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 |---|---|---|
 | `request_id` | relay | The request this answers. |
 | `from` | relay | Replying agent, resolved from the tailnet node. |
-| `status` | client | `answered` (default), `failed`, or `declined`. |
+| `status` | client | `answered` (default), `failed`, `declined`, or non-terminal `needs_input`. |
 | `body` | client | The reply text. Capped at 256 KB. |
 | `attachments` | client names ids, relay fills the rest | As on a request. |
 | `created_at` | relay | When the relay stored it. |
@@ -41,6 +43,20 @@ Optional `held`, then `queued`, `delivered`, `claimed`, then one of `answered`, 
 Get and trace results include optional `progress: {"note":"...","at":"<RFC3339 timestamp>","by":"muse"}` while claimed. A held get refreshes this at timeout. Requeuing clears the note. Progress never wakes the asker, and its audit event records only the byte count.
 
 `GET /v1/capabilities` advertises `"progress": true`. Clients check it before posting and report an upgrade message when the flag or endpoint is absent. Older clients ignore the optional result field.
+
+### Clarifying a request
+
+For an `ask` with a live claim, its target may `POST /v1/requests/{id}/reply` with `{"status":"needs_input","body":"Which restaurant?"}`. Only the target that claimed the request may ask; a queued, delivered, expired-lease, or already waiting request returns 409. A different agent returns 403. Notifies cannot request input.
+
+The response is a normal reply with status `needs_input` (200). This status is non-terminal. The relay appends a clarification exchange, pauses the claim lease, and marks the question unseen. The question ends a held get-reply wait and follows the same poll, acknowledgement, and reply-wake path as a final reply. While waiting, no lease can requeue it; the original request expiry still runs (24 hours by default), and removing either participant cancels it.
+
+Only the original sender may `POST /v1/requests/{id}/answer` with `{"body":"Nopa, 2 people"}`. A different agent returns 403. The request must still be `needs_input` and unexpired, otherwise 409. The relay records the answer, removes the interim reply, and returns the request (200), now `queued` with `resumed: true`. It wakes the same target through the request-wake path. The target polls and claims normally, receiving the original body and full exchange history. The id, target, parent, trace, chain, hop, creation time, and expiry are unchanged. A duplicate answer returns 409.
+
+Each question and answer must contain non-whitespace text and is capped at 16,384 UTF-8 bytes (400 for empty or oversized input). Clarifications carry text only; attachments on a `needs_input` reply return 400. At most three question/answer rounds are allowed per request; a fourth question returns 409, leaving the claim available for a final reply. A final reply uses the existing reply statuses and limits.
+
+Get-reply, unseen replies, and trace steps include an optional top-level `exchanges` list as well as the history on their `request`. On expiry or cancellation, history is retained but the question is no longer returned as a live reply or counted as unseen. Audit events `needs_input` and `answered_input` record only question or answer byte lengths in their detail, never the text. Wake messages contain counts and instructions only.
+
+Relays advertise `"needs_input": true` in `GET /v1/capabilities`. New clients refuse to send `needs_input` or an answer when this flag is missing or false (including a 404 capabilities endpoint), with an instruction to upgrade the relay. Existing ordinary replies work against older relays. An older asker can read the question as the reply body with an unfamiliar `needs_input` status; upgrade that client to answer using `tincan answer <id> "text"` or MCP `answer`. Older handlers never produce the new status. All new fields are optional.
 
 ## Replies the asker has not seen
 
@@ -60,7 +76,9 @@ Any other `replies` value is a 400.
 
 `POST /v1/replies/ack` with `{"ids": ["<request id>", ...]}` marks those replies seen and returns 204. Ids that are not the caller's own requests, or that have no reply yet, are ignored, so an agent can only acknowledge its own replies. At most 500 ids per call. `tincan inbox` acknowledges after it prints the replies, and check_inbox after it builds its result; if the ack fails, the replies simply show again next time.
 
-One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
+Replies include an additive integer `generation`, a persistent per-request counter that advances for each clarification question or final reply, even within the same millisecond (pre-upgrade replies start at generation 0). Clients acknowledge the generation they displayed with `{"ids": [], "acks": [{"id": "<request id>", "generation": 2}]}`. An `acks` entry marks a reply seen only if its generation still matches; stale entries are ignored. Plain `ids` remain supported with their original behavior (acknowledging the current reply regardless of generation). The two lists may be combined, with a total limit of 500 entries; clients should put each reply in only one list. CLI and MCP inbox clients use generation acknowledgements.
+
+One poll delivers at most 20 requests, oldest first, and stops adding requests once their bodies and clarification exchanges pass 1 MiB (it always delivers at least one); the rest come with the next poll. One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
 
 When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts. If the replies are still unseen after that nudge, the waker checks again 5, 20 and 60 minutes after each previous nudge and nudges each time some remain, within the agent's hourly wake cap, stopping as soon as they are read. The grace and follow-up timers live in memory, so a relay that restarts schedules a fresh reply nudge for every webhook or email agent that still holds unseen replies.
 

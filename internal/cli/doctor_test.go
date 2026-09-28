@@ -113,7 +113,7 @@ func TestConfigCheck(t *testing.T) {
 func TestDoctorProgressToolCount(t *testing.T) {
 	for _, missingProgress := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingProgress), func(t *testing.T) {
-			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
+			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
 			if !missingProgress {
 				names = append(names, "progress")
 			}
@@ -135,7 +135,7 @@ func TestDoctorProgressToolCount(t *testing.T) {
 				if got.Status != "fail" || !strings.Contains(got.Detail, "missing progress") {
 					t.Fatalf("old tools: %+v", got)
 				}
-			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 12 tools") {
+			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 13 tools") {
 				t.Fatalf("tools: %+v", got)
 			}
 		})

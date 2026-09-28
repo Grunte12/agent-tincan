@@ -323,6 +323,31 @@ func TestKeepPresencePeeksUntilStoppedOrCapped(t *testing.T) {
 	}
 }
 
+// Against a relay without reply generations every reply arrives with
+// generation 0; those must be acknowledged by id, the only form it reads.
+func TestAckRepliesFallsBackToIDs(t *testing.T) {
+	var got map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	r, _ := client.NewRelay(srv.URL, "")
+	if err := r.AckReplies(t.Context(), nil, envelope.ReplyAck{ID: "old"}, envelope.ReplyAck{ID: "new", Generation: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["ids"]) != `["old"]` || string(got["acks"]) != `[{"id":"new","generation":7}]` {
+		t.Fatalf("ack body = ids %s acks %s", got["ids"], got["acks"])
+	}
+	got = nil
+	if err := r.AckReplies(t.Context(), nil, envelope.ReplyAck{ID: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["ids"]) != `["old"]` || got["acks"] != nil {
+		t.Fatalf("older relay ack = %v", got)
+	}
+}
+
 func TestAskWithoutWaitReportsHeld(t *testing.T) {
 	for _, status := range []envelope.Status{envelope.StatusHeld, ""} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
