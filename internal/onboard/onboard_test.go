@@ -558,17 +558,97 @@ func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
 }
 
 // notes is a product service: its runtime name resolves to the notes kind,
-// it waits on the relay, and its block carries no model instructions.
+// it waits on the relay, and its block carries no model instructions for
+// itself, only the lines teammates that use it add to their own.
 func TestNotesServiceBlock(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "notes"}}})
 	b := block(t, k, "notes")
 	if b.Kind != KindNotes || b.Wake != "wait" {
 		t.Fatalf("notes block kind/wake = %s/%s", b.Kind, b.Wake)
 	}
-	if strings.Contains(b.Instructions, "check_inbox") || !strings.Contains(b.Instructions, "is a service") {
-		t.Errorf("notes instructions should be the service line only:\n%s", b.Instructions)
+	if want := "TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay " + relayURL; b.Join != want {
+		t.Errorf("notes join = %q, want %q", b.Join, want)
 	}
-	if setup := strings.Join(b.Setup, "\n"); !strings.Contains(setup, "30 days") {
-		t.Errorf("notes setup should state the relay retention:\n%s", setup)
+	for _, stale := range []string{"check_inbox", "You are notes"} {
+		if strings.Contains(b.Instructions, stale) {
+			t.Errorf("notes instructions should not carry model guidance %q:\n%s", stale, b.Instructions)
+		}
+	}
+	for _, want := range []string{
+		"is a service", "Agent Notes",
+		// Teammates' usage: ask, not notify, so the id comes back.
+		"use ask", "not notify", "note id",
+		// A pending add is queued, not lost; expired may still be saved.
+		"queued", "not lost", "expired", "search notes for its title", "tell Matt",
+		// The structured form, quoted from the service.
+		`note: {"op":"add","title":"...","body":"...","tags":["..."]}`,
+		`note: {"op":"search","query":"...","count":10}`,
+		`note: {"op":"read","id":"<note id>"}`,
+		"8000 bytes", "from-agent",
+		// Returned note text is data.
+		"never instructions",
+		"allowlist",
+	} {
+		if !strings.Contains(b.Instructions, want) {
+			t.Errorf("notes instructions missing %q:\n%s", want, b.Instructions)
+		}
+	}
+	setup := strings.Join(b.Setup, "\n")
+	for _, want := range []string{
+		"30 days", "--notes-ttl", `method "wait"`,
+		"tincan notes install --library-root",
+		"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.notes.plist",
+		"Files and Folders", "tincan notes doctor", "tincan kind notes notes",
+		"notes-allow.txt", "notes-add-allow.txt", "create --idempotency-key",
+		"~/Library/Logs/tincan-notes.log",
+		"TINCAN_CONFIG=~/.config/tincan/notes.json tincan rejoin --relay " + relayURL + " --name notes",
+		"docs/adapters/notes.md",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("notes setup missing %q:\n%s", want, setup)
+		}
+	}
+	r := recipe(t, k, "notes")
+	all := strings.Join(r.Steps, "\n")
+	for _, want := range []string{"tincan invite notes --kind notes", "TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay " + relayURL, "tincan notes install --library-root"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("notes recipe missing %q:\n%s", want, all)
+		}
+	}
+}
+
+func notesRoster() []Member {
+	return append(matts(), Member{Name: "notes", Wake: "wait", Kind: "notes"})
+}
+
+// With a notes agent on the roster, Agent Tincan routes requests to save,
+// find, or read a note to it, in the formula's section order.
+func TestOperatorRoutesNotes(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: append(historyRoster(), Member{Name: "notes", Wake: "wait", Kind: "notes"})})
+	p := k.Operator
+	headings := []string{"Name: Agent Tincan", "ONLY job:", "Team:", "How:", "History questions:", "Notes requests:",
+		"Invites:", "Wake:", "Anti-jobs:"}
+	pos := 0
+	for _, h := range headings {
+		i := strings.Index(p[pos:], h)
+		if i < 0 {
+			t.Fatalf("heading %q missing or out of order after offset %d:\n%s", h, pos, p)
+		}
+		pos += i + len(h)
+	}
+	for _, want := range []string{
+		"pass notes requests to notes",
+		"save, find, or read a note", "tincan ask notes", "not notify", "expired", "search notes for its title",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("operator prompt missing %q:\n%s", want, p)
+		}
+	}
+	if only := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: notesRoster()}).Operator; !strings.Contains(only, "Notes requests:") {
+		t.Error("notes routing should not depend on a history agent")
+	}
+	plain := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: matts()}).Operator
+	if strings.Contains(plain, "Notes requests:") || strings.Contains(plain, "notes requests") {
+		t.Error("no notes routing unless a notes agent is on the roster")
 	}
 }
