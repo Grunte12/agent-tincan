@@ -1,24 +1,54 @@
 # Agent Tincan History extension
 
-Manifest V3 extension that lets the `history` agent read ChatGPT and claude.ai
-conversations, and the `chatgpt-web` and `claude-web` agents send to them,
-through the user's own logged-in Chrome. Its service worker runs a fixed set of
+Manifest V3 extension that lets the `history` agent read ChatGPT, claude.ai and
+Grok conversations, and the `chatgpt-web`, `claude-web` and `grok-web` agents
+send to them, through the user's own logged-in Chrome. Its service worker runs a fixed set of
 operations (`ops.js`) for the native host `com.agenttincan.history`
 (`tincan history native-host`) and returns JSON, with images as base64 in
 chunks of at most 384 KiB. It accepts nothing else and never runs code from a
 message or a page. The ChatGPT access token is read from `/api/auth/session`
 inside the worker and never leaves it.
 
-The send operations (`chatgpt.send`, `claudeai.send`, in `send.js`) open a
+The send operations (`chatgpt.send`, `claudeai.send`, `grok.send`, in `send.js`) open a
 background tab of their own, fill the message box through fixed page functions
 injected with `chrome.scripting` (message as an argument, isolated world),
 click send, and return once the conversation id is in the tab's address. They
 never watch the page for the answer: the Go side reads the conversation until
-the answer is finished, then calls `chatgpt.close` or `claudeai.close`, which
+the answer is finished, then calls `chatgpt.close`, `claudeai.close` or `grok.close`, which
 close only the tab a send left open for that conversation (any such tab is
 closed after 10 minutes regardless).
 All page selectors are in the `SELECTORS` table in `send.js`; see
 docs/adapters/web-agents.md.
+
+## Grok (grok.com)
+
+The `grok.*` operations, all in the service worker with the owner's cookies
+and no page-set headers:
+
+- `grok.list {count}`: `GET /rest/app-chat/conversations?pageSize=N`, following
+  `nextPageToken` (at most 5 pages) until `count` conversations are in; the
+  result is `{conversations: [...]}`.
+- `grok.detail {id}`: `GET .../conversations/<id>/response-node?includeThreads=true`
+  (the message tree and `inflightResponses`), then `POST .../load-responses`
+  with `{"responseIds": [...]}` for the message bodies; the result is
+  `{conversationId, responseNodes, inflightResponses, responses}`.
+- `grok.file {file_id, conversation_id}`: `file_id` is
+  `<response id>_<index>`. The worker reads that response again with
+  `load-responses`, takes `generatedImageUrls[index]`, and fetches it only if
+  it resolves to `assets.grok.com` (or `grok.com`) over https; no URL ever
+  comes from the request.
+- `grok.send`: first `GET /rest/app-chat/conversations?pageSize=1` (a
+  logged-out grok.com would chat anonymously, so no session means no tab),
+  then the composer send in a background tab of `https://grok.com/` or
+  `https://grok.com/c/<id>`. The tab fails `blocked` if it opens on an
+  anti-bot challenge.
+- `grok.close {conversation_id}`: closes only the tab a send left open.
+
+Every grok.com read goes through one function, `grokJSON` in `ops.js`. If
+grok.com starts refusing reads from the extension's origin, that function is
+the one to replace with a fixed read in an extension-opened grok.com tab's
+isolated world (as `send.js` injects its page functions); nothing runs in the
+page's main world.
 
 ## Site access and the options page
 
@@ -34,8 +64,8 @@ regardless, so a grant revoked while a reply is read still lets the tab close.
 ChatGPT and claude.ai are required `host_permissions`, as before, so an
 upgrade asks for nothing new; the owner can still withhold them in Chrome's
 site access settings. Sites added later go under `optional_host_permissions`
-(none yet, so the manifest has no such key) and are granted from the options
-page: `options.html` and `options.js`, opened from `chrome://extensions` >
+(Grok: `https://grok.com/*` and `https://assets.grok.com/*`, granted together)
+and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in
 `SITE_ACCESS`, shows whether all its origins are granted (a site with only
 its page origins granted shows as granted with images and files needing

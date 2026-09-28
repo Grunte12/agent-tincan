@@ -1266,11 +1266,11 @@ func TestWebAttachImagesFailures(t *testing.T) {
 // a clear message instead of answering "(the reply was empty)".
 func TestWebReadReplyUnparseable(t *testing.T) {
 	rig := newWebRig(t)
-	_, _, err := rig.agent.readReply(t.Context(), "conv-1", "u0", json.RawMessage(`{"mapping":null}`))
+	_, _, _, err := rig.agent.readReply(t.Context(), "conv-1", "u0", json.RawMessage(`{"mapping":null}`))
 	if !errors.Is(err, errReplyUnreadable) {
 		t.Fatalf("err = %v", err)
 	}
-	_, _, err = rig.agent.readReply(t.Context(), "conv-1", "missing", chatgptDetailJSON("conv-1", []fakeTurn{{prompt: "hi", reply: "hello", sentAt: time.Now()}}))
+	_, _, _, err = rig.agent.readReply(t.Context(), "conv-1", "missing", chatgptDetailJSON("conv-1", []fakeTurn{{prompt: "hi", reply: "hello", sentAt: time.Now()}}))
 	if !errors.Is(err, errReplyUnreadable) {
 		t.Fatalf("turn not found: err = %v", err)
 	}

@@ -47,6 +47,7 @@ export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 
 export const SITE_ACCESS = Object.freeze({
   chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), pageOrigins: Object.freeze(['https://chatgpt.com/*']), required: true }),
   claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
+  grok: Object.freeze({ label: 'Grok', origins: Object.freeze(['https://grok.com/*', 'https://assets.grok.com/*']), pageOrigins: Object.freeze(['https://grok.com/*']), required: false }),
 });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
@@ -83,6 +84,12 @@ export const RELOAD_MAX_WAIT_MS = 5 * 60 * 1000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CHATGPT = 'https://chatgpt.com';
 const CLAUDE = 'https://claude.ai';
+const GROK = 'https://grok.com';
+const GROK_ASSETS = 'https://assets.grok.com/';
+// grok.list reads at most GROK_MAX_PAGES pages of the conversation list.
+export const GROK_MAX_PAGES = 5;
+// A grok.file id is <response id>_<index in generatedImageUrls>.
+const GROK_FILE_RE = /^([A-Za-z0-9][A-Za-z0-9-]{0,99})_(0|[1-9][0-9]?)$/;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -96,10 +103,15 @@ const SPEC = Object.freeze({
   'claudeai.list': Object.freeze({ count: 'count' }),
   'claudeai.detail': Object.freeze({ id: 'id' }),
   'claudeai.file': Object.freeze({ file_id: 'id' }),
+  'grok.list': Object.freeze({ count: 'count' }),
+  'grok.detail': Object.freeze({ id: 'id' }),
+  'grok.file': Object.freeze({ file_id: 'id', conversation_id: 'id' }),
   'chatgpt.send': SEND_SPEC,
   'claudeai.send': SEND_SPEC,
+  'grok.send': SEND_SPEC,
   'chatgpt.close': CLOSE_SPEC,
   'claudeai.close': CLOSE_SPEC,
+  'grok.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -468,6 +480,48 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return null;
   }
 
+  // grokJSON is the one place grok.com's JSON is fetched: from this worker,
+  // with the owner's cookies and no page-set headers (a live check read all
+  // three endpoints without x-statsig-id). If grok.com ever refuses reads
+  // from the extension's origin, this is the function to swap for a fixed
+  // read in the isolated world of an extension-opened grok.com tab, the way
+  // send.js runs its page functions; nothing else changes.
+  async function grokJSON(url, init, notFound = false) {
+    return getJSON(url, init, notFound);
+  }
+
+  function grokPost(url, body) {
+    return grokJSON(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }, true);
+  }
+
+  // grokSession fails not_logged_in unless the conversation list answers
+  // for a signed-in account; grok.com otherwise lets a logged-out page
+  // chat anonymously, so the send never opens a tab without it. It is the
+  // first of two gates: the assumption is that grok.com refuses the list
+  // (401) without a session, but a 200 with an empty list carries no
+  // account signal of its own, so it is not taken as proof of a sign-in.
+  // The send tab's login probe (the sign-in link or /sign-in address in
+  // send.js's grok selectors) is the second gate and runs before anything
+  // is typed, so a signed-out page that still answered the list is
+  // refused there.
+  async function grokSession() {
+    const r = await grokJSON(`${GROK}/rest/app-chat/conversations?pageSize=1`, {});
+    if (!r || !Array.isArray(r.conversations)) throw new OpError('not_logged_in', 'no grok.com session');
+  }
+
+  // grokAsset resolves a generatedImageUrls entry (a path on the image host,
+  // or a full URL) and allows only grok.com's own hosts.
+  function grokAsset(raw) {
+    let u;
+    try {
+      u = new URL(raw, GROK_ASSETS);
+    } catch {
+      return null;
+    }
+    if (u.protocol !== 'https:' || u.username || u.password || u.port) return null;
+    return u.hostname === 'assets.grok.com' || u.hostname === 'grok.com' ? u.href : null;
+  }
+
   async function claudeOrgId() {
     if (claudeOrg) return claudeOrg;
     const orgs = await getJSON(`${CLAUDE}/api/organizations`, {});
@@ -526,6 +580,59 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       await emitFile(`${CLAUDE}/api/${org}/files/${encodeURIComponent(a.file_id)}/preview`, { credentials: 'include' }, emit);
       return undefined;
     },
+    // grok.com: the list pages through nextPageToken until count
+    // conversations are in hand. Stopping at GROK_MAX_PAGES short of count
+    // while grok.com still offers a page sets more, so the reader does not
+    // take the short list as complete.
+    async 'grok.list'(a) {
+      const out = [];
+      let token = '';
+      for (let page = 0; page < GROK_MAX_PAGES && out.length < a.count; page++) {
+        const q = new URLSearchParams({ pageSize: String(a.count - out.length) });
+        if (token) q.set('pageToken', token);
+        const r = await grokJSON(`${GROK}/rest/app-chat/conversations?${q}`, {});
+        if (!r || !Array.isArray(r.conversations)) throw new OpError('endpoint_changed', 'unexpected conversations answer');
+        out.push(...r.conversations);
+        token = typeof r.nextPageToken === 'string' ? r.nextPageToken : '';
+        if (!token || r.conversations.length === 0) break;
+      }
+      const result = { conversations: out.slice(0, a.count) };
+      if (token && out.length < a.count) result.more = true;
+      return result;
+    },
+    // The detail is response-node's tree and in-flight list plus
+    // load-responses' bodies for every node, as one result.
+    async 'grok.detail'(a) {
+      const base = `${GROK}/rest/app-chat/conversations/${encodeURIComponent(a.id)}`;
+      const tree = await grokJSON(`${base}/response-node?includeThreads=true`, {}, true);
+      if (!tree || !Array.isArray(tree.responseNodes)) throw new OpError('endpoint_changed', 'unexpected response-node answer');
+      const ids = tree.responseNodes.map((n) => n && n.responseId).filter((id) => typeof id === 'string' && ID_RE.test(id));
+      let responses = [];
+      if (ids.length > 0) {
+        const loaded = await grokPost(`${base}/load-responses`, { responseIds: ids });
+        if (!loaded || !Array.isArray(loaded.responses)) throw new OpError('endpoint_changed', 'unexpected load-responses answer');
+        responses = loaded.responses;
+      }
+      const inflight = Array.isArray(tree.inflightResponses) ? tree.inflightResponses : [];
+      return { conversationId: a.id, responseNodes: tree.responseNodes, inflightResponses: inflight, responses };
+    },
+    // A generated image is named by its response and index; the URL is
+    // read from grok.com again here, never taken from the request.
+    async 'grok.file'(a, emit) {
+      const m = GROK_FILE_RE.exec(a.file_id);
+      if (!m) throw bad('invalid file_id');
+      const base = `${GROK}/rest/app-chat/conversations/${encodeURIComponent(a.conversation_id)}`;
+      const loaded = await grokPost(`${base}/load-responses`, { responseIds: [m[1]] });
+      if (!loaded || !Array.isArray(loaded.responses)) throw new OpError('endpoint_changed', 'unexpected load-responses answer');
+      const r = loaded.responses.find((x) => x && x.responseId === m[1]);
+      const urls = r && Array.isArray(r.generatedImageUrls) ? r.generatedImageUrls : [];
+      const raw = urls[Number(m[2])];
+      if (typeof raw !== 'string' || raw === '') throw new OpError('not_found', 'no such image');
+      const url = grokAsset(raw);
+      if (!url) throw new OpError('endpoint_changed', 'image URL on an unexpected host');
+      await emitFile(url, { credentials: 'include' }, emit);
+      return undefined;
+    },
     // The session check runs first, so a logged-out browser never gets a
     // tab and never sends anonymously.
     async 'chatgpt.send'(a) {
@@ -542,6 +649,11 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       await claudeOrgId();
       return sender.send('claudeai', a);
     },
+    async 'grok.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      await grokSession();
+      return sender.send('grok', a);
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -550,6 +662,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'claudeai.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('claudeai', a.conversation_id);
+    },
+    async 'grok.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('grok', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).

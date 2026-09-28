@@ -18,6 +18,8 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpChatGPTSend: SourceChatGPT, OpChatGPTClose: SourceChatGPT,
 		OpClaudeAIList: SourceClaudeAI, OpClaudeAIDetail: SourceClaudeAI, OpClaudeAIFile: SourceClaudeAI,
 		OpClaudeAISend: SourceClaudeAI, OpClaudeAIClose: SourceClaudeAI,
+		OpGrokList: SourceGrok, OpGrokDetail: SourceGrok, OpGrokFile: SourceGrok,
+		OpGrokSend: SourceGrok, OpGrokClose: SourceGrok,
 	}
 	for op, want := range cases {
 		if got := op.source(); got != want {
@@ -29,7 +31,7 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 // An op with an unknown prefix, or an unknown verb on a known prefix, is
 // not attributed to ChatGPT, and the client refuses it without sending.
 func TestUnknownOpIsRejectedNotChatGPT(t *testing.T) {
-	for _, op := range []Op{"grok.list", "chatgpt.delete", "list", "", OpExtensionReload} {
+	for _, op := range []Op{"perplexity.list", "chatgpt.delete", "list", "", OpExtensionReload} {
 		if got := op.source(); got != "" {
 			t.Errorf("%q: source %q, want none", op, got)
 		}
@@ -39,7 +41,7 @@ func TestUnknownOpIsRejectedNotChatGPT(t *testing.T) {
 		sent++
 		return nil
 	}), Cooldown: &SiteCooldown{}}
-	_, err := c.Request(context.Background(), "grok.list", OpArgs{Count: 1})
+	_, err := c.Request(context.Background(), "perplexity.list", OpArgs{Count: 1})
 	if !errors.Is(err, ErrRejected) || strings.Contains(err.Error(), "chatgpt") {
 		t.Fatalf("err = %v, want a rejection not attributed to chatgpt", err)
 	}
@@ -59,10 +61,10 @@ func TestSendAndCloseUnknownSiteFail(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}), Cooldown: &SiteCooldown{}}
-	if _, err := c.Send(context.Background(), "grok", "hi", "", true); err == nil {
+	if _, err := c.Send(context.Background(), "perplexity", "hi", "", true); err == nil {
 		t.Fatal("send to an unknown site succeeded")
 	}
-	if err := c.Close(context.Background(), "grok", "abc-1"); err == nil {
+	if err := c.Close(context.Background(), "perplexity", "abc-1"); err == nil {
 		t.Fatal("close on an unknown site succeeded")
 	}
 	if len(ops) != 0 {
@@ -76,8 +78,8 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 			t.Fatalf("ParseWebSite(%q) = %q, %v", s, got, err)
 		}
 	}
-	_, err := ParseWebSite("grok")
-	if err == nil || err.Error() != `unknown site "grok" (want chatgpt or claude-ai)` {
+	_, err := ParseWebSite("perplexity")
+	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai or grok)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -105,9 +107,9 @@ func TestCooldownsAreIndependentPerSite(t *testing.T) {
 // acting as ChatGPT, and sends nothing.
 func TestWebAgentUnknownSiteFails(t *testing.T) {
 	rig := newWebRig(t)
-	rig.agent.Site = "grok"
+	rig.agent.Site = "perplexity"
 	res := rig.ask(t, "codex", "hello")
-	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `unknown site "grok"`) {
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `unknown site "perplexity"`) {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
 	}
 	if n := rig.browser.exchanges(); n != 0 {
@@ -116,10 +118,13 @@ func TestWebAgentUnknownSiteFails(t *testing.T) {
 }
 
 // Only claude.ai has the text-stability rule, with the default windows;
-// the agent's overrides change the windows but never give ChatGPT one.
+// the agent's overrides change the windows but never give ChatGPT or
+// Grok (which mark a finished answer explicitly) one.
 func TestStabilityRuleIsClaudeOnly(t *testing.T) {
-	if r := (&WebAgent{Site: SourceChatGPT, ClaudeStablePolls: 2, ClaudeStableFor: time.Second}).stableRule(); r != nil {
-		t.Fatalf("chatgpt has a stability rule: %+v", *r)
+	for _, s := range []Source{SourceChatGPT, SourceGrok} {
+		if r := (&WebAgent{Site: s, ClaudeStablePolls: 2, ClaudeStableFor: time.Second}).stableRule(); r != nil {
+			t.Fatalf("%s has a stability rule: %+v", s, *r)
+		}
 	}
 	r := (&WebAgent{Site: SourceClaudeAI}).stableRule()
 	if r == nil || r.polls != 4 || r.span != 10*time.Second {
@@ -136,15 +141,16 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt or claude-ai" || WebAgentNames() != "chatgpt-web or claude-web" || LiveSourcesLabel() != "ChatGPT and claude.ai" {
+	if WebSiteNames() != "chatgpt, claude-ai or grok" || WebAgentNames() != "chatgpt-web, claude-web or grok-web" || LiveSourcesLabel() != "ChatGPT, claude.ai and Grok" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, codex or claude-code" {
+	if SourceNames() != "chatgpt, claude-ai, grok, codex or claude-code" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
 		SourceChatGPT:  {"chatgpt-web", "ChatGPT", "chatgpt.com"},
 		SourceClaudeAI: {"claude-web", "claude.ai", "claude.ai"},
+		SourceGrok:     {"grok-web", "Grok", "grok.com"},
 	}
 	for src, w := range want {
 		if got := [3]string{WebAgentName(src), siteLabel(src), siteOf(src)}; got != w {
@@ -158,7 +164,7 @@ func TestSiteTableNames(t *testing.T) {
 			t.Fatalf("%s reader: %v %v", src, r, ok)
 		}
 	}
-	for _, src := range []Source{SourceCodex, SourceClaudeCode, "grok"} {
+	for _, src := range []Source{SourceCodex, SourceClaudeCode, "perplexity"} {
 		if IsLiveSource(src) || WebAgentName(src) != "" {
 			t.Fatalf("%s treated as a live site", src)
 		}
@@ -174,12 +180,15 @@ func TestSiteTableNames(t *testing.T) {
 // Conversation URLs are read on every site's host and no other.
 func TestConversationRefHosts(t *testing.T) {
 	for ref, want := range map[string]string{
-		"https://chatgpt.com/c/abc-1":          "abc-1",
-		"https://chatgpt.com/g/g-x/c/abc-2":    "abc-2",
-		"https://claude.ai/chat/abc-3":         "abc-3",
-		"https://example.com/c/abc-4":          "",
-		"http://chatgpt.com/c/abc-5":           "",
-		"https://claude.ai.example.com/chat/x": "",
+		"https://chatgpt.com/c/abc-1":                             "abc-1",
+		"https://chatgpt.com/g/g-x/c/abc-2":                       "abc-2",
+		"https://claude.ai/chat/abc-3":                            "abc-3",
+		"https://example.com/c/abc-4":                             "",
+		"http://chatgpt.com/c/abc-5":                              "",
+		"https://claude.ai.example.com/chat/x":                    "",
+		"https://grok.com/c/0e1d0000-0000-4000-8000-000000000001": "0e1d0000-0000-4000-8000-000000000001",
+		"https://grok.com/chat/abc-6":                             "",
+		"https://grok.com.example.com/c/abc-7":                    "",
 	} {
 		got, ok := conversationRef(ref)
 		if ok != (want != "") || got != want {

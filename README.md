@@ -118,9 +118,9 @@ OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP ser
 
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox only while you are chatting with it; nothing can wake it.
 
-History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex and Claude Code history from local files, and ChatGPT and claude.ai history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
+History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex and Claude Code history from local files, and ChatGPT, claude.ai and Grok history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
-ChatGPT and Claude on the web (chatgpt-web and claude-web). These make your own ChatGPT and Claude accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT or Claude, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened.
+ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first.
 
 Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
 
@@ -136,9 +136,10 @@ In one table:
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
-| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT and claude.ai history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT, claude.ai and Grok history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
+| grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
 
 The plumbing, in plain words:
 
@@ -149,7 +150,7 @@ The plumbing, in plain words:
 - AgentMail email: for agents that cannot keep anything running. Today only Instinct uses it. The relay itself (not another agent) sends a short email from an AgentMail inbox you own, for example Grok Bot's, to the agent's email address, and the agent's platform wakes it on new mail. Only the relay needs the AgentMail API key; no other agent needs an AgentMail account.
 - Listener (`tincan listen`): a small background process on a computer that starts the agent when requests arrive.
 - Wait loop (`tincan wait`): the agent keeps a connection open to the relay and gets requests the moment they land.
-- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT and claude.ai, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
+- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT, claude.ai and (once you grant it) Grok, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
 
 ## How it works end to end
 
@@ -416,7 +417,7 @@ Notes that apply to every method:
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
-| ChatGPT and Claude web agents | `chatgpt-web`, `claude-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
+| ChatGPT, Claude and Grok web agents | `chatgpt-web`, `claude-web`, `grok-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 
 Any other agent can use kind `generic` with whichever wake fits.
 
@@ -808,7 +809,7 @@ For each request it:
 3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -830,18 +831,18 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 - It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
-- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code".
-- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT and claude.ai read at most 100 conversations whatever the window says.
+- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Codex or Claude Code".
+- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai and Grok read at most 100 conversations whatever the window says.
 
 #### Adapter doc
 
 [docs/adapters/history.md](docs/adapters/history.md)
 
-### The ChatGPT and Claude web agents (chatgpt-web and claude-web)
+### The ChatGPT, Claude and Grok web agents (chatgpt-web, claude-web and grok-web)
 
 #### What it is
 
-A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`), that makes chatgpt.com or claude.ai a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT or Claude history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice.
+A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site grok`), that makes chatgpt.com, claude.ai or grok.com a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT, Claude or Grok history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice. xAI's terms prohibit automated access to Grok: grok-web acts as the owner on the owner's own account, one request at a time at a human pace, but xAI can still limit or suspend the account, so turn it on only if you accept that.
 
 #### How it joins
 
@@ -850,7 +851,7 @@ tincan invite chatgpt-web --kind chatgpt-web                                    
 TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <code> --relay http://tincan-relay
 ```
 
-For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`. Like history, it refuses to start unless the relay confirms its name.
+For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Grok, `grok-web`, `--kind grok-web` and `~/.config/tincan/grok-web.json`. A relay older than the `grok-web` kind refuses it and the CLI says so: upgrade the relay, or invite without `--kind` and use `tincan onboard --kind grok-web=grok-web`. Like history, it refuses to start unless the relay confirms its name.
 
 #### How it wakes
 
@@ -860,11 +861,11 @@ Wait: the service long-polls. Set its method to `wait` in `wake.json`.
 
 For each request, one at a time:
 
-1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt` or `claude-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
+1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt` or `grok-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
 2. Reads the optional threading line. A first line `new chat` starts a new conversation; `conversation: <id>` (or a conversation URL) continues that one; otherwise it continues the conversation this asker used last with this agent. Each asker has its own thread. The ids live in `~/.config/tincan/<agent>-state.json` (0600, ids only). Every reply ends with the conversation id so the asker can come back.
 3. Has the extension type the message into a background tab the extension opens itself (`active: false`). The extension fills the message box, clicks send, and returns once the conversation id is in the tab's address (at most 60 seconds). It never touches a tab the owner opened.
-4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again. While it waits, the agent keeps its relay presence fresh without claiming new requests.
-5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A tab nobody closes is closed after 10 minutes.
+4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Grok: the answer marked `partial: false` with nothing left in flight). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again; so does a Grok answer that ends on the plan's usage limit, which also holds Grok back for 15 minutes. Each site's cooldown is its own. While it waits, the agent keeps its relay presence fresh without claiming new requests.
+5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A Grok image the extension cannot fetch is left out and the reply says so. A tab nobody closes is closed after 10 minutes.
 
 Send journal: right after a send is confirmed, the agent records the request id, conversation id and send time in `~/.config/tincan/<agent>-journal.json` (0600, no message text). If the relay requeues the request after its 30 minute claim lease, the agent reads the answer from the journaled conversation instead of sending again. Entries are dropped after 90 minutes.
 
@@ -878,7 +879,7 @@ tincan web install --site chatgpt
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.chatgpt.plist
 ```
 
-For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Grok: first grant Grok on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options), then `tincan web install --site grok` and `com.agenttincan.web.grok.plist`; `tincan web serve --site grok` refuses to start while the extension is connected without that grant. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`, `tincan-grok-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
@@ -893,11 +894,11 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 
 ## The Tincan Chrome extension
 
-A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT and claude.ai through the owner's own logged-in Chrome.
+A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT, claude.ai and Grok through the owner's own logged-in Chrome.
 
 What it can do:
 
-- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com and claude.ai, `chatgpt.send` and `claudeai.send`, `chatgpt.close` and `claudeai.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
+- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai and grok.com, `chatgpt.send`, `claudeai.send` and `grok.send`, `chatgpt.close`, `claudeai.close` and `grok.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
 - Open, fill and close its own background tabs for sends.
 
 What it cannot do:
@@ -905,7 +906,7 @@ What it cannot do:
 - It accepts nothing outside that operation set and never runs code from a message or a page. A message is passed as data to a fixed function in an isolated content script and inserted as text.
 - No cookie or token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
-- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai.
+- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok on the extension's options page (optional host permissions, so installing or updating asks nothing for Grok).
 
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
@@ -917,7 +918,7 @@ The manifest carries a public key, so an unpacked load always gets the id `ciejo
 
 Self-reload: after the first load, updates need no Reload click. When the extension connects, it sends the native host its version and the sha256 of each file (hashed when its worker started). If `tincan history install` was run with `--extension-dir` (or from a repo checkout) and the files on disk differ, the host sends `extension.reload` and the extension calls `chrome.runtime.reload()`. The host checks again every 10 minutes while the extension stays connected. It waits while a send has a tab open, checking every 5 seconds for up to 5 minutes. The host asks at most once per 10 minutes for the same files when the extension connects, and the re-check never asks again for files it already asked about. A store install is never reloaded this way.
 
-Why an extension is required: ChatGPT and claude.ai offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
+Why an extension is required: ChatGPT, claude.ai and grok.com offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
 
 ## Onboarding
 
@@ -933,7 +934,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

@@ -170,6 +170,20 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			if p.orphaned {
 				return nil, a.bound, errOrphaned
 			}
+			if p.limited {
+				// The turn ended on the account's rate or plan limit with
+				// no answer to deliver (progressOf sets limited only then;
+				// an answer that carries a stray limit error is returned
+				// as usual): the site is left alone for a while, and the
+				// asker is told the message went through.
+				after := w.site().planLimitCooldown
+				if after <= 0 {
+					after = RateLimitBackoffMax
+				}
+				w.Native.cooldown().Note(w.Site, after)
+				w.logf("conversation %s: %s answered with a rate or plan limit; holding requests back for %s", convID, siteLabel(w.Site), after)
+				return nil, a.bound, &UnavailableError{Source: w.Site, Kind: ErrRateLimited, Detail: "plan limit", RetryAfter: after}
+			}
 			if p.finished {
 				return raw, a.bound, nil
 			}
