@@ -311,7 +311,7 @@ func askCmd() *cobra.Command {
 				if notify {
 					kind = envelope.KindNotify
 				}
-				g, err := r.SendGroup(cmd.Context(), targets, body, kind, parent, attach)
+				g, err := r.SendGroup(cmd.Context(), targets, body, kind, parent, attach, urgent)
 				if err != nil {
 					return err
 				}

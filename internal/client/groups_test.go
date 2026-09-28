@@ -25,7 +25,7 @@ func TestGroupPartialAttachmentsAndSenderScope(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	g, err := c.SendGroup(t.Context(), []string{"instinct", "muse", "instinct"}, "question", envelope.KindAsk, "", []string{path})
+	g, err := c.SendGroup(t.Context(), []string{"instinct", "muse", "instinct"}, "question", envelope.KindAsk, "", []string{path}, false)
 	if err != nil || len(g.Results) != 2 {
 		t.Fatalf("%+v %v", g, err)
 	}
@@ -84,7 +84,7 @@ func TestGroupOlderRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := c.SendGroup(t.Context(), []string{"a", "b"}, "hello", envelope.KindAsk, "", nil)
+	g, err := c.SendGroup(t.Context(), []string{"a", "b"}, "hello", envelope.KindAsk, "", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestGroupValidationAndSendFailure(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	c := m.Client(t, "grokbot")
 	for _, targets := range [][]string{{}, {"instinct", "grokbot"}, {"instinct", ""}, strings.Split("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,aa,ab,ac,ad,ae", ",")} {
-		if _, err := c.SendGroup(t.Context(), targets, "hello", envelope.KindAsk, "", nil); err == nil {
+		if _, err := c.SendGroup(t.Context(), targets, "hello", envelope.KindAsk, "", nil, false); err == nil {
 			t.Fatalf("accepted %v", targets)
 		}
 	}
-	g, err := c.SendGroup(t.Context(), []string{"instinct", "missing"}, "hello", envelope.KindAsk, "", nil)
+	g, err := c.SendGroup(t.Context(), []string{"instinct", "missing"}, "hello", envelope.KindAsk, "", nil, false)
 	if err != nil || g.Results[0].Request.ID == "" || g.Results[1].Status != envelope.StatusFailed {
 		t.Fatalf("%+v %v", g, err)
 	}
@@ -174,7 +174,7 @@ func TestGroupMaximumBodies(t *testing.T) {
 		peers[i] = m.JoinOnMachineOf(t, "instinct", name)
 	}
 	body := strings.Repeat("<", 128<<10)
-	g, err := c.SendGroup(t.Context(), targets, body, envelope.KindAsk, "", nil)
+	g, err := c.SendGroup(t.Context(), targets, body, envelope.KindAsk, "", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestGroupSuccessivePollErrorPreservesReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := c.SendGroup(t.Context(), []string{"a"}, "question", envelope.KindAsk, "", nil)
+	g, err := c.SendGroup(t.Context(), []string{"a"}, "question", envelope.KindAsk, "", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestGroupRecoversLostSendResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := c.SendGroup(t.Context(), []string{"a", "b"}, "hello", envelope.KindAsk, "", nil)
+	g, err := c.SendGroup(t.Context(), []string{"a", "b"}, "hello", envelope.KindAsk, "", nil, false)
 	if err != nil || g.Results[0].Status != envelope.StatusFailed || g.Results[0].Request.ID != "" {
 		t.Fatalf("%+v %v", g, err)
 	}
@@ -394,5 +394,25 @@ func TestGroupPollFollowsRequeue(t *testing.T) {
 	}
 	if g, err = c.WaitGroup(t.Context(), g, 0); err != nil || g.Results[0].Status != envelope.StatusQueued {
 		t.Fatalf("requeued request shows %s, want queued", g.Results[0].Status)
+	}
+}
+
+func TestGroupForwardsUrgent(t *testing.T) {
+	for _, urgent := range []bool{false, true} {
+		m := testrelay.New(t, relay.Config{})
+		c := m.Client(t, "grokbot")
+		g, err := c.SendGroup(t.Context(), []string{"instinct", "muse"}, "time critical", envelope.KindAsk, "", nil, urgent)
+		if err != nil || len(g.Results) != 2 {
+			t.Fatalf("%+v %v", g, err)
+		}
+		for _, r := range g.Results {
+			if r.Request.Urgent != urgent {
+				t.Fatalf("urgent=%v: member %+v", urgent, r.Request)
+			}
+			got, err := c.Get(t.Context(), r.Request.ID, 0)
+			if err != nil || got.Request.Urgent != urgent {
+				t.Fatalf("urgent=%v: stored %+v %v", urgent, got.Request, err)
+			}
+		}
 	}
 }

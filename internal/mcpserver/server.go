@@ -212,7 +212,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if in.Notify {
 					kind = envelope.KindNotify
 				}
-				g, err := gb.SendGroup(ctx, append([]string{in.To}, in.Also...), in.Message, kind, in.ParentID, in.Attach)
+				g, err := gb.SendGroup(ctx, append([]string{in.To}, in.Also...), in.Message, kind, in.ParentID, in.Attach, in.Urgent)
 				if err != nil {
 					return fail(err)
 				}
@@ -580,7 +580,7 @@ func fail(err error) (*mcp.CallToolResult, any, error) {
 }
 
 type groupBackend interface {
-	SendGroup(context.Context, []string, string, envelope.Kind, string, []string) (client.GroupResult, error)
+	SendGroup(context.Context, []string, string, envelope.Kind, string, []string, bool) (client.GroupResult, error)
 	WaitGroup(context.Context, client.GroupResult, time.Duration) (client.GroupResult, error)
 	GetGroup(context.Context, string, time.Duration) (client.GroupResult, error)
 }

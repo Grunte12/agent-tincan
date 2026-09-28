@@ -96,7 +96,8 @@ A send may include an optional `group` string of 1 to 64 ASCII letters, digits,
 underscores or hyphens. The relay stores and echoes it on the request.
 Groups do not change identity, parent/chain checks, rate limits, wakes,
 allowlists, leases or attachment ownership: each target receives an ordinary
-request and requires its own uploads.
+request and requires its own uploads. An urgent group send marks every member
+urgent, and each member uses its own urgent slot.
 
 `GET /v1/groups/{id}` returns only membership: an array of `{"id": "...", "to": "..."}`
 for requests sent by the authenticated caller with that group tag. It includes
