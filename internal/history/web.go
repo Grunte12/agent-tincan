@@ -149,11 +149,11 @@ func (w *WebAgent) logf(format string, args ...any) {
 }
 
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
-func (w *WebAgent) Run(ctx context.Context) error { return runPolling(ctx, w.PollOnce, w.logf) }
+func (w *WebAgent) Run(ctx context.Context) error { return RunPolling(ctx, w.PollOnce, w.logf) }
 
 // PollOnce waits up to Hold for requests and handles each one serially.
 func (w *WebAgent) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, w.Relay, w.Hold, "web-serve", w.handleSafely)
+	return PollAndHandle(ctx, w.Relay, w.Hold, "web-serve", w.handleSafely)
 }
 
 func (w *WebAgent) handleSafely(ctx context.Context, req envelope.Request) {
@@ -312,7 +312,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	label := site.label
 
 	// 1. Access, from relay-set fields only.
-	if reason := chainDenied(w.Allowlist, req, w.Name, "send messages to "+label+" as the owner", w.logf); reason != "" {
+	if reason := ChainDenied(w.Allowlist, req, w.Name, "send messages to "+label+" as the owner", w.logf); reason != "" {
 		w.logf("request %s from %s (chain %v): declined: %s", req.ID, req.From, req.Chain, reason)
 		w.reply(ctx, req, reason, envelope.StatusDeclined, nil)
 		return
