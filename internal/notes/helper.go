@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -150,7 +152,7 @@ func (h *Helper) run(ctx context.Context, args ...string) (helperResponse, error
 	if len(line) == 0 || json.Unmarshal(line, &resp) != nil {
 		var ee *exec.ExitError
 		if runErr != nil && !errors.As(runErr, &ee) {
-			return helperResponse{}, &HelperError{Code: "helper_unavailable", Message: runErr.Error()}
+			return helperResponse{}, &HelperError{Code: startFailureCode(ctx, runErr), Message: runErr.Error()}
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if runErr != nil {
@@ -166,6 +168,24 @@ func (h *Helper) run(ctx context.Context, args ...string) (helperResponse, error
 		return resp, he
 	}
 	return resp, nil
+}
+
+// startFailureCode classifies a helper that could not be started. A
+// missing or unexecutable helper, or a run cut off by its deadline, is
+// helper_unavailable (transient: installing Agent Notes or a later retry
+// fixes it). Any other start failure, such as EINVAL from a NUL in argv or
+// E2BIG from oversized arguments, comes from the arguments themselves and
+// would fail the same way on every retry, so it is permanent.
+func startFailureCode(ctx context.Context, err error) string {
+	if ctx.Err() != nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) ||
+		errors.Is(err, exec.ErrNotFound) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "helper_unavailable"
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) && (errno == syscall.EINVAL || errno == syscall.E2BIG) {
+		return "invalid_request"
+	}
+	return "helper_unavailable"
 }
 
 // CreateResult is the note an add made or found.

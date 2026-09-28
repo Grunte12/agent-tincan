@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
@@ -147,8 +148,8 @@ type extraction struct {
 // parseExtraction decodes the extractor's answer into a Request with only
 // its op's fields. Anything but exactly one schema object with a known op
 // is a failed extraction; op "unclear" is ErrUnclearRequest. Tags the
-// helper would refuse are dropped rather than failing an add. The service
-// validates the result.
+// helper would refuse are dropped and an overlong title is cut to the
+// limit, rather than failing an add. The service validates the result.
 func parseExtraction(raw []byte) (Request, error) {
 	raw = bytes.TrimSpace(raw)
 	if rest, ok := bytes.CutPrefix(raw, []byte("```")); ok {
@@ -167,10 +168,10 @@ func parseExtraction(raw []byte) (Request, error) {
 	}
 	switch op := Op(e.Op); op {
 	case OpAdd:
-		r := Request{Op: op, Title: oneLine(e.Title)}
+		r := Request{Op: op, Title: capTitle(oneLine(e.Title), maxTitleRunes)}
 		for _, tag := range e.Tags {
 			tag = strings.TrimSpace(tag)
-			if tag == "" || strings.Contains(tag, ",") || hasControl(tag) || len(r.Tags) == maxTags {
+			if tag == "" || strings.Contains(tag, ",") || hasControl(tag) || utf8.RuneCountInString(tag) > maxTagRunes || len(r.Tags) == maxTags {
 				continue
 			}
 			r.Tags = append(r.Tags, tag)
@@ -184,4 +185,12 @@ func parseExtraction(raw []byte) (Request, error) {
 		return Request{}, fmt.Errorf("%w: the extractor could not tell", ErrUnclearRequest)
 	}
 	return Request{}, fmt.Errorf("request extractor answered op %q", e.Op)
+}
+
+// capTitle is s cut to at most n runes, trailing space trimmed.
+func capTitle(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return strings.TrimSpace(string([]rune(s)[:n]))
 }

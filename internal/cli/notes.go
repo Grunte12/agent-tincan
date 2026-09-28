@@ -356,6 +356,13 @@ func healthCheck(path, exe string) check {
 		return check{name, "warn", path + " is not a health file: " + err.Error(), ""}
 	}
 	when := h.UpdatedAt.Local().Format(time.DateTime)
+	// Whatever ran last, a helper that ignores idempotency keys stays a
+	// failure until a create shows it honors them: a successful search
+	// must not hide that adds can be duplicated.
+	if h.IdempotencyUnsupported {
+		return check{name, "fail", fmt.Sprintf("%s: the helper ignored an add's idempotency key, so a redelivered add could be saved twice (last helper call: %s at %s)", "helper_too_old", h.Command, when),
+			helperFix("helper_too_old", exe)}
+	}
 	if h.OK {
 		return check{name, "ok", fmt.Sprintf("%s succeeded at %s", h.Command, when), ""}
 	}
@@ -380,8 +387,10 @@ func helperFix(code, exe string) string {
 		if exe != "" {
 			who += " (" + exe + ")"
 		}
+		// Only the library folder: Full Disk Access would also extend to the
+		// codex extractor the service runs as a child process.
 		return "The service cannot open the library. In System Settings > Privacy & Security, grant " + who +
-			" Files and Folders access to the library's folder, or Full Disk Access, then restart the service: " +
+			" Files and Folders access to the library's folder, then restart the service: " +
 			"launchctl kickstart -k gui/$(id -u)/" + notes.ServiceLabel
 	case "helper_too_old":
 		return "Update Agent Notes: this helper cannot save notes safely for the notes agent. Install the latest Agent Notes, then restart the service."

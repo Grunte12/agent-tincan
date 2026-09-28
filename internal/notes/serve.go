@@ -267,6 +267,14 @@ func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.logf("request %s: panic: %v", req.ID, p)
+			// A spooled add may already be written, or will be on its retry:
+			// a failed reply now would tell the asker it was not saved, and a
+			// resend would save it twice. Leave it to the retry to answer.
+			if _, spooled, err := s.spool.Get(req.ID); err == nil && spooled {
+				s.logf("request %s: the add is spooled, leaving it for the retry to apply and answer", req.ID)
+				s.progress(hctx, req, "The notes agent hit an internal error; the add is kept on the notes Mac and will be retried. The reply will carry the note id.")
+				return
+			}
 			s.reply(hctx, req, "The notes agent hit an internal error handling this request.", envelope.StatusFailed)
 		}
 	}()
@@ -449,6 +457,9 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 // reach the asker.
 func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
+	if !fresh && !s.stillWanted(ctx, e) {
+		return
+	}
 	tags := slices.Clone(e.Note.Tags)
 	if !slices.Contains(tags, fromAgentTag) {
 		tags = append(tags, fromAgentTag)
@@ -465,7 +476,12 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		// The note was written, so the asker gets its id, but this helper
 		// cannot dedupe a redelivered add: tell the owner loudly.
 		s.logf("request %s: WARNING %s: the Agent Notes helper ignored the idempotency key; a redelivered add could be saved twice. %s", req.ID, codeHelperTooOld, helperTooOldMessage)
-		s.recordHealth("create", req.ID, &HelperError{Code: codeHelperTooOld, Message: helperTooOldMessage})
+		unsupported := true
+		s.recordHealthIdem("create", req.ID, &HelperError{Code: codeHelperTooOld, Message: helperTooOldMessage}, &unsupported)
+	} else if err == nil {
+		// The helper answered with "existed": it honors idempotency keys.
+		supported := false
+		s.recordHealthIdem("create", req.ID, nil, &supported)
 	} else {
 		s.recordHealth("create", req.ID, err)
 	}
@@ -489,6 +505,35 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	}
 	s.logf("request %s from %s: add applied as note %s (existed %v, state %s)", req.ID, req.From, res.Note.Summary.ID, res.Existed, res.Note.Summary.State)
 	s.sendFinal(ctx, e, addedReply(res), envelope.StatusAnswered)
+}
+
+// stillWanted asks the relay about a spooled add before a retry writes it.
+// The sender may have cancelled it while it sat in the spool (after the
+// claim lease lapsed and the relay requeued it, or through an agent
+// removal): then the entry is dropped unwritten, since a sender who
+// cancels a stuck add and resends it would otherwise get two notes. Every
+// other state is written as before, expired included (R5, R8). A request
+// the relay no longer knows is written too; its reply is then dropped. If
+// the relay cannot be asked, the entry is kept and not written this round.
+func (s *Service) stillWanted(ctx context.Context, e SpoolEntry) bool {
+	id := e.Request.ID
+	gctx, cancel := context.WithTimeout(ctx, replyTimeout)
+	defer cancel()
+	res, err := s.relay.Get(gctx, id, 0)
+	switch {
+	case client.IsStatus(err, http.StatusNotFound):
+		return true
+	case err != nil:
+		s.logf("request %s: could not check the request with the relay, keeping the add spooled for the next retry: %v", id, err)
+		return false
+	case res.Status == envelope.StatusCancelled:
+		s.logf("request %s from %s: the sender cancelled this add before it was saved, dropping it unwritten", id, e.Request.From)
+		if err := s.spool.Remove(id); err != nil {
+			s.logf("request %s: spool remove failed: %v", id, err)
+		}
+		return false
+	}
+	return true
 }
 
 // sendFinal sends the final reply for a spooled add and clears its entry,
@@ -585,10 +630,21 @@ type Health struct {
 	OK        bool      `json:"ok"`
 	Code      string    `json:"code,omitempty"`
 	Message   string    `json:"message,omitempty"`
+	// IdempotencyUnsupported is set by a create whose helper ignored the
+	// idempotency key, and cleared only by a create whose helper honored
+	// it, so a later search or read cannot hide helper_too_old.
+	IdempotencyUnsupported bool `json:"idempotency_unsupported,omitempty"`
 }
 
-// recordHealth writes the health file; a failure is only logged.
+// recordHealth writes the health file; a failure is only logged. The
+// idempotency flag carries over from the previous file unless this is a
+// create, which sets it (the helper ignored the key) or clears it (the
+// helper answered with "existed").
 func (s *Service) recordHealth(command, requestID string, err error) {
+	s.recordHealthIdem(command, requestID, err, nil)
+}
+
+func (s *Service) recordHealthIdem(command, requestID string, err error, idemUnsupported *bool) {
 	h := Health{UpdatedAt: time.Now().UTC(), Command: command, RequestID: requestID, OK: err == nil}
 	if err != nil {
 		if he, ok := errors.AsType[*HelperError](err); ok {
@@ -599,12 +655,20 @@ func (s *Service) recordHealth(command, requestID string, err error) {
 			h.OK = true // a clean "no such note" is a working helper
 		}
 	}
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if idemUnsupported != nil {
+		h.IdempotencyUnsupported = *idemUnsupported
+	} else if prev, rerr := os.ReadFile(s.healthPath); rerr == nil {
+		var p Health
+		if json.Unmarshal(prev, &p) == nil {
+			h.IdempotencyUnsupported = p.IdempotencyUnsupported
+		}
+	}
 	b, merr := json.MarshalIndent(h, "", "  ")
 	if merr != nil {
 		return
 	}
-	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
 	if werr := writeFileAtomic(s.healthPath, append(b, '\n')); werr != nil {
 		s.logf("health file %s: %v", s.healthPath, werr)
 	}

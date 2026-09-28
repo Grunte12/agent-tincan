@@ -212,6 +212,11 @@ func Validate(r Request) error {
 		if !utf8.ValidString(r.Title) || !utf8.ValidString(r.Body) {
 			return errors.New("the title or body is not valid UTF-8")
 		}
+		// The body travels to the helper as a command-line argument, which
+		// cannot hold a NUL: exec would refuse to start the helper at all.
+		if strings.ContainsRune(r.Body, 0) {
+			return errors.New("the body contains a NUL character")
+		}
 		if len(r.Tags) > maxTags {
 			return fmt.Errorf("there are more than %d tags", maxTags)
 		}

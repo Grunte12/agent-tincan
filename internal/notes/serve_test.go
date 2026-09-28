@@ -50,13 +50,23 @@ type testLog struct {
 	t   *testing.T
 	mu  sync.Mutex
 	buf strings.Builder
+	// panicOn, when set, makes the first log line containing it panic, to
+	// stand in for a bug at that point of the service.
+	panicOn string
 }
 
 func (l *testLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	l.buf.Write(p)
+	trip := l.panicOn != "" && strings.Contains(string(p), l.panicOn)
+	if trip {
+		l.panicOn = ""
+	}
 	l.mu.Unlock()
 	l.t.Log(strings.TrimRight(string(p), "\n"))
+	if trip {
+		panic("injected panic at: " + strings.TrimSpace(string(p)))
+	}
 	return len(p), nil
 }
 
@@ -74,6 +84,7 @@ type rig struct {
 	svc       *Service
 	log       *testLog
 	replyFail atomic.Bool
+	getFail   atomic.Bool
 }
 
 // newRig joins notes and codex to a test mesh and builds a notes service
@@ -93,6 +104,17 @@ func newRig(t *testing.T, rc relay.Config) *rig {
 	ps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if r.replyFail.Load() && strings.HasSuffix(req.URL.Path, "/reply") {
 			http.Error(w, `{"error":"injected reply failure"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if r.getFail.Load() && req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/requests/") {
+			// A dropped connection, not an HTTP answer.
+			if hj, ok := w.(http.Hijacker); ok {
+				if c, _, err := hj.Hijack(); err == nil {
+					_ = c.Close()
+					return
+				}
+			}
+			http.Error(w, "unreachable", http.StatusBadGateway)
 			return
 		}
 		proxy.ServeHTTP(w, req)
@@ -950,5 +972,196 @@ func TestCurrentHelperFreshCreateIsHealthy(t *testing.T) {
 	b, _ := os.ReadFile(r.cfg.HealthPath)
 	if err := json.Unmarshal(b, &h); err != nil || !h.OK || h.Code != "" {
 		t.Fatalf("health = %s (%v)", b, err)
+	}
+}
+
+// Finding #1: exec rejects an argv string holding NUL before the helper
+// starts, so an add body with NUL is refused at validation: answered
+// failed, nothing spooled or written.
+func TestAddWithNULBodyAnsweredFailedNothingSpooled(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	res := r.ask(t, "grokbot", addBody("Tent", "a\x00b"))
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "NUL") {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	r.assertSpoolEmpty(t)
+	if len(r.helper.calls(t)) != 0 || len(r.helper.notes()) != 0 {
+		t.Fatal("the NUL add reached the helper")
+	}
+}
+
+// A helper that cannot even be started with these arguments (EINVAL from
+// a NUL in argv) is a permanent failure, not a missing helper.
+func TestHelperStartFailureFromArgsIsPermanent(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	_, err := r.svc.helper.Create(t.Context(), "Tent", "a\x00b", nil, map[string]string{}, "tincan:x")
+	if !IsPermanent(err) || errorCode(err) != "invalid_request" {
+		t.Fatalf("err = %v (code %q), want permanent invalid_request", err, errorCode(err))
+	}
+	missing := &Helper{Path: filepath.Join(t.TempDir(), "no-helper"), LibraryRoot: r.cfg.LibraryRoot, AppSupportRoot: r.cfg.AppSupportRoot}
+	if _, err := missing.Search(t.Context(), "x"); IsPermanent(err) || errorCode(err) != "helper_unavailable" {
+		t.Fatalf("missing helper: err = %v, want transient helper_unavailable", err)
+	}
+}
+
+// An add already spooled with a NUL body (from a build before validation
+// refused it) gets a final failed reply on its retry instead of being
+// retried forever.
+func TestSpooledPoisonAddGetsFinalFailedReply(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	req := r.send(t, "grokbot", addBody("Tent", "placeholder"))
+	claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := SpoolEntry{Request: claimed, Note: Request{Op: OpAdd, Title: "Tent", Body: "a\x00b"}, SpooledAt: time.Now().UTC()}
+	if err := r.svc.spool.Put(e); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.svc.RetrySpooled(t.Context()); n != 1 {
+		t.Fatalf("RetrySpooled tried %d", n)
+	}
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "invalid_request") {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// stuckThenRequeued spools an add the helper cannot apply, then lets the
+// claim lease lapse so the relay puts the request back to queued.
+func (r *rig) stuckThenRequeued(t *testing.T) envelope.Request {
+	t.Helper()
+	r.helper.failCreates(t, "operation_failed")
+	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+	r.poll(t, 1)
+	if len(r.spoolFiles(t)) != 1 {
+		t.Fatalf("spool = %v", r.spoolFiles(t))
+	}
+	r.redeliver(t)
+	r.helper.failCreates(t, "")
+	return req
+}
+
+// Finding #2: a spooled add whose request the sender cancelled after the
+// lease lapsed is dropped on retry without calling the helper.
+func TestSpooledAddCancelledBySenderIsDropped(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	req := r.stuckThenRequeued(t)
+	if err := r.mesh.Client(t, "grokbot").Cancel(t.Context(), req.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := len(r.helper.callsOf(t, "create"))
+	if n := r.svc.RetrySpooled(t.Context()); n != 1 {
+		t.Fatalf("RetrySpooled tried %d", n)
+	}
+	if after := len(r.helper.callsOf(t, "create")); after != before {
+		t.Fatalf("helper create ran for a cancelled add: %d -> %d", before, after)
+	}
+	if len(r.helper.notes()) != 0 {
+		t.Fatalf("a cancelled add was written: %+v", r.helper.notes())
+	}
+	r.assertSpoolEmpty(t)
+	if !strings.Contains(r.log.String(), "cancelled") {
+		t.Fatalf("the drop was not logged:\n%s", r.log.String())
+	}
+}
+
+// A requeued (not cancelled) spooled add is still written on retry.
+func TestSpooledAddRequeuedIsStillWritten(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	r.stuckThenRequeued(t)
+	r.svc.RetrySpooled(t.Context())
+	if len(r.helper.notes()) != 1 {
+		t.Fatalf("notes = %+v, want the add written", r.helper.notes())
+	}
+}
+
+// When the relay cannot be reached to check the request, the add is kept
+// and not written this round.
+func TestSpooledAddKeptWhenStatusUnreadable(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	r.stuckThenRequeued(t)
+	r.getFail.Store(true)
+	before := len(r.helper.callsOf(t, "create"))
+	r.svc.RetrySpooled(t.Context())
+	if after := len(r.helper.callsOf(t, "create")); after != before {
+		t.Fatalf("helper create ran without a status check: %d -> %d", before, after)
+	}
+	if len(r.spoolFiles(t)) != 1 {
+		t.Fatalf("spool = %v, want the entry kept", r.spoolFiles(t))
+	}
+	r.getFail.Store(false)
+	r.svc.RetrySpooled(t.Context())
+	if len(r.helper.notes()) != 1 {
+		t.Fatalf("notes = %+v after the relay came back", r.helper.notes())
+	}
+}
+
+// A panic after the add is spooled does not answer it failed: the entry
+// stays, and the retry saves it and answers with the note id.
+func TestPanicAfterSpoolLeavesAddForRetry(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.log.panicOn = "add applied as note"
+	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+	r.poll(t, 1)
+	if res := r.get(t, "grokbot", req.ID); res.Reply != nil {
+		t.Fatalf("answered after a panic with the add spooled: %+v", res.Reply)
+	}
+	if len(r.spoolFiles(t)) != 1 {
+		t.Fatalf("spool = %v, want the entry kept", r.spoolFiles(t))
+	}
+	r.svc.RetrySpooled(t.Context())
+	res := r.get(t, "grokbot", req.ID)
+	notes := r.helper.notes()
+	if res.Status != envelope.StatusAnswered || len(notes) != 1 || !strings.Contains(res.Reply.Body, notes[0].ID) {
+		t.Fatalf("status %s reply %+v notes %+v", res.Status, res.Reply, notes)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// A panic before anything is spooled is still answered failed.
+func TestPanicBeforeSpoolAnswersFailed(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.log.panicOn = "structured search"
+	res := r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "internal error") {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+}
+
+func readHealth(t *testing.T, path string) Health {
+	t.Helper()
+	var h Health
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &h); err != nil {
+		t.Fatalf("health %s: %v", b, err)
+	}
+	return h
+}
+
+// helper_too_old sticks: a later search or read does not clear it; only
+// a create answered with "existed" does, and it survives a restart.
+func TestHelperTooOldIsStickyUntilIdempotentCreate(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, filepath.Join(r.helper.state, "old-helper"), "")
+	r.ask(t, "grokbot", addBody("Tent", "blue"))
+	if h := readHealth(t, r.cfg.HealthPath); !h.IdempotencyUnsupported {
+		t.Fatalf("health = %+v, want idempotency unsupported", h)
+	}
+	r.restart(t)
+	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if h := readHealth(t, r.cfg.HealthPath); !h.OK || h.Command != "search" || !h.IdempotencyUnsupported {
+		t.Fatalf("health after a search = %+v, want the flag kept", h)
+	}
+	if err := os.Remove(filepath.Join(r.helper.state, "old-helper")); err != nil {
+		t.Fatal(err)
+	}
+	r.ask(t, "grokbot", addBody("Stove", "fuel"))
+	if h := readHealth(t, r.cfg.HealthPath); !h.OK || h.IdempotencyUnsupported {
+		t.Fatalf("health after an idempotent create = %+v, want the flag cleared", h)
 	}
 }

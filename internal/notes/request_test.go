@@ -59,7 +59,7 @@ func TestParseStructuredRejects(t *testing.T) {
 }
 
 func TestValidateAdd(t *testing.T) {
-	ok := Request{Op: OpAdd, Title: "Tent\twith tab", Body: "any\nbody\x00is fine", Tags: []string{"a", "b"}}
+	ok := Request{Op: OpAdd, Title: "Tent\twith tab", Body: "any\nbody\tis fine", Tags: []string{"a", "b"}}
 	if err := Validate(ok); err != nil {
 		t.Fatalf("valid add rejected: %v", err)
 	}
@@ -72,6 +72,7 @@ func TestValidateAdd(t *testing.T) {
 		"blank tag":       {Op: OpAdd, Title: "x", Tags: []string{" "}},
 		"too many tags":   {Op: OpAdd, Title: "x", Tags: slices.Repeat([]string{"t"}, maxTags+1)},
 		"long body":       {Op: OpAdd, Title: "x", Body: strings.Repeat("x", maxBodyBytes+1)},
+		"NUL in body":     {Op: OpAdd, Title: "x", Body: "a\x00b"},
 		"unknown op":      {Op: "delete"},
 		"search no query": {Op: OpSearch},
 	} {

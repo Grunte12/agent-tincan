@@ -21,6 +21,7 @@ log=$FAKE_CODEX_LOG
 for a in "$@"; do printf '%s\0' "$a" >> "$log/args"; done
 pwd -P > "$log/pwd"
 printf '%s' "${TINCAN_CONFIG:-}" > "$log/tincan_config"
+printf '%s' "${AGENT_NOTES_LIBRARY_ROOT:-}" > "$log/library_root"
 ls -A > "$log/ls"
 cat > "$log/stdin"
 out=""
@@ -53,6 +54,7 @@ func fakeCodex(t *testing.T, reply string) (logDir string, x *CodexExtractor) {
 	t.Setenv("FAKE_CODEX_LOG", logDir)
 	t.Setenv("FAKE_CODEX_REPLY", reply)
 	t.Setenv("TINCAN_CONFIG", "/should/not/leak.json")
+	t.Setenv("AGENT_NOTES_LIBRARY_ROOT", "/should/not/leak/library")
 	return logDir, NewCodexExtractor(filepath.Join(t.TempDir(), "notes-scratch"))
 }
 
@@ -159,6 +161,9 @@ func TestCodexExtractorFlagsAndInput(t *testing.T) {
 	}
 	if env := readLog(t, logDir, "tincan_config"); env != "" {
 		t.Fatalf("TINCAN_CONFIG leaked into the extractor run: %q", env)
+	}
+	if env := readLog(t, logDir, "library_root"); env != "" {
+		t.Fatalf("AGENT_NOTES_LIBRARY_ROOT leaked into the extractor run: %q", env)
 	}
 	if last := args[len(args)-1]; last != extractInstructions || strings.Contains(last, text) {
 		t.Fatalf("prompt argument is not the fixed instructions: %q", last)
@@ -303,5 +308,26 @@ func TestParseExtractionKeepsOnlyOpFields(t *testing.T) {
 	}
 	if r.Op != OpAdd || r.Title != "Tent choice" || !slices.Equal(r.Tags, []string{"camping"}) || r.Query != "" || r.Count != 0 || r.ID != "" {
 		t.Fatalf("request = %+v", r)
+	}
+}
+
+// A model-chosen tag over the helper's limit is dropped and an overlong
+// title is cut to the limit, so the free-text add still goes through.
+func TestParseExtractionFitsOverlongTitleAndTags(t *testing.T) {
+	long := strings.Repeat("é", maxTitleRunes+1)
+	raw, _ := json.Marshal(map[string]any{"op": "add", "title": long, "tags": []string{strings.Repeat("t", maxTagRunes+1), "ok"}, "query": "", "count": 0, "id": ""})
+	r, err := parseExtraction(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.Tags, []string{"ok"}) {
+		t.Fatalf("tags = %q, want the overlong tag dropped", r.Tags)
+	}
+	if n := len([]rune(r.Title)); n != maxTitleRunes || !strings.HasPrefix(long, r.Title) {
+		t.Fatalf("title has %d runes, want a %d-rune prefix", n, maxTitleRunes)
+	}
+	r.Body = "the sender's text"
+	if err := Validate(r); err != nil {
+		t.Fatalf("fitted add does not validate: %v", err)
 	}
 }

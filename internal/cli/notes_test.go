@@ -180,8 +180,8 @@ func TestNotesDoctorReportsHelperError(t *testing.T) {
 		code string
 		want []string
 	}{
-		{"missing_authorization", []string{"missing_authorization", "library access denied", "Full Disk Access", "Files and Folders"}},
-		{"operation_failed", []string{"operation_failed", "Full Disk Access"}},
+		{"missing_authorization", []string{"missing_authorization", "library access denied", "Files and Folders"}},
+		{"operation_failed", []string{"operation_failed", "Files and Folders"}},
 		{"helper_too_old", []string{"helper_too_old", "Update Agent Notes"}},
 	}
 	for _, tc := range cases {
@@ -193,8 +193,26 @@ func TestNotesDoctorReportsHelperError(t *testing.T) {
 				t.Fatalf("doctor passed with a failed helper result:\n%s", out)
 			}
 			wantLine(t, out, "[FAIL] last helper result", append(tc.want, "create")...)
+			if strings.Contains(out, "Full Disk Access") {
+				t.Errorf("fix suggests Full Disk Access, which the codex extractor would inherit:\n%s", out)
+			}
 		})
 	}
+}
+
+// helper_too_old is sticky: a later successful search does not make the
+// doctor call the helper healthy while adds run without idempotency.
+func TestNotesDoctorFailsWhileIdempotencyUnsupported(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	joinNotes(t, m)
+	setKind(t, m, "notes")
+	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "search", OK: true, IdempotencyUnsupported: true})
+	out, err := e.run(t)
+	if err == nil {
+		t.Fatalf("doctor passed with an idempotency-unsupported helper:\n%s", out)
+	}
+	wantLine(t, out, "[FAIL] last helper result", "helper_too_old", "Update Agent Notes")
 }
 
 func TestNotesDoctorNoHealthYet(t *testing.T) {
