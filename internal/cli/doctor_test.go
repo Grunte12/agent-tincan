@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,5 +107,37 @@ func TestConfigCheck(t *testing.T) {
 	good := []mcpConfigEntry{{File: cfg, Name: "tincan", Command: exe, Args: []string{"mcp"}}}
 	if c := configCheck(good, exe); c.Status != "ok" {
 		t.Fatalf("clean entry: got %+v", c)
+	}
+}
+
+func TestDoctorProgressToolCount(t *testing.T) {
+	for _, missingProgress := range []bool{false, true} {
+		t.Run(fmt.Sprint(missingProgress), func(t *testing.T) {
+			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
+			if !missingProgress {
+				names = append(names, "progress")
+			}
+			var tools []map[string]string
+			for _, name := range names {
+				tools = append(tools, map[string]string{"name": name})
+			}
+			raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": tools}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exe := filepath.Join(t.TempDir(), "mcp-probe")
+			script := "#!/bin/sh\nread -r a\nread -r b\nread -r c\nprintf '%s\\n' '" + string(raw) + "'\n"
+			if err := os.WriteFile(exe, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got := probeCheck(t.Context(), exe, false, true)
+			if missingProgress {
+				if got.Status != "fail" || !strings.Contains(got.Detail, "missing progress") {
+					t.Fatalf("old tools: %+v", got)
+				}
+			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 12 tools") {
+				t.Fatalf("tools: %+v", got)
+			}
+		})
 	}
 }

@@ -15,7 +15,7 @@ import (
 func TestSearchClient(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	r := m.Client(t, "grokbot")
-	req, err := r.Send(t.Context(), "muse", `restaurant & sushi "booked"`, envelope.KindAsk, "")
+	req, err := r.Send(t.Context(), "muse", `restaurant & sushi "booked"`, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

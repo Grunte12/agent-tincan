@@ -285,7 +285,7 @@ func TestWebPresenceDuringLongWait(t *testing.T) {
 			switch n {
 			case 0:
 				start = time.Now()
-				q, err := codex.Send(ctx, "chatgpt-web", "a second question", envelope.KindAsk, "")
+				q, err := codex.Send(ctx, "chatgpt-web", "a second question", envelope.KindAsk, "", false)
 				if err != nil {
 					t.Error(err)
 				}

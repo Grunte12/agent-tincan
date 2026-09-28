@@ -316,3 +316,47 @@ func TestOnlineSkipRechecksAndWakesWhenStillQueued(t *testing.T) {
 		t.Fatalf("wakes = %d, want still 1 once the poller took the request", rc.count())
 	}
 }
+
+func TestUrgentImmediateOnlineAndBudget(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	w := New(Config{"target": {Method: Webhook, URL: ts.URL, MaxPerHour: 1}}, st, Options{Debounce: time.Hour, Online: func(string) bool { return true }})
+	w.Queued(t.Context(), envelope.Request{To: "target", Urgent: true})
+	done := make(chan struct{})
+	go func() { w.Flush(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("urgent wake waited for debounce or online recheck")
+	}
+	if rc.count() != 1 {
+		t.Fatalf("wakes = %d", rc.count())
+	}
+	w.Queued(t.Context(), envelope.Request{To: "target", Urgent: true})
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("urgent exceeded hourly budget: %d", rc.count())
+	}
+	if got := strings.Join(events(t, st), ","); got != "woke,wake_skipped" {
+		t.Fatalf("audit = %s", got)
+	}
+}
+
+func TestUrgentPullsPendingWakeForward(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"target": {Method: Webhook, URL: ts.URL}}, auditStore(t), Options{Debounce: time.Hour})
+	w.Queued(t.Context(), envelope.Request{To: "target"})
+	w.Queued(t.Context(), envelope.Request{To: "target", Urgent: true})
+	done := make(chan struct{})
+	go func() { w.Flush(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("urgent request did not pull in pending wake")
+	}
+	if rc.count() != 1 {
+		t.Fatalf("wakes = %d", rc.count())
+	}
+}

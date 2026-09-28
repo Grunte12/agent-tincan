@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,7 +76,7 @@ func TestListenKeepsPresenceWhileCommandRuns(t *testing.T) {
 	grokbot := m.Client(t, "grokbot")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	first, err := grokbot.Send(ctx, "muse", "call Joe's Garage", envelope.KindAsk, "")
+	first, err := grokbot.Send(ctx, "muse", "call Joe's Garage", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +88,7 @@ func TestListenKeepsPresenceWhileCommandRuns(t *testing.T) {
 	}()
 	waitForFile(t, running)
 	start := time.Now()
-	second, err := grokbot.Send(ctx, "muse", "and the dentist", envelope.KindAsk, "")
+	second, err := grokbot.Send(ctx, "muse", "and the dentist", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,5 +263,229 @@ func TestListenPresenceErrorsAreLoggedOnly(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "tincan listen: presence:") || !strings.Contains(log.String(), "relay down") {
 		t.Fatalf("presence errors not logged: %q", log.String())
+	}
+}
+
+func TestListenContinuesAfterPingFailure(t *testing.T) {
+	for _, phase := range []string{"claim", "reply"} {
+		for _, status := range []int{409, 503} {
+			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
+				fastListen(t, time.Second, time.Minute, time.Second)
+				oldRetry := client.PongRetry
+				client.PongRetry = nil
+				t.Cleanup(func() { client.PongRetry = oldRetry })
+				var peeks, failures atomic.Int32
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.URL.Path == "/v1/poll":
+						if r.URL.Query().Get("hold") == "0" {
+							w.WriteHeader(204)
+							return
+						}
+						if peeks.Add(1) == 1 {
+							fmt.Fprint(w, `{"waiting":1,"pings":1,"pending":[{"id":"ping","kind":"ping"}]}`)
+						} else {
+							fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"work","kind":"ask"}]}`)
+						}
+					case strings.HasSuffix(r.URL.Path, "/"+phase):
+						failures.Add(1)
+						http.Error(w, `{"error":"ping failed"}`, status)
+					default:
+						fmt.Fprint(w, `{}`)
+					}
+				}))
+				defer ts.Close()
+				relay, err := client.NewRelay(ts.URL, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				marker := filepath.Join(t.TempDir(), "nudged")
+				if err := listen(ctx, relay, "touch "+marker, true); err != nil {
+					t.Fatal(err)
+				}
+				if failures.Load() != 1 || peeks.Load() < 2 {
+					t.Fatalf("failures=%d peeks=%d", failures.Load(), peeks.Load())
+				}
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestInboxPingFailurePreservesWork(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/poll":
+			fmt.Fprint(w, `{"requests":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask","body":"real work"}]}`)
+		case "/v1/requests/ping/claim":
+			http.Error(w, `{"error":"ping failed"}`, http.StatusServiceUnavailable)
+		case "/v1/requests/work/claim":
+			fmt.Fprint(w, `{"id":"work","kind":"ask","body":"real work"}`)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, jsonOutput := range []bool{false, true} {
+		var out, errOut bytes.Buffer
+		check := checkInbox
+		if jsonOutput {
+			check = checkInboxJSON
+		}
+		if err := check(t.Context(), relay, 0, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "real work") {
+			t.Fatalf("output: %s", &out)
+		}
+	}
+	in, _, err := waitForInbox(t.Context(), relay, time.Second, client.RepliesNone)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "work" {
+		t.Fatalf("wait: %+v, %v", in, err)
+	}
+}
+
+func TestListenDrainsTruncatedPingBatchWithoutNudging(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var answered, peeks atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/poll":
+			if r.URL.Query().Get("hold") == "0" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			peeks.Add(1)
+			done := int(answered.Load())
+			waiting := client.Waiting{Total: 60 - done, Queued: 60 - done, Pings: 60 - done}
+			for i := done; i < min(done+relay.MaxPeekPending, 60); i++ {
+				waiting.Pending = append(waiting.Pending, envelope.Pending{ID: fmt.Sprintf("ping-%d", i), Kind: envelope.KindPing})
+			}
+			if err := json.NewEncoder(w).Encode(waiting); err != nil {
+				t.Errorf("encode peek: %v", err)
+			}
+			if done == 60 {
+				cancel()
+			}
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			fmt.Fprint(w, `{}`)
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			answered.Add(1)
+			fmt.Fprint(w, `{}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+	r, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "nudged")
+	err = listen(ctx, r, "touch "+marker, true)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("exec command ran or marker could not be checked: %v", statErr)
+	}
+	if err != context.Canceled {
+		t.Fatalf("listen = %v, want context.Canceled", err)
+	}
+	if answered.Load() != 60 || peeks.Load() != 3 {
+		t.Fatalf("answered=%d peeks=%d, want 60 answers and 3 peeks", answered.Load(), peeks.Load())
+	}
+}
+
+func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
+	fastListen(t, time.Second, time.Minute, time.Second)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/poll" {
+			waiting := client.Waiting{Total: 51, Queued: 51, Pings: 50}
+			for i := range 50 {
+				waiting.Pending = append(waiting.Pending, envelope.Pending{ID: fmt.Sprintf("ping-%d", i), Kind: envelope.KindPing})
+			}
+			if err := json.NewEncoder(w).Encode(waiting); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		http.Error(w, `{"error":"ping failed"}`, http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	marker := filepath.Join(t.TempDir(), "waiting")
+	if err := listen(ctx, relay, `printf %s "$TINCAN_WAITING" > `+marker, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil || string(got) != "1" {
+		t.Fatalf("waiting=%q: %v", got, err)
+	}
+}
+
+// A pong that keeps failing retries in the background: work that arrives
+// meanwhile still runs the command at once, and --once waits for the retry
+// before returning instead of dropping it.
+func TestListenPongRetryNeitherDelaysWorkNorIsDropped(t *testing.T) {
+	fastListen(t, time.Second, time.Minute, time.Millisecond)
+	oldRetry := client.PongRetry
+	client.PongRetry = []time.Duration{300 * time.Millisecond}
+	t.Cleanup(func() { client.PongRetry = oldRetry })
+	var peeks, replies atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/poll":
+			if r.URL.Query().Get("hold") == "0" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			if peeks.Add(1) == 1 {
+				fmt.Fprint(w, `{"waiting":2,"pings":1,"pending":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask"}]}`)
+			} else {
+				fmt.Fprint(w, `{"waiting":1,"pending":[{"id":"work","kind":"ask"}]}`)
+			}
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			if replies.Add(1) == 1 {
+				http.Error(w, `{"error":"busy"}`, http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprint(w, `{}`)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer ts.Close()
+	relay, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "nudged")
+	start := time.Now()
+	nudged := make(chan time.Duration, 1)
+	go func() {
+		waitForFile(t, marker)
+		nudged <- time.Since(start)
+	}()
+	if err := listen(t.Context(), relay, "touch "+marker, true); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-nudged; d >= 300*time.Millisecond {
+		t.Fatalf("command ran after %s, behind the pong retry", d)
+	}
+	if replies.Load() != 2 {
+		t.Fatalf("pong replies = %d, want the retry to finish before listen returned", replies.Load())
 	}
 }

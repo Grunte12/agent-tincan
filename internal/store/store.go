@@ -26,6 +26,8 @@ var (
 	ErrNotFound = errors.New("request not found")
 	// ErrForbidden means the caller is not the agent allowed to do this.
 	ErrForbidden = errors.New("not allowed for this agent")
+	// ErrGroupFull means a sender has filled this group.
+	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
 	ErrWrongState = errors.New("request is not in a state that allows this")
 )
@@ -62,10 +64,14 @@ CREATE TABLE IF NOT EXISTS requests (
   updated_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
   lease_until INTEGER NOT NULL DEFAULT 0,
+  urgent INTEGER NOT NULL DEFAULT 0,
   reply_seen_at INTEGER NOT NULL DEFAULT 0,
   attachments TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
+-- QueueStats groups open requests across every agent; leading with status
+-- keeps it to the open rows instead of the whole request history.
+CREATE INDEX IF NOT EXISTS requests_status_to ON requests(status, to_agent);
 CREATE TABLE IF NOT EXISTS replies (
   request_id TEXT PRIMARY KEY REFERENCES requests(id),
   from_agent TEXT NOT NULL,
@@ -128,6 +134,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent version: %w", err)
 	}
+	if err := s.migrateAgentFeatures(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent features: %w", err)
+	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
@@ -136,9 +146,30 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate reply seen: %w", err)
 	}
+	if err := s.migrateGroups(); err != nil {
+		s.Close()
+		return nil, err
+	}
 	if err := s.migrateAttachments(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate attachments: %w", err)
+	}
+	if err := s.migrateUrgent(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate urgent: %w", err)
+	}
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}} {
+		var exists bool
+		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if !exists {
+			if _, err := s.db.Exec("ALTER TABLE requests ADD COLUMN " + col.name + " " + col.definition); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
 	}
 	if err := s.migrateSearch(); err != nil {
 		db.Close()
@@ -159,6 +190,18 @@ func Open(path string) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+func (s *Store) migrateUrgent() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'urgent')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 // Path is the database file the store was opened on, or "" for an
@@ -263,6 +306,28 @@ func (s *Store) migrateAgentVersion() error {
 	return err
 }
 
+func (s *Store) migrateAgentFeatures() error {
+	var pollColumn bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'poll_features')`).Scan(&pollColumn); err != nil {
+		return err
+	}
+	if !pollColumn {
+		if _, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN poll_features TEXT`); err != nil {
+			return err
+		}
+	}
+
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'features')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN features TEXT`)
+	return err
+}
+
 // migrateInvites adds the kind column to an invites table created before
 // invites could carry the agent's kind. It is a no-op on a current table.
 func (s *Store) migrateInvites() error {
@@ -313,16 +378,16 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// on either machine are untouched: a node may carry several names. The
 	// name's last activity and the build it last reported carry over.
 	var lastSeen sql.NullInt64
-	var version sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version)
+	var version, features, pollFeatures sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -386,6 +451,32 @@ func (s *Store) SetAgentVersion(ctx context.Context, name, version string) error
 // every agent that has reported one.
 func (s *Store) AgentVersions(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT name, version FROM agents WHERE version IS NOT NULL AND version != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, v string
+		if err := rows.Scan(&name, &v); err != nil {
+			return nil, err
+		}
+		out[name] = v
+	}
+	return out, rows.Err()
+}
+
+// SetAgentFeatures records the client capabilities last called with; ""
+// stores NULL. It ignores names not in the directory.
+func (s *Store) SetAgentFeatures(ctx context.Context, name, features string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET features = ? WHERE name = ?`, nullable(features), name)
+	return err
+}
+
+// AgentFeatures returns the client capabilities each agent last called with, for
+// every agent that has reported one.
+func (s *Store) AgentFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, features FROM agents WHERE features IS NOT NULL AND features != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -499,15 +590,24 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
+	if req.Group != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM requests WHERE from_agent = ? AND group_id = ? LIMIT ?)`, req.From, req.Group, MaxGroupRequests).Scan(&count); err != nil {
+			return envelope.Request{}, err
+		}
+		if count >= MaxGroupRequests {
+			return envelope.Request{}, ErrGroupFull
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, group_id, urgent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.Group, req.Urgent)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -521,7 +621,7 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time.Duration) ([]envelope.Request, error) {
 	now := s.now()
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
-		WHERE id IN (SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at LIMIT ?)
+		WHERE id IN (SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at LIMIT ?)
 		RETURNING `+requestCols,
 		string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
 		agent, string(envelope.StatusQueued), now.UnixMilli(), limit)
@@ -533,7 +633,7 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 	if err != nil {
 		return nil, err
 	}
-	sortByCreated(out)
+	sortByPriority(out)
 	return out, nil
 }
 
@@ -546,11 +646,61 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
-// PendingRequests names up to limit of agent's queued requests, oldest
-// first, without delivering them or reading their bodies.
+// CountUrgentQueued returns how many of agent's queued requests are urgent.
+func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ?`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
+	return n, err
+}
+
+// QueueStat is one agent's backlog: requests waiting to be claimed, the
+// creation time of the oldest of them, and claims whose lease is still live.
+type QueueStat struct {
+	Queued       int
+	OldestQueued time.Time
+	Claimed      int
+}
+
+// QueueStats returns every agent's backlog in one grouped query. Expired and
+// finished requests, and claims whose lease ran out, are not counted.
+func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
+	now := s.now().UnixMilli()
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
+		AND (status != 'claimed' OR lease_until > ?) GROUP BY to_agent, status`, now, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]QueueStat)
+	for rows.Next() {
+		var agent, status string
+		var count int
+		var oldest int64
+		if err := rows.Scan(&agent, &status, &count, &oldest); err != nil {
+			return nil, err
+		}
+		stat := out[agent]
+		if status == string(envelope.StatusClaimed) {
+			stat.Claimed += count
+		} else {
+			stat.Queued += count
+			at := time.UnixMilli(oldest)
+			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
+				stat.OldestQueued = at
+			}
+		}
+		out[agent] = stat
+	}
+	return out, rows.Err()
+}
+
+// PendingRequests names up to limit of agent's queued requests, urgent
+// first and then oldest, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent FROM requests
-		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
 	if err != nil {
 		return nil, err
@@ -559,7 +709,7 @@ func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([
 	var out []envelope.Pending
 	for rows.Next() {
 		var p envelope.Pending
-		if err := rows.Scan(&p.ID, &p.From); err != nil {
+		if err := rows.Scan(&p.ID, &p.From, &p.Kind, &p.Urgent); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -593,6 +743,30 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 	return req, err
 }
 
+// SetProgress updates only a current claim and renews its lease.
+func (s *Store) SetProgress(ctx context.Context, id, claimer, note string, lease time.Duration) error {
+	if len(note) > envelope.MaxProgressNote {
+		return envelope.ErrBodyTooLarge
+	}
+	now := s.now()
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?,
+		lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END
+		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
+		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(lease).UnixMilli(),
+		id, claimer, string(envelope.StatusClaimed), now.UnixMilli())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrWrongState
+	}
+	return nil
+}
+
 // Reply stores the target's answer and closes the request. The reply starts
 // unseen by the asker.
 func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
@@ -609,9 +783,9 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END
 		WHERE id = ? AND status IN (?, ?, ?)`,
-		string(rep.Status), now.UnixMilli(), id,
+		string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
 	if err != nil {
 		return envelope.Reply{}, err
@@ -653,7 +827,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{Request: req, Status: status, Reply: rep}, nil
+	return Result{Request: req, Status: status, Reply: rep, Progress: req.Progress}, nil
 }
 
 // replyFor returns the stored reply for a request, or nil if none yet.
@@ -721,6 +895,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 
 // Transition is one state change made by Sweep.
 type Transition struct {
+	Urgent  bool
 	ID      string
 	TraceID string
 	From    string
@@ -742,7 +917,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		for rows.Next() {
 			var t Transition
 			var st string
-			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st); err != nil {
+			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st, &t.Urgent); err != nil {
 				return err
 			}
 			t.Status = envelope.Status(st)
@@ -755,13 +930,13 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	// Deliver rejects.
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
 		WHERE (status IN (?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
-		RETURNING id, trace_id, from_agent, to_agent, status`,
+		RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered),
 		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
-	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
+	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0
+		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
 		return nil, err
 	}
@@ -792,15 +967,16 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, group_id, urgent, progress_note, progress_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
 	var chain, kind, status, atts string
-	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
+	var created, progressAt int64
+	var note string
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Group, &r.Urgent, &note, &progressAt); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -809,6 +985,9 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var err error
 	if r.Attachments, err = decodeAttachments(atts); err != nil {
 		return envelope.Request{}, "", err
+	}
+	if progressAt != 0 && envelope.Status(status) == envelope.StatusClaimed {
+		r.Progress = &envelope.Progress{Note: note, At: time.UnixMilli(progressAt).UTC(), By: r.To}
 	}
 	r.Kind, r.CreatedAt = envelope.Kind(kind), time.UnixMilli(created).UTC()
 	return r, envelope.Status(status), nil
@@ -835,8 +1014,16 @@ func (s *Store) lookup(ctx context.Context, id string) (envelope.Request, envelo
 	return r, st, err
 }
 
-func sortByCreated(rs []envelope.Request) {
-	slices.SortStableFunc(rs, func(a, b envelope.Request) int { return a.CreatedAt.Compare(b.CreatedAt) })
+func sortByPriority(rs []envelope.Request) {
+	slices.SortStableFunc(rs, func(a, b envelope.Request) int {
+		if a.Urgent != b.Urgent {
+			if a.Urgent {
+				return -1
+			}
+			return 1
+		}
+		return a.CreatedAt.Compare(b.CreatedAt)
+	})
 }
 
 func randomID() string {
@@ -845,4 +1032,71 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func (s *Store) migrateGroups() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'group_id')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN group_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_group ON requests(from_agent, group_id)`)
+	return err
+}
+
+// MaxGroupRequests bounds membership per sender and group tag.
+const MaxGroupRequests = 8
+
+// RequestsByGroup lists only ids and targets sent by sender in group.
+func (s *Store) RequestsByGroup(ctx context.Context, sender, group string) ([]envelope.GroupMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, to_agent FROM requests WHERE from_agent = ? AND group_id = ? ORDER BY created_at, id LIMIT ?`, sender, group, MaxGroupRequests)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var members []envelope.GroupMember
+	for rows.Next() {
+		var member envelope.GroupMember
+		if err := rows.Scan(&member.ID, &member.To); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
+// PollFeatures is poll-only capability state, separate from legacy advertisements.
+func (s *Store) PollFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, poll_features FROM agents WHERE poll_features IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, state string
+		if err := rows.Scan(&name, &state); err != nil {
+			return nil, err
+		}
+		out[name] = state
+	}
+	return out, rows.Err()
+}
+
+// SetPollFeatures persists poll-only capabilities and the last unsupported poll.
+func (s *Store) SetPollFeatures(ctx context.Context, name, state string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET poll_features = ? WHERE name = ?`, state, name)
+	return err
+}
+
+// CountQueuedWithPings counts queued requests and pings from the same snapshot.
+func (s *Store) CountQueuedWithPings(ctx context.Context, agent string) (int, int, error) {
+	var queued, pings int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN kind = ? THEN 1 END) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
+		string(envelope.KindPing), agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&queued, &pings)
+	return queued, pings, err
 }
