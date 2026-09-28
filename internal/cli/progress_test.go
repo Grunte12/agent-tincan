@@ -15,7 +15,7 @@ func TestProgressCLI(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := context.Background()
 	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
-	req, err := grok.Send(ctx, "muse", "work", envelope.KindAsk, "")
+	req, err := grok.Send(ctx, "muse", "work", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

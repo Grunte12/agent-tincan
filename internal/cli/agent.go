@@ -276,6 +276,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if a.Version != "" {
 			fmt.Fprintf(&b, " version=%s", a.Version)
 		}
+		if backlog := a.Backlog(now); backlog != "" {
+			fmt.Fprintf(&b, " %s", backlog)
+		}
 		b.WriteString("\n")
 	}
 	if b.Len() == 0 {
@@ -287,7 +290,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent string
-	var notify, asJSON bool
+	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent> <message...>",
@@ -305,7 +308,7 @@ func askCmd() *cobra.Command {
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids)
+				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
@@ -315,7 +318,7 @@ func askCmd() *cobra.Command {
 				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
 				return nil
 			}
-			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
+			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait), urgent)
 			if err != nil {
 				return err
 			}
@@ -328,6 +331,7 @@ func askCmd() *cobra.Command {
 	}
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
+	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")
@@ -450,6 +454,7 @@ type inboxRequestJSON struct {
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
+	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
 	Requests         []inboxRequestJSON `json:"requests"`
 	Replies          []client.Result    `json:"replies"`
 	RepliesRemaining int                `json:"replies_remaining,omitempty"`
@@ -461,6 +466,8 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 	if err != nil {
 		return err
 	}
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	return printInboxJSON(ctx, r, in, out, errOut)
 }
 
@@ -468,6 +475,7 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 // only then acknowledges the replies, as checkInbox does.
 func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
 	doc := inboxJSON{
+		UpgradeAvailable: in.UpgradeAvailable,
 		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
 		Replies:          in.Replies,
 		RepliesRemaining: in.RepliesRemaining,
@@ -500,6 +508,8 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	if err != nil {
 		return err
 	}
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
 		return err
 	}
@@ -519,6 +529,7 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	if len(in.Replies) > 0 {
 		b.WriteString(wake.WaitingMessage(0, len(in.Replies)) + "\n")
 	}
+	b.WriteString(client.UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
 }
 
@@ -596,7 +607,8 @@ func waitCmd() *cobra.Command {
 		Short: "Block until a teammate's request or a reply to your own request arrives, print it, and exit",
 		Long: `Block until a request arrives, claim and print it, then exit. A reply to
 one of your own requests also ends the wait: it prints a count and leaves the
-reply for check_inbox (or "tincan inbox") to show.
+reply for check_inbox (or "tincan inbox") to show. An available relay upgrade
+is printed with that output; an upgrade alone does not end the wait.
 
 For agents that get a new turn when a background command finishes (like
 Muse): run "tincan wait &" and the arriving request or reply wakes you. Start
@@ -613,7 +625,9 @@ flaky tailnet path does not end the wait.`,
 				ctx, cancel = context.WithTimeout(ctx, limit)
 				defer cancel()
 			}
-			in, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			in, finish, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			// Print first; any pong still retrying finishes before exit.
+			defer finish(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -629,24 +643,35 @@ flaky tailnet path does not end the wait.`,
 // says what the poll does with replies), retrying transient errors with
 // jittered backoff. It gives up only on ctx or a hard refusal
 // (for example, this machine is not a joined agent).
-func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, error) {
+func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, func(context.Context), error) {
 	backoff := time.Second
+	// Failed pongs retry in the background, so they never hold up the next
+	// poll or the work it brings; the returned func waits for them.
+	var retries client.PongRetries
+	finish := func(context.Context) { retries.Wait() }
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
+		pingFailed := false
+		if err == nil {
+			var retry func(context.Context)
+			in, retry, err = client.AnswerPings(ctx, r, in, "wait")
+			pingFailed = err != nil
+			retries.Go(ctx, retry)
+		}
 		switch {
-		case err == nil && !in.Empty():
-			return in, nil
+		case (err == nil || pingFailed) && !in.Empty():
+			return in, finish, nil
 		case err == nil:
 			backoff = time.Second
 			continue
 		case ctx.Err() != nil:
-			return client.Inbox{}, ctx.Err()
-		case client.IsStatus(err, 403):
-			return client.Inbox{}, err
+			return client.Inbox{}, finish, ctx.Err()
+		case client.IsStatus(err, 403) && !pingFailed:
+			return client.Inbox{}, finish, err
 		}
 		select {
 		case <-ctx.Done():
-			return client.Inbox{}, ctx.Err()
+			return client.Inbox{}, finish, ctx.Err()
 		case <-time.After(jitter(backoff)):
 		}
 		backoff = min(backoff*2, 30*time.Second)

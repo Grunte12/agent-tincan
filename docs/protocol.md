@@ -13,7 +13,8 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `trace_id` | relay | Chain id, inherited from the parent or new. |
 | `hop` | relay | Position in the chain: 1 for a new request, parent hop plus 1 otherwise. |
 | `chain` | relay | Agents the request has passed through, oldest first. |
-| `kind` | client | `ask` (expects a reply, the default) or `notify`. |
+| `urgent` | client | Optional boolean, default false. Urgent requests are delivered first, oldest first within each priority. Relay-side wakes bypass debounce and the online skip, within the hourly wake cap. |
+| `kind` | client | `ask` (expects a reply, the default), `notify`, or `ping` (automatic client reply). |
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
@@ -88,3 +89,23 @@ To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]
 Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
+
+Urgent sends have a separate per-sender rolling hourly limit (default 5, configured by `tincan relay --urgent-per-hour`). Exceeding it returns HTTP 429: `urgent limit reached; send without --urgent`. Ordinary sender limits still apply. Sender limits are in memory and reset on relay restart. The optional `urgent` field is also returned on pending request summaries, and a peek carries `"urgent": <n>`, the count of all queued urgent requests (left out when zero), so a channel notice counts them past the 50 that `pending` lists. A send the relay fails to queue (a bad attachment, for example) does not use up an urgent slot. The relay refuses to start with `--urgent-per-hour` below 1. Old clients and relays can ignore this additive field.
+
+### Available client upgrades
+
+`GET /v1/whoami` and both full and `peek=1` responses from `GET /v1/poll` may include `"upgrade_available": "0.5.5"`. This is the release served by the relay's `--dist` VERSION file, distinct from the relay executable's `relay_version`. It is included only when newer than the caller's `X-Tincan-Version` and the dist holds the binary for the caller's `X-Tincan-Platform` (`<os>_<arch>`, for example `darwin_arm64`, sent by every client), so an agent is never told to run a `tincan upgrade` that would fail. The relay reads `VERSION` on each check, so an in-place edit takes effect at once. Missing or invalid versions, development builds, and relays without dist produce no field. Prerelease clients are skipped unless dist itself is a prerelease; comparisons ignore build metadata and accept an optional leading `v`.
+
+A poll with no messages holds until its normal deadline, then returns HTTP 200 with the upgrade field and empty `requests` (or zero `waiting` and `queued` for peek), instead of 204. Populated polls carry the same optional field. `tincan wait` continues waiting on empty polls with an upgrade; it prints the notice when a request or reply ends the wait. The relay repeats it on every response; clients display the actionable notice at most once per process per available version. Unknown fields are safe for older clients to ignore. Notices neither claim requests nor acknowledge replies, and no client upgrades automatically.
+
+## Agent roster
+
+`GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry and terminal requests are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
+
+## Ping capability
+
+Clients advertise `X-Tincan-Features: ping` on every call, but only polls (`GET /v1/poll`, full or peek) count: they come from the processes that receive requests. The relay admits a ping to a target once one of its polls has advertised support and none of its polls has lacked the header in the last 24 hours, so an older poller running under the same agent name keeps pings away from it. Sends, gets and replies never change this. The state is kept in memory and in the agent store. Versions remain informational, so development builds can advertise support. A `ping` send to a target that does not qualify returns HTTP 409 with an instruction to use `ask`. Older relays reject the unknown kind without delivering it.
+
+A ping has no parent or attachments; its body is empty (up to four bytes are accepted and ignored). Policy still enforces the send rate limit and refuses inferred request parents. The target claims it and replies with status `answered` and body `pong (answered by <surface>, tincan <version>)`. Clients suppress pings from model inboxes. Peek pending entries add optional `kind`, and a peek adds optional `"pings": <n>`, the count of all queued pings (left out when zero), so a listener knows exactly how much ordinary work waits even when more pings are queued than `pending` lists. Pong replies are marked seen when stored and never trigger a reply wake; get-reply and trace still return them.
+
+Polling surfaces are `check_inbox`, `inbox`, `wait`, `listen`, `history-serve`, and `web-serve`. Wait and listen loops continue after automatic replies. A pong that fails is retried after the ordinary requests from the same poll have been handed on, never before. A listener answers without invoking its exec command. Such responses demonstrate the client loop is alive, not model execution. `GET /v1/trace?exclude_pings=true` filters before applying the limit; the optional parameter defaults to including all kinds. CLI trace listings omit pings unless `--pings` is supplied; stored traces retain their `ping` kind.

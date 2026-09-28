@@ -187,7 +187,7 @@ func TestErrorsComeBackAsToolErrors(t *testing.T) {
 func TestMCPAndClientAgree(t *testing.T) {
 	m := testrelay.New(t, relay.Config{MaxWait: time.Second})
 	viaMCP := call(t, session(t, m, "grokbot"), "ask", map[string]any{"to": "muse", "message": "x", "wait_seconds": 1})
-	res, err := m.Client(t, "grokbot").Ask(context.Background(), "muse", "x", "", time.Second)
+	res, err := m.Client(t, "grokbot").Ask(context.Background(), "muse", "x", "", time.Second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,12 +301,12 @@ type recorder struct {
 	calls []string
 }
 
-func (r *recorder) Ask(context.Context, string, string, string, time.Duration) (client.Result, error) {
+func (r *recorder) Ask(context.Context, string, string, string, time.Duration, bool) (client.Result, error) {
 	r.calls = append(r.calls, "Ask")
 	return client.Result{}, nil
 }
 
-func (r *recorder) Send(context.Context, string, string, envelope.Kind, string) (envelope.Request, error) {
+func (r *recorder) Send(context.Context, string, string, envelope.Kind, string, bool) (envelope.Request, error) {
 	r.calls = append(r.calls, "Send")
 	return envelope.Request{}, nil
 }
@@ -384,10 +384,10 @@ func TestCheckInboxShowsRepliesFirst(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := context.Background()
 	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
-	req, _ := grok.Send(ctx, "muse", "call the garage", envelope.KindAsk, "")
+	req, _ := grok.Send(ctx, "muse", "call the garage", envelope.KindAsk, "", false)
 	muse.Claim(ctx, req.ID)
 	muse.Reply(ctx, req.ID, "no slots this week", envelope.StatusDeclined)
-	m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+	m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "", false)
 
 	cs := session(t, m, "grokbot")
 	got := call(t, cs, "check_inbox", nil)
@@ -515,7 +515,7 @@ func TestNonImageSavedByIDInsideDir(t *testing.T) {
 	grok := fileSession(t, m, "grokbot", dir)
 	museC := m.Client(t, "muse")
 
-	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "send the notes", envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "send the notes", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +589,7 @@ func TestAttachAgainstRelayWithoutSupport(t *testing.T) {
 	if n, _ := m.Store.CountQueued(ctx, "muse"); n != 0 {
 		t.Fatalf("refused ask queued %d requests", n)
 	}
-	req, _ := m.Client(t, "muse").Send(ctx, "grokbot", "send it", envelope.KindAsk, "")
+	req, _ := m.Client(t, "muse").Send(ctx, "grokbot", "send it", envelope.KindAsk, "", false)
 	m.Client(t, "grokbot").Claim(ctx, req.ID)
 	out = call(t, grok, "reply", map[string]any{"request_id": req.ID, "message": "here", "attach": []string{img}})
 	if !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, "does not support attachments") {
@@ -657,7 +657,7 @@ func uploadTo(t *testing.T, m *testrelay.Mesh, sender, target string) (png, txt 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SendAttached(ctx, target, "see attached", envelope.KindAsk, "", []string{ip.ID, it.ID}); err != nil {
+	if _, err := c.SendAttached(ctx, target, "see attached", envelope.KindAsk, "", []string{ip.ID, it.ID}, false); err != nil {
 		t.Fatal(err)
 	}
 	return ip.ID, it.ID
@@ -712,7 +712,7 @@ func TestGatewayShapeReceivesAttachments(t *testing.T) {
 
 	// A reply carrying both kinds, through get_reply.
 	ctx := t.Context()
-	req, err := m.Client(t, "grokbot").Send(ctx, "instinct", "send both", envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(ctx, "instinct", "send both", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,11 +804,11 @@ func (f *fetcher) UploadFiles(context.Context, []string) ([]client.UploadedAttac
 	return nil, nil
 }
 
-func (f *fetcher) SendAttached(context.Context, string, string, envelope.Kind, string, []string) (envelope.Request, error) {
+func (f *fetcher) SendAttached(context.Context, string, string, envelope.Kind, string, []string, bool) (envelope.Request, error) {
 	return envelope.Request{}, nil
 }
 
-func (f *fetcher) AskAttached(context.Context, string, string, string, []string, time.Duration) (client.Result, error) {
+func (f *fetcher) AskAttached(context.Context, string, string, string, []string, time.Duration, bool) (client.Result, error) {
 	return client.Result{}, nil
 }
 
@@ -875,5 +875,84 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 	out := call(t, connect(t, mcpserver.New(f, "test")), "check_inbox", nil)
 	if !strings.Contains(out, "could not fetch it") || !strings.Contains(out, `get_attachment with id "att_missing"`) {
 		t.Fatalf("check_inbox = %q", out)
+	}
+}
+
+func TestUrgentAsk(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	sender := session(t, m, "grokbot")
+	for range 5 {
+		out := call(t, sender, "ask", map[string]any{"to": "muse", "message": "time critical", "notify": true, "urgent": true})
+		if !strings.Contains(out, "Sent to muse") {
+			t.Fatal(out)
+		}
+	}
+	out := call(t, sender, "ask", map[string]any{"to": "muse", "message": "time critical", "notify": true, "urgent": true})
+	if !strings.Contains(out, "urgent limit reached") {
+		t.Fatal(out)
+	}
+	out = call(t, session(t, m, "muse"), "check_inbox", map[string]any{})
+	if !strings.Contains(out, "URGENT Request") {
+		t.Fatal(out)
+	}
+}
+
+func TestCheckInboxAutomaticallyAnswersPing(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	muse := session(t, m, "muse")
+	call(t, muse, "check_inbox", nil)
+	sender := m.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, muse, "check_inbox", nil)
+	if strings.Contains(got, req.ID) || strings.Contains(got, "pong") {
+		t.Fatalf("ping visible: %s", got)
+	}
+	result, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || result.Reply == nil || !strings.Contains(result.Reply.Body, "answered by check_inbox") {
+		t.Fatalf("pong: %+v %v", result, err)
+	}
+}
+
+type failingPingInbox struct{ recorder }
+
+func (f *failingPingInbox) Poll(context.Context, time.Duration) (client.Inbox, error) {
+	return client.Inbox{Requests: []envelope.Request{{ID: "ping", Kind: envelope.KindPing}, {ID: "work", Kind: envelope.KindAsk, Body: "real work"}}}, nil
+}
+func (f *failingPingInbox) Claim(_ context.Context, id string) (envelope.Request, error) {
+	if id == "ping" {
+		return envelope.Request{}, errors.New("temporary ping failure")
+	}
+	return envelope.Request{ID: id, Kind: envelope.KindAsk, Body: "real work"}, nil
+}
+func TestCheckInboxPingClaimFailurePreservesWork(t *testing.T) {
+	out := call(t, connect(t, mcpserver.New(&failingPingInbox{}, "test")), "check_inbox", nil)
+	if strings.Contains(out, "ERROR:") || !strings.Contains(out, "real work") {
+		t.Fatalf("inbox: %s", out)
+	}
+}
+
+func TestListAgentsShowsBacklog(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	if out := call(t, cs, "list_agents", nil); strings.Contains(out, "queued") || strings.Contains(out, "claimed") {
+		t.Fatalf("idle roster = %q", out)
+	}
+	sender := m.Client(t, "grokbot")
+	for i := range 2 {
+		req, err := sender.Send(t.Context(), "muse", "work", envelope.KindAsk, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if _, err := m.Client(t, "muse").Claim(t.Context(), req.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if out := call(t, cs, "list_agents", nil); !strings.Contains(out, "1 queued (oldest 0m), 1 claimed") {
+		t.Fatalf("busy roster = %q", out)
 	}
 }

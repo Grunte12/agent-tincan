@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -696,5 +697,109 @@ func TestProgressNotifyStaysLeaseFree(t *testing.T) {
 	c.advance(2 * time.Hour)
 	if transitions, err := s.Sweep(ctx); err != nil || len(transitions) != 0 {
 		t.Fatalf("sweep: %v %v", transitions, err)
+	}
+}
+
+func TestUrgentMigrationAndOrdering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, c := open(t, path)
+	normal := ask(t, s, "a", "b", "normal")
+	if _, err := s.db.Exec(`ALTER TABLE requests DROP COLUMN urgent`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, c = open(t, path)
+	old, _, err := s.Request(t.Context(), normal.ID)
+	if err != nil || old.Urgent {
+		t.Fatalf("migrated = %+v, %v", old, err)
+	}
+	c.advance(time.Second)
+	urgent, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Body: "urgent", Urgent: true}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	later, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Body: "later", Urgent: true}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingRequests(t.Context(), "b", 2)
+	if err != nil || len(pending) != 2 || pending[0].ID != urgent.ID || !pending[0].Urgent || pending[1].ID != later.ID {
+		t.Fatalf("pending = %+v, %v", pending, err)
+	}
+	got, err := s.Deliver(t.Context(), "b", 2, time.Minute)
+	if err != nil || len(got) != 2 || got[0].ID != urgent.ID || !got[0].Urgent || got[1].ID != later.ID {
+		t.Fatalf("delivery = %+v, %v", got, err)
+	}
+	got, err = s.Deliver(t.Context(), "b", 2, time.Minute)
+	if err != nil || len(got) != 1 || got[0].ID != normal.ID {
+		t.Fatalf("remaining = %+v, %v", got, err)
+	}
+}
+
+func TestQueueStats(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	for _, tc := range []struct {
+		status          string
+		age, ttl, lease time.Duration
+		to              string
+	}{
+		{"queued", 14 * time.Minute, time.Hour, 0, "muse"},
+		{"delivered", 20 * time.Minute, time.Hour, time.Minute, "muse"},
+		{"claimed", time.Minute, time.Hour, time.Minute, "muse"},
+		{"claimed", time.Hour, time.Hour, -time.Second, "muse"},
+		{"claimed", time.Hour, time.Hour, 0, "muse"},
+		{"queued", time.Hour, 0, 0, "muse"},
+		{"delivered", time.Hour, -time.Second, time.Minute, "muse"},
+		{"claimed", time.Hour, -time.Second, time.Minute, "muse"},
+		{"answered", time.Hour, time.Hour, 0, "muse"},
+		{"failed", time.Hour, time.Hour, 0, "muse"},
+		{"declined", time.Hour, time.Hour, 0, "muse"},
+		{"cancelled", time.Hour, time.Hour, 0, "muse"},
+		{"expired", time.Hour, time.Hour, 0, "muse"},
+		{"queued", time.Minute, time.Hour, 0, "instinct"},
+	} {
+		req := ask(t, s, "grokbot", tc.to, "work")
+		lease := int64(0)
+		if tc.lease != 0 {
+			lease = c.t.Add(tc.lease).UnixMilli()
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE requests SET status=?, created_at=?, expires_at=?, lease_until=? WHERE id=?`, tc.status, c.t.Add(-tc.age).UnixMilli(), c.t.Add(tc.ttl).UnixMilli(), lease, req.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := s.QueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats["muse"]; got.Queued != 2 || got.Claimed != 1 || !got.OldestQueued.Equal(c.t.Add(-20*time.Minute)) {
+		t.Fatalf("muse = %+v", got)
+	}
+	if len(stats) != 2 || stats["instinct"].Queued != 1 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestQueueStatsUsesStatusIndex(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > 0
+		AND (status != 'claimed' OR lease_until > 0) GROUP BY to_agent, status`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "requests_status_to") {
+		t.Fatalf("plan does not use requests_status_to:\n%s", strings.Join(plan, "\n"))
 	}
 }
