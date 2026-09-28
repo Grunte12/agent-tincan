@@ -106,10 +106,10 @@ type Claimer interface {
 // through c so no one else handles it. The caller acknowledges the replies
 // (AckReplies) once the text has reached its agent.
 func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
-	if in.Empty() {
-		return "No requests waiting.\n"
-	}
 	var b strings.Builder
+	if in.Empty() {
+		b.WriteString("No requests waiting.\n")
+	}
 	if len(in.Replies) > 0 {
 		b.WriteString(RepliesHeading)
 		for _, r := range in.Replies {
@@ -133,6 +133,7 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		}
 		b.WriteString(FormatRequest(req))
 	}
+	b.WriteString(UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
 }
 

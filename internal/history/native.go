@@ -191,8 +191,18 @@ func validNativeID(s string) bool { return nativeIDPattern.MatchString(s) }
 // ValidateOp checks op against the fixed set and its arguments against
 // their exact shape: required fields present, others empty.
 func ValidateOp(op Op, a OpArgs) error {
-	switch op {
-	case OpChatGPTSend, OpClaudeAISend:
+	if op == OpExtensionReload {
+		if a != (OpArgs{}) {
+			return fmt.Errorf("%s: takes no arguments", op)
+		}
+		return nil
+	}
+	site, kind, ok := op.resolve()
+	if !ok {
+		return fmt.Errorf("unknown operation %q", op)
+	}
+	switch kind {
+	case opSend:
 		switch {
 		case a.Count != 0 || a.ID != "" || a.FileID != "":
 			return fmt.Errorf("%s: unexpected argument", op)
@@ -208,14 +218,9 @@ func ValidateOp(op Op, a OpArgs) error {
 			return fmt.Errorf("%s: new chat and a conversation id together", op)
 		}
 		return nil
-	case OpChatGPTClose, OpClaudeAIClose:
+	case opClose:
 		if a != (OpArgs{ConversationID: a.ConversationID}) || !validNativeID(a.ConversationID) {
 			return fmt.Errorf("%s: takes only a valid conversation id", op)
-		}
-		return nil
-	case OpExtensionReload:
-		if a != (OpArgs{}) {
-			return fmt.Errorf("%s: takes no arguments", op)
 		}
 		return nil
 	}
@@ -223,17 +228,13 @@ func ValidateOp(op Op, a OpArgs) error {
 		return fmt.Errorf("%s: unexpected argument", op)
 	}
 	needCount, needID, needFile, allowConv := false, false, false, false
-	switch op {
-	case OpChatGPTList, OpClaudeAIList:
+	switch kind {
+	case opList:
 		needCount = true
-	case OpChatGPTDetail, OpClaudeAIDetail:
+	case opDetail:
 		needID = true
-	case OpChatGPTFile:
-		needFile, allowConv = true, true
-	case OpClaudeAIFile:
-		needFile = true
-	default:
-		return fmt.Errorf("unknown operation %q", op)
+	case opFile:
+		needFile, allowConv = true, site.fileTakesConversation
 	}
 	if needCount != (a.Count != 0) || a.Count < 0 || a.Count > MaxListCount {
 		return fmt.Errorf("%s: count must be between 1 and %d", op, MaxListCount)
@@ -250,16 +251,26 @@ func ValidateOp(op Op, a OpArgs) error {
 	return nil
 }
 
+// source is the site op reads or writes, "" for an operation no site has.
 func (op Op) source() Source {
-	if strings.HasPrefix(string(op), "claudeai.") {
-		return SourceClaudeAI
+	if site, _, ok := op.resolve(); ok {
+		return site.source
 	}
-	return SourceChatGPT
+	return ""
 }
 
-func (op Op) file() bool { return op == OpChatGPTFile || op == OpClaudeAIFile }
+// unknownOp refuses an operation no site has. It is not an
+// *UnavailableError: there is no site to attribute it to.
+func unknownOp(op Op) error { return fmt.Errorf("%w: unknown operation %q", ErrRejected, op) }
 
-func (op Op) send() bool { return op == OpChatGPTSend || op == OpClaudeAISend }
+func (op Op) is(k opKind) bool {
+	_, kind, ok := op.resolve()
+	return ok && kind == k
+}
+
+func (op Op) file() bool { return op.is(opFile) }
+
+func (op Op) send() bool { return op.is(opSend) }
 
 // NativeRequest is one request to the extension.
 type NativeRequest struct {
@@ -332,11 +343,13 @@ type UnavailableError struct {
 	RetryAfter time.Duration
 }
 
+// siteOf is a site's host, for error text (the source name for a site
+// outside the table).
 func siteOf(s Source) string {
-	if s == SourceClaudeAI {
-		return "claude.ai"
+	if site := siteFor(s); site != nil {
+		return site.host
 	}
-	return "chatgpt.com"
+	return string(s)
 }
 
 func (e *UnavailableError) Error() string {
@@ -532,7 +545,7 @@ func (c *Client) CooldownRemaining(src Source) time.Duration { return c.cooldown
 // hitsSite reports whether op makes a request to the site. Closing a tab
 // does not, so it runs during a cooldown.
 func (op Op) hitsSite() bool {
-	return op != OpChatGPTClose && op != OpClaudeAIClose && op != OpExtensionReload
+	return !op.is(opClose) && op != OpExtensionReload
 }
 
 // NewClient returns a client for the local native host socket.
@@ -556,6 +569,9 @@ func (c *Client) timeout(op Op) time.Duration {
 
 func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(NativeResponse) (bool, error)) error {
 	src := op.source()
+	if src == "" {
+		return unknownOp(op)
+	}
 	if err := ValidateOp(op, args); err != nil {
 		return unavailable(src, ErrRejected, err.Error())
 	}
@@ -654,11 +670,11 @@ func (r SendResult) Submitted() time.Time {
 // message is submitted and the conversation id is known. It does not wait
 // for the reply: read it with the detail operation, then call Close.
 func (c *Client) Send(ctx context.Context, src Source, message, convID string, newChat bool) (SendResult, error) {
-	op := OpChatGPTSend
-	if src == SourceClaudeAI {
-		op = OpClaudeAISend
+	site, err := lookupSite(src)
+	if err != nil {
+		return SendResult{}, err
 	}
-	raw, err := c.Request(ctx, op, OpArgs{Message: message, ConversationID: convID, NewChat: newChat})
+	raw, err := c.Request(ctx, site.op(opSend), OpArgs{Message: message, ConversationID: convID, NewChat: newChat})
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -672,11 +688,11 @@ func (c *Client) Send(ctx context.Context, src Source, message, convID string, n
 // Close closes the tab a send to src's conversation convID left open. It
 // never touches a tab the extension did not open for a send.
 func (c *Client) Close(ctx context.Context, src Source, convID string) error {
-	op := OpChatGPTClose
-	if src == SourceClaudeAI {
-		op = OpClaudeAIClose
+	site, err := lookupSite(src)
+	if err != nil {
+		return err
 	}
-	_, err := c.Request(ctx, op, OpArgs{ConversationID: convID})
+	_, err = c.Request(ctx, site.op(opClose), OpArgs{ConversationID: convID})
 	return err
 }
 
@@ -684,6 +700,9 @@ func (c *Client) Close(ctx context.Context, src Source, convID string) error {
 // size cap, chunk order and the announced size.
 func (c *Client) File(ctx context.Context, op Op, args OpArgs) ([]byte, string, error) {
 	src := op.source()
+	if src == "" {
+		return nil, "", unknownOp(op)
+	}
 	if !op.file() {
 		return nil, "", unavailable(src, ErrRejected, "not a file operation")
 	}
