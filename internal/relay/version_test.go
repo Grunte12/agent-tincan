@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ func whoamiAs(t *testing.T, h *harness, addr, version string) map[string]any {
 	if version != "" {
 		req.Header.Set(client.VersionHeader, version)
 	}
+	req.Header.Set(client.PlatformHeader, "linux_amd64")
 	rec := httptest.NewRecorder()
 	h.h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -145,5 +148,149 @@ func TestAlternatingBuildsThrottleVersionWrites(t *testing.T) {
 	whoamiAs(t, h, grokAddr, "0.5.3")
 	if got := stored(); got != "0.5.3" {
 		t.Fatalf("store did not catch up after a minute: %q", got)
+	}
+}
+
+func TestUpgradeAvailable(t *testing.T) {
+	h := newHarness(t, Config{})
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "VERSION")
+	if err := os.WriteFile(versionPath, []byte("0.5.5\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tincan_linux_amd64"), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.SetDist(dir)
+	for _, path := range []string{"/v1/whoami", "/v1/poll?hold=0", "/v1/poll?hold=0&peek=1"} {
+		for _, version := range []string{"0.5.4", "0.5.5", "0.6.0", "", "dev", "0.5.4-rc.1", "0.5.4-3-gabcdef", "invalid"} {
+			req := httptest.NewRequest("GET", path, nil)
+			req.RemoteAddr = grokAddr
+			req.Header.Set(client.VersionHeader, version)
+			req.Header.Set(client.PlatformHeader, "linux_amd64")
+			rec := httptest.NewRecorder()
+			h.h.ServeHTTP(rec, req)
+			var out map[string]any
+			if rec.Code != http.StatusNoContent {
+				if rec.Code != http.StatusOK {
+					t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version == "0.5.4" {
+				if out["upgrade_available"] != "0.5.5" {
+					t.Fatalf("%s: %s", path, rec.Body.String())
+				}
+				var legacy struct {
+					Requests []client.Result `json:"requests"`
+					Waiting  int             `json:"waiting"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &legacy); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, ok := out["upgrade_available"]; ok {
+				t.Fatalf("%s version %q: unexpected notice %v", path, version, out)
+			}
+		}
+	}
+	h.send(museAddr, "grokbot", "hello")
+	for _, path := range []string{"/v1/poll?hold=0&peek=1", "/v1/poll?hold=0"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.RemoteAddr = grokAddr
+		req.Header.Set(client.VersionHeader, "0.5.4")
+		req.Header.Set(client.PlatformHeader, "linux_amd64")
+		rec := httptest.NewRecorder()
+		h.h.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), `"upgrade_available":"0.5.5"`) {
+			t.Fatalf("populated poll: %s", rec.Body.String())
+		}
+	}
+	if err := os.WriteFile(versionPath, []byte("0.6.10"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != "0.6.10" {
+		t.Fatalf("changed VERSION = %v", got)
+	}
+
+	if err := os.WriteFile(versionPath, []byte("0.6.11"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(versionPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != "0.6.11" {
+		t.Fatalf("mtime change = %v", got)
+	}
+	if err := os.WriteFile(versionPath, []byte("dev"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != nil {
+		t.Fatalf("dev dist = %v", got)
+	}
+	if err := os.Remove(versionPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != nil {
+		t.Fatalf("missing VERSION = %v", got)
+	}
+	h.srv.SetDist("")
+	if got := whoamiAs(t, h, grokAddr, "0.5.4")["upgrade_available"]; got != nil {
+		t.Fatalf("no dist = %v", got)
+	}
+}
+
+func TestUpgradeAvailableNeedsPlatformBinaryAndSeesInPlaceEdits(t *testing.T) {
+	h := newHarness(t, Config{})
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "VERSION")
+	if err := os.WriteFile(versionPath, []byte("0.5.5"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.SetDist(dir)
+	ask := func(platform string) any {
+		req := httptest.NewRequest("GET", "/v1/whoami", nil)
+		req.RemoteAddr = grokAddr
+		req.Header.Set(client.VersionHeader, "0.5.4")
+		if platform != "" {
+			req.Header.Set(client.PlatformHeader, platform)
+		}
+		rec := httptest.NewRecorder()
+		h.h.ServeHTTP(rec, req)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out["upgrade_available"]
+	}
+	if got := ask("darwin_arm64"); got != nil {
+		t.Fatalf("VERSION staged before binaries = %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tincan_darwin_arm64"), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask("darwin_arm64"); got != "0.5.5" {
+		t.Fatalf("staged binary = %v", got)
+	}
+	for _, platform := range []string{"", "linux_amd64", "windows_amd64", "../darwin_arm64"} {
+		if got := ask(platform); got != nil {
+			t.Fatalf("platform %q = %v", platform, got)
+		}
+	}
+	// Same size, same mtime, rewritten in place: still seen.
+	info, err := os.Stat(versionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(versionPath, []byte("0.5.6"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(versionPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask("darwin_arm64"); got != "0.5.6" {
+		t.Fatalf("in-place VERSION edit = %v", got)
 	}
 }

@@ -685,6 +685,47 @@ func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
 	}
 }
 
+func TestPingGateTracksReceivingPollers(t *testing.T) {
+	for _, pollPath := range []string{"/v1/poll?hold=0", "/v1/poll?peek=1&hold=0"} {
+		t.Run(pollPath, func(t *testing.T) {
+			h := newHarness(t, Config{})
+			advertise := func(path, features string) {
+				req := httptest.NewRequest("GET", path, nil)
+				req.RemoteAddr = museAddr
+				req.Header.Set(client.FeaturesHeader, features)
+				rec := httptest.NewRecorder()
+				h.h.ServeHTTP(rec, req)
+				if rec.Code != 200 && rec.Code != 204 {
+					t.Fatalf("advertise: %d %s", rec.Code, rec.Body)
+				}
+			}
+			ping := func(status int) {
+				rec := h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","kind":"ping"}`, status, nil)
+				if status == 409 && !strings.Contains(rec.Body.String(), "has not advertised ping support; use ask") {
+					t.Fatal(rec.Body.String())
+				}
+			}
+			advertise("/v1/agents", "ping")
+			ping(409)
+			advertise(pollPath, "")
+			advertise("/v1/agents", "ping")
+			ping(409)
+			advertise(pollPath, "ping")
+			ping(409)
+			// Reconstruct from the store as on relay restart.
+			h.srv = New(h.srv.dir, h.st, Config{})
+			h.h = h.srv.Handler()
+			ping(409)
+			h.srv.mu.Lock()
+			state := h.srv.pollFeatures["muse"]
+			state.LastUnsupported = time.Now().Add(-legacyPollWindow - time.Second)
+			h.srv.pollFeatures["muse"] = state
+			h.srv.mu.Unlock()
+			ping(201)
+		})
+	}
+}
+
 type refundingPreparer struct{ refunded []envelope.Request }
 
 func (p *refundingPreparer) Prepare(_ context.Context, req *envelope.Request) error {
@@ -720,5 +761,81 @@ func TestPeekCountsAllUrgentRequests(t *testing.T) {
 	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, &out)
 	if out.Urgent != MaxPeekPending+5 || len(out.Pending) != MaxPeekPending {
 		t.Fatalf("peek = urgent %d, pending %d", out.Urgent, len(out.Pending))
+	}
+}
+
+func TestPingCapablePollAndExactPeekCount(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := httptest.NewRequest("GET", "/v1/poll?peek=1&hold=0", nil)
+	req.RemoteAddr = museAddr
+	req.Header.Set(client.FeaturesHeader, "ping")
+	h.h.ServeHTTP(httptest.NewRecorder(), req)
+	// A CLI without the header must not remove poller support.
+	h.do(museAddr, "GET", "/v1/agents", "", 200, nil)
+	h.srv = New(h.srv.dir, h.st, Config{})
+	h.h = h.srv.Handler()
+	for range MaxPeekPending + 1 {
+		h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","kind":"ping"}`, 201, nil)
+	}
+	h.send(grokAddr, "muse", "work behind pings")
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	var waiting client.Waiting
+	if err := json.Unmarshal(rec.Body.Bytes(), &waiting); err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Total != MaxPeekPending+2 || waiting.Pings != MaxPeekPending+1 || len(waiting.Pending) != MaxPeekPending {
+		t.Fatalf("peek: %+v", waiting)
+	}
+}
+
+func TestAgentsListQueueStats(t *testing.T) {
+	h := newHarness(t, Config{})
+	ctx := context.Background()
+	req, err := h.st.Enqueue(ctx, envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := h.st.Enqueue(ctx, envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.Claim(ctx, claimed.ID, "muse", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var out client.Roster
+	rec := h.do(grokAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	for _, a := range out.Agents {
+		if a.Name == "muse" && (a.Queued != 1 || a.Claimed != 1 || !a.OldestQueued.Equal(req.CreatedAt)) {
+			t.Fatalf("muse = %+v", a)
+		}
+	}
+	var raw struct{ Agents []map[string]json.RawMessage }
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range raw.Agents {
+		for _, field := range []string{"queued", "oldest_queued_at", "claimed"} {
+			if _, present := a[field]; present != (string(a["name"]) == `"muse"`) {
+				t.Fatalf("field %s: %s", field, rec.Body.String())
+			}
+		}
+	}
+	var old struct {
+		Agents []struct {
+			Name   string
+			Online bool
+			Wake   string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &old); err != nil || len(old.Agents) != 3 {
+		t.Fatalf("old client = %+v, %v", old, err)
+	}
+	var legacy client.Roster
+	if err := json.Unmarshal([]byte(`{"agents":[{"name":"muse","online":true,"wake":"wait"}]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Agents[0].Backlog(time.Now()) != "" {
+		t.Fatalf("legacy = %+v", legacy)
 	}
 }

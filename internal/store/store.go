@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS requests (
   attachments TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
+-- QueueStats groups open requests across every agent; leading with status
+-- keeps it to the open rows instead of the whole request history.
+CREATE INDEX IF NOT EXISTS requests_status_to ON requests(status, to_agent);
 CREATE TABLE IF NOT EXISTS replies (
   request_id TEXT PRIMARY KEY REFERENCES requests(id),
   from_agent TEXT NOT NULL,
@@ -127,6 +130,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateAgentVersion(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent version: %w", err)
+	}
+	if err := s.migrateAgentFeatures(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent features: %w", err)
 	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
@@ -265,6 +272,28 @@ func (s *Store) migrateAgentVersion() error {
 	return err
 }
 
+func (s *Store) migrateAgentFeatures() error {
+	var pollColumn bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'poll_features')`).Scan(&pollColumn); err != nil {
+		return err
+	}
+	if !pollColumn {
+		if _, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN poll_features TEXT`); err != nil {
+			return err
+		}
+	}
+
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'features')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN features TEXT`)
+	return err
+}
+
 // migrateInvites adds the kind column to an invites table created before
 // invites could carry the agent's kind. It is a no-op on a current table.
 func (s *Store) migrateInvites() error {
@@ -315,16 +344,16 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// on either machine are untouched: a node may carry several names. The
 	// name's last activity and the build it last reported carry over.
 	var lastSeen sql.NullInt64
-	var version sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version)
+	var version, features, pollFeatures sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -388,6 +417,32 @@ func (s *Store) SetAgentVersion(ctx context.Context, name, version string) error
 // every agent that has reported one.
 func (s *Store) AgentVersions(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT name, version FROM agents WHERE version IS NOT NULL AND version != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, v string
+		if err := rows.Scan(&name, &v); err != nil {
+			return nil, err
+		}
+		out[name] = v
+	}
+	return out, rows.Err()
+}
+
+// SetAgentFeatures records the client capabilities last called with; ""
+// stores NULL. It ignores names not in the directory.
+func (s *Store) SetAgentFeatures(ctx context.Context, name, features string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET features = ? WHERE name = ?`, nullable(features), name)
+	return err
+}
+
+// AgentFeatures returns the client capabilities each agent last called with, for
+// every agent that has reported one.
+func (s *Store) AgentFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, features FROM agents WHERE features IS NOT NULL AND features != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -556,10 +611,52 @@ func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error
 	return n, err
 }
 
+// QueueStat is one agent's backlog: requests waiting to be claimed, the
+// creation time of the oldest of them, and claims whose lease is still live.
+type QueueStat struct {
+	Queued       int
+	OldestQueued time.Time
+	Claimed      int
+}
+
+// QueueStats returns every agent's backlog in one grouped query. Expired and
+// finished requests, and claims whose lease ran out, are not counted.
+func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
+	now := s.now().UnixMilli()
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
+		AND (status != 'claimed' OR lease_until > ?) GROUP BY to_agent, status`, now, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]QueueStat)
+	for rows.Next() {
+		var agent, status string
+		var count int
+		var oldest int64
+		if err := rows.Scan(&agent, &status, &count, &oldest); err != nil {
+			return nil, err
+		}
+		stat := out[agent]
+		if status == string(envelope.StatusClaimed) {
+			stat.Claimed += count
+		} else {
+			stat.Queued += count
+			at := time.UnixMilli(oldest)
+			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
+				stat.OldestQueued = at
+			}
+		}
+		out[agent] = stat
+	}
+	return out, rows.Err()
+}
+
 // PendingRequests names up to limit of agent's queued requests, urgent
 // first and then oldest, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, urgent FROM requests
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
 		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
 	if err != nil {
@@ -569,7 +666,7 @@ func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([
 	var out []envelope.Pending
 	for rows.Next() {
 		var p envelope.Pending
-		if err := rows.Scan(&p.ID, &p.From, &p.Urgent); err != nil {
+		if err := rows.Scan(&p.ID, &p.From, &p.Kind, &p.Urgent); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -619,9 +716,9 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END
 		WHERE id = ? AND status IN (?, ?, ?)`,
-		string(rep.Status), now.UnixMilli(), id,
+		string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
 	if err != nil {
 		return envelope.Reply{}, err
@@ -864,4 +961,36 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// PollFeatures is poll-only capability state, separate from legacy advertisements.
+func (s *Store) PollFeatures(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, poll_features FROM agents WHERE poll_features IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, state string
+		if err := rows.Scan(&name, &state); err != nil {
+			return nil, err
+		}
+		out[name] = state
+	}
+	return out, rows.Err()
+}
+
+// SetPollFeatures persists poll-only capabilities and the last unsupported poll.
+func (s *Store) SetPollFeatures(ctx context.Context, name, state string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET poll_features = ? WHERE name = ?`, state, name)
+	return err
+}
+
+// CountQueuedWithPings counts queued requests and pings from the same snapshot.
+func (s *Store) CountQueuedWithPings(ctx context.Context, agent string) (int, int, error) {
+	var queued, pings int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN kind = ? THEN 1 END) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
+		string(envelope.KindPing), agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&queued, &pings)
+	return queued, pings, err
 }

@@ -40,7 +40,7 @@ func TestWaitRetriesTransientErrors(t *testing.T) {
 	r, _ := client.NewRelay(ts.URL, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	in, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
+	in, _, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
 	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "r1" {
 		t.Fatalf("wait = %+v, %v after %d calls", in, err, calls.Load())
 	}
@@ -52,7 +52,7 @@ func TestWaitStopsWhenNotJoined(t *testing.T) {
 	}))
 	defer ts.Close()
 	r, _ := client.NewRelay(ts.URL, "")
-	if _, err := waitForInbox(context.Background(), r, 0, client.RepliesKeep); !client.IsStatus(err, http.StatusForbidden) {
+	if _, _, err := waitForInbox(context.Background(), r, 0, client.RepliesKeep); !client.IsStatus(err, http.StatusForbidden) {
 		t.Fatalf("want 403, got %v", err)
 	}
 }

@@ -233,6 +233,8 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			if err != nil {
 				return fail(err)
 			}
+			allReplyIDs := inbox.ReplyIDs()
+			inbox, retry, _ := client.AnswerPings(ctx, b, inbox, "check_inbox")
 			out := client.FormatInbox(ctx, b, inbox)
 			var atts []envelope.Attachment
 			for _, r := range inbox.Replies {
@@ -244,9 +246,10 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			res, _, _ := f.result(ctx, out, atts)
 			// Replies count as seen only once the result is built for the
 			// agent; a poll that never gets this far leaves them unseen.
-			if err := b.AckReplies(ctx, inbox.ReplyIDs()); err != nil {
+			if err := b.AckReplies(ctx, allReplyIDs); err != nil {
 				res.Content = append(res.Content, &mcp.TextContent{Text: fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)})
 			}
+			go client.RetryPongs(ctx, retry)
 			return res, nil, nil
 		})
 
@@ -285,7 +288,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, or none), when each last called the relay (any send, reply, get, or poll), and which tincan build each last called with."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, and queued work with its oldest wait and live claims."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {
@@ -300,6 +303,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				}
 				if a.Version != "" {
 					fmt.Fprintf(&out, ", version=%s", a.Version)
+				}
+				if backlog := a.Backlog(now); backlog != "" {
+					fmt.Fprintf(&out, ", %s", backlog)
 				}
 				out.WriteString("\n")
 			}

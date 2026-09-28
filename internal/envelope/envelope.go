@@ -43,6 +43,8 @@ type Kind string
 const (
 	// KindAsk expects a reply.
 	KindAsk Kind = "ask"
+	// KindPing is answered automatically by the receiving client.
+	KindPing Kind = "ping"
 	// KindNotify is fire-and-forget; the target may still reply.
 	KindNotify Kind = "notify"
 )
@@ -87,6 +89,7 @@ type Request struct {
 
 // Pending names a queued request without its body, as a peek reports it.
 type Pending struct {
+	Kind   Kind   `json:"kind,omitempty"`
 	Urgent bool   `json:"urgent,omitempty"`
 	ID     string `json:"id"`
 	From   string `json:"from"`
@@ -152,7 +155,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 		return Request{}, errors.New("send: to is required")
 	case in.To == sender:
 		return Request{}, errors.New("send: an agent cannot send to itself")
-	case in.Body == "" && len(in.Attachments) == 0:
+	case in.Kind != KindPing && in.Body == "" && len(in.Attachments) == 0:
 		return Request{}, errors.New("send: body is required")
 	case len(in.Body) > maxBody:
 		return Request{}, fmt.Errorf("send: %w (%d > %d bytes)", ErrBodyTooLarge, len(in.Body), maxBody)
@@ -160,6 +163,11 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	switch in.Kind {
 	case "":
 		in.Kind = KindAsk
+	case KindPing:
+		if len(in.Body) > 4 || in.ParentID != "" || len(in.Attachments) != 0 {
+			return Request{}, errors.New("send: ping requires no parent or attachments and at most 4 body bytes")
+		}
+		in.Body = ""
 	case KindAsk, KindNotify:
 	default:
 		return Request{}, fmt.Errorf("send: unknown kind %q", in.Kind)

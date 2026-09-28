@@ -225,3 +225,18 @@ func TestPendingUrgentJSONShape(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePing(t *testing.T) {
+	for _, raw := range []string{
+		`{"to":"other","kind":"ping","parent_id":"parent"}`,
+		`{"to":"other","kind":"ping","body":"too long"}`,
+		`{"to":"other","kind":"ping","attachments":[{"id":"file"}]}`,
+	} {
+		if _, err := ParseSend([]byte(raw), "sender", DefaultMaxBody); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+	if req, err := ParseSend([]byte(`{"to":"other","kind":"ping"}`), "sender", DefaultMaxBody); err != nil || req.Kind != KindPing {
+		t.Fatalf("ping: %+v %v", req, err)
+	}
+}

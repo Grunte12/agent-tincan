@@ -14,6 +14,9 @@ import (
 // the agent to handle them as it would a request from the owner, while keeping the
 // sender and chain visible.
 func FormatRequest(req envelope.Request) string {
+	if req.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
 	if req.Urgent {
 		b.WriteString("URGENT ")
@@ -49,6 +52,9 @@ const RepliesHeading = "Replies to your requests:\n"
 // FormatReply renders a reply to a request this agent sent, with what it
 // asked, since a fresh session may not remember.
 func FormatReply(r Result) string {
+	if r.Request.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
 	from, status, body := r.Request.To, r.Status, ""
 	var atts []envelope.Attachment
@@ -103,10 +109,10 @@ type Claimer interface {
 // through c so no one else handles it. The caller acknowledges the replies
 // (AckReplies) once the text has reached its agent.
 func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
-	if in.Empty() {
-		return "No requests waiting.\n"
-	}
 	var b strings.Builder
+	if in.Empty() {
+		b.WriteString("No requests waiting.\n")
+	}
 	if len(in.Replies) > 0 {
 		b.WriteString(RepliesHeading)
 		for _, r := range in.Replies {
@@ -121,12 +127,16 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		}
 	}
 	for _, req := range in.Requests {
+		if req.Kind == envelope.KindPing {
+			continue
+		}
 		if _, err := c.Claim(ctx, req.ID); err != nil {
 			fmt.Fprintf(&b, "(could not claim %s: %v)\n", req.ID, err)
 			continue
 		}
 		b.WriteString(FormatRequest(req))
 	}
+	b.WriteString(UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
 }
 

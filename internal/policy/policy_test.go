@@ -270,3 +270,23 @@ func TestRefundGivesBackTheFailedSendsOwnSlot(t *testing.T) {
 		t.Fatalf("limit after refund = %v; the kept send's slot was lost", err)
 	}
 }
+
+func TestPingRejectsInferredParentAndUsesRateLimit(t *testing.T) {
+	f := newFixture(t, Config{PerMinute: 1})
+	parent, err := f.send(t, "instinct", "muse", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.claim(t, parent.ID, "muse")
+	req := envelope.Request{From: "muse", To: "grokbot", Kind: envelope.KindPing}
+	if err := f.pol.Prepare(t.Context(), &req); err == nil {
+		t.Fatal("ping continued inferred parent")
+	}
+	req = envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindPing}
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pol.Prepare(t.Context(), &req); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("rate: %v", err)
+	}
+}
