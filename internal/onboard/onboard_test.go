@@ -433,7 +433,7 @@ func TestHistoryBlock(t *testing.T) {
 	if want := "TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay " + relayURL; a.Join != want {
 		t.Errorf("history join = %q, want %q", a.Join, want)
 	}
-	for _, want := range []string{"service", "nothing to paste"} {
+	for _, want := range []string{"service", "nothing to paste", "asked ChatGPT, claude.ai, Grok, Gemini, Codex and Claude Code"} {
 		if !strings.Contains(a.Instructions, want) {
 			t.Errorf("history instructions missing %q:\n%s", want, a.Instructions)
 		}
@@ -461,6 +461,9 @@ func TestHistoryBlock(t *testing.T) {
 		t.Errorf("history setup assumes a repo checkout:\n%s", setup)
 	}
 	r := recipe(t, k, "history")
+	if want := "History service for ChatGPT, claude.ai, Grok, Gemini, Codex and Claude Code chats"; r.Title != want {
+		t.Errorf("history recipe title = %q, want %q", r.Title, want)
+	}
 	all := strings.Join(r.Steps, "\n")
 	if !strings.Contains(all, "tincan invite <name> --kind history") || !strings.Contains(all, "TINCAN_CONFIG=~/.config/tincan/history.json tincan join") {
 		t.Errorf("history recipe should invite then join with its own config:\n%s", all)

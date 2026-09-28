@@ -1,5 +1,5 @@
-// Package history reads Matt's conversations with ChatGPT, claude.ai, Codex
-// and Claude Code so the history agent can answer "what did Matt last ask"
+// Package history reads Matt's conversations with ChatGPT, claude.ai, Grok,
+// Codex and Claude Code so the history agent can answer "what did Matt last ask"
 // and send back the images from that turn.
 //
 // Every source is an adapter behind Reader. Adapters share one Query shape,
@@ -35,6 +35,8 @@ const (
 	SourceClaudeCode Source = "claude-code"
 	SourceChatGPT    Source = "chatgpt"
 	SourceClaudeAI   Source = "claude-ai"
+	SourceGrok       Source = "grok"
+	SourceGemini     Source = "gemini"
 )
 
 // Sources lists every valid Source: the live sites, in the site table's

@@ -1,6 +1,7 @@
 package history
 
-// Web agents make ChatGPT (chatgpt.com) and Claude (claude.ai) teammates:
+// Web agents make ChatGPT (chatgpt.com), Claude (claude.ai), Grok
+// (grok.com) and Gemini (gemini.google.com) teammates:
 // a request's body is typed into the owner's logged-in site through the
 // Tincan Chrome extension, and the reply comes back as the answer, with
 // generated images attached. See docs/adapters/web-agents.md.
@@ -115,10 +116,12 @@ type WebAgent struct {
 	// DefaultWebPollSchedule (tests use it).
 	PollInterval time.Duration
 	// ClaudeStablePolls and ClaudeStableFor override the site's
-	// text-stability rule (only claude.ai has one, DefaultClaudeStablePolls
-	// and DefaultClaudeStableFor): a reply with no stop_reason counts as
-	// finished once the same text is read on this many consecutive polls,
-	// spanning at least this long. Zero keeps the site's rule.
+	// text-stability rule (claude.ai's DefaultClaudeStablePolls and
+	// DefaultClaudeStableFor, Gemini's DefaultGeminiStablePolls and
+	// DefaultGeminiStableFor; ChatGPT has none): a reply the site does not
+	// mark finished counts as finished once the same text is read on this
+	// many consecutive polls, spanning at least this long. Zero keeps the
+	// site's rule.
 	ClaudeStablePolls int
 	ClaudeStableFor   time.Duration
 	// PresenceInterval is how often the agent refreshes its relay presence
@@ -192,8 +195,8 @@ var convURLPattern = regexp.MustCompile(`^/(?:g/[A-Za-z0-9_-]+/)?(?:c|chat)/([A-
 const threadingHelp = `Put "new chat" or "conversation: <id>" on the first line to choose the conversation, and the message after it.`
 
 // parseWebRequest reads the optional threading line: "new chat" or
-// "conversation: <id>" (an id, or a chatgpt.com or claude.ai conversation
-// URL) on the first line. Everything else is the message, sent as is.
+// "conversation: <id>" (an id, or a conversation URL on a site in the
+// table) on the first line. Everything else is the message, sent as is.
 func parseWebRequest(body string) (webRequest, error) {
 	first, rest, _ := strings.Cut(body, "\n")
 	head := strings.ToLower(strings.TrimSpace(first))
@@ -296,12 +299,13 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		w.logf("request %s from %s: claim failed: %v", req.ID, req.From, err)
 		return
 	}
-	if _, err := lookupSite(w.Site); err != nil {
+	site, err := lookupSite(w.Site)
+	if err != nil {
 		w.logf("request %s from %s: %v", req.ID, req.From, err)
 		w.reply(ctx, req, fmt.Sprintf("The %s agent is not set up for a known site: %v.", w.Name, err), envelope.StatusFailed, nil)
 		return
 	}
-	label := siteLabel(w.Site)
+	label := site.label
 
 	// 1. Access, from relay-set fields only.
 	if reason := chainDenied(w.Allowlist, req, w.Name, "send messages to "+label+" as the owner", w.logf); reason != "" {
@@ -315,6 +319,14 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	if err != nil {
 		w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: %v. %s", label, err, threadingHelp), envelope.StatusFailed, nil)
 		return
+	}
+	if wr.mode == threadConversation {
+		id, ok := site.canonical(wr.convID)
+		if !ok {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: %q is not a %s conversation id. %s", label, wr.convID, label, threadingHelp), envelope.StatusFailed, nil)
+			return
+		}
+		wr.convID = id
 	}
 	if len(wr.message) > MaxSendMessage {
 		w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the message is %d bytes, over the %d byte limit.", label, len(wr.message), MaxSendMessage), envelope.StatusFailed, nil)
@@ -330,11 +342,16 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		w.resume(ctx, req, wr, e)
 		return
 	}
-	// The site rate-limited the account a moment ago: it is not asked
-	// again until the cooldown ends.
+	// The site rate-limited the account (or showed an anti-bot check) a
+	// moment ago: it is not asked again until the cooldown ends.
 	if left := w.Native.CooldownRemaining(w.Site); left > 0 {
-		w.logf("request %s from %s: %s is rate-limited for another %s; not sending", req.ID, req.From, label, left.Round(time.Second))
-		w.reply(ctx, req, w.rateLimitReply(), envelope.StatusFailed, nil)
+		cerr := w.Native.cooldownError(w.Site)
+		why := "rate-limited"
+		if errors.Is(cerr, ErrBlocked) {
+			why = "held back after an anti-bot check"
+		}
+		w.logf("request %s from %s: %s is %s for another %s; not sending", req.ID, req.From, label, why, left.Round(time.Second))
+		w.reply(ctx, req, w.sendFailure(cerr, ""), envelope.StatusFailed, nil)
 		return
 	}
 	st := w.loadState()
@@ -411,14 +428,19 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 		w.reply(ctx, req, w.waitFailure(err, convID), envelope.StatusFailed, nil)
 		return
 	}
-	text, conv, err := w.readReply(ctx, convID, userID, raw)
+	text, conv, generated, lost, err := w.readReply(ctx, convID, userID, raw)
 	if err != nil {
 		w.logf("request %s from %s: reading the reply in %s: %v", req.ID, req.From, convID, err)
 		w.reply(ctx, req, w.waitFailure(err, convID), envelope.StatusFailed, nil)
 		return
 	}
 	body, truncated := capReply(text)
-	if n := imageCount(conv); strings.TrimSpace(text) == "" && n > 0 {
+	n := imageCount(conv)
+	missing := w.missingImagesNote(generated, n)
+	if missing != "" {
+		n = generated
+	}
+	if strings.TrimSpace(text) == "" && n > 0 {
 		what := "an image"
 		if n > 1 {
 			what = "images"
@@ -428,12 +450,27 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 	if truncated {
 		body += fmt.Sprintf("\n\n(reply truncated: showing %d of %d bytes)", len(body), len(text))
 	}
+	if lost > 0 && w.site().noteLostImages {
+		what := "image"
+		if lost > 1 {
+			what = "images"
+		}
+		lostNote := fmt.Sprintf("%s's reply had %d %s that could not be attached; open the conversation to see them.", label, lost, what)
+		if note != "" {
+			note += "\n\n" + lostNote
+		} else {
+			note = lostNote
+		}
+	}
 	if note != "" {
 		body += "\n\n" + note
 	}
 	body += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
 
 	ids := w.attachImages(ctx, req, conv, &body)
+	if missing != "" {
+		body += "\n" + missing
+	}
 	e.UserMessageID, e.State = userID, webSendAnswered
 	w.journal(req.ID, e)
 	w.logf("request %s from %s: answered (conversation %s, %d attachments)", req.ID, req.From, convID, len(ids))
@@ -458,7 +495,7 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	label := siteLabel(w.Site)
 	var ue *UnavailableError
 	if _, ok := rateLimited(err); ok {
-		return w.rateLimitReply()
+		return w.rateLimitReply() + clickedNote(err, label)
 	}
 	switch {
 	case errors.Is(err, ErrNotFound):
@@ -466,9 +503,21 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	case errors.Is(err, ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fmt.Sprintf("Sorry, %s did not finish answering in time. The message may still have been sent.", label)
 	case errors.As(err, &ue):
-		return "Sorry, " + ue.Error() + "."
+		return "Sorry, " + ue.Error() + "." + clickedNote(err, label)
 	}
 	return fmt.Sprintf("Sending to %s failed.", label)
+}
+
+// clickedNote is what a send failure adds when it came after the send
+// button was clicked (a redirect to a sign-in page or an anti-bot check
+// mid-send): the message may be in the conversation already, and sending
+// it again could post it twice.
+func clickedNote(err error, label string) string {
+	var ue *UnavailableError
+	if !errors.As(err, &ue) || !ue.Clicked {
+		return ""
+	}
+	return fmt.Sprintf(" The send button had already been clicked, so the message may have been sent; check the %s conversation before sending it again.", label)
 }
 
 // site is the agent's table entry, nil for a site outside the table
@@ -604,8 +653,12 @@ type webNode struct {
 	// images, but its endTurn still counts.
 	hidden bool
 	// endTurn: the site marks the whole turn over on this message
-	// (ChatGPT: end_turn true, or finish_details without end_turn false).
+	// (ChatGPT: end_turn true, or finish_details without end_turn false;
+	// grok.com: a finished response).
 	endTurn bool
+	// limited: the answer ended on the account's rate or plan limit
+	// (grok.com's stream errors).
+	limited bool
 }
 
 // replyProgress is what one detail read says about the reply.
@@ -619,6 +672,11 @@ type replyProgress struct {
 	// orphaned: a later user turn follows this request's message with
 	// nothing between them, so no reply to it will come.
 	orphaned bool
+	// limited: a message in this request's turn ended on the account's
+	// rate or plan limit and the turn has no usable reply (no answer text
+	// and no images). A finished answer that also carries a limit error is
+	// delivered as any other answer.
+	limited bool
 	// sig fingerprints the reply, for the stability check.
 	sig string
 }
@@ -676,10 +734,11 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 	}
 	var leaf, answer *webNode
-	images, ended := 0, false
+	images, ended, limited := 0, false, false
 	for i := b + 1; i < end; i++ {
 		n := &nodes[i]
 		ended = ended || n.endTurn
+		limited = limited || n.limited
 		if n.hidden {
 			continue
 		}
@@ -691,6 +750,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 	}
 	if leaf == nil && !ended {
 		p.orphaned = later
+		p.limited = limited
 		return p
 	}
 	var id, text string
@@ -698,6 +758,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		id, text = answer.id, answer.text
 	}
 	p.found = text != "" || images > 0
+	p.limited = limited && !p.found
 	p.sig = fmt.Sprintf("%s\n%d\n%s", id, images, text)
 	p.finished = ended || (p.found && leaf.reply && leaf.finished)
 	return p
@@ -789,12 +850,14 @@ var errReplyUnreadable = errors.New("the reply could not be read")
 
 // readReply builds the answer from the finished read: the reply to this
 // request's user message (userID), with its generated images fetched
-// through the file operation.
-func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw json.RawMessage) (string, []Conversation, error) {
+// through the file operation. generated is how many images the reply
+// had before any failed to fetch; lost is how many of the reply's images
+// could not be fetched.
+func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw json.RawMessage) (text string, conv []Conversation, generated, lost int, err error) {
 	l := w.live()
 	th, err := l.parseDetail(convID, raw)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: %v", errReplyUnreadable, err)
+		return "", nil, 0, 0, fmt.Errorf("%w: %v", errReplyUnreadable, err)
 	}
 	i := -1
 	for j, t := range th.turns {
@@ -803,16 +866,30 @@ func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw jso
 		}
 	}
 	if i < 0 {
-		return "", nil, fmt.Errorf("%w: this request's turn is not in the conversation", errReplyUnreadable)
+		return "", nil, 0, 0, fmt.Errorf("%w: this request's turn is not in the conversation", errReplyUnreadable)
 	}
 	t := th.turns[i]
 	if len(t.replyImages) == 0 {
-		return t.reply.Text, nil, nil
+		return t.reply.Text, nil, 0, 0, nil
 	}
 	c := []Conversation{{Source: w.Site, ID: convID, Messages: []Message{{Role: RoleAssistant, Images: t.replyImages}}}}
 	c = l.resolve(ctx, c)
+	lost = max(len(t.replyImages)-imageCount(c), 0)
 	capImages(c)
-	return t.reply.Text, c, nil
+	return t.reply.Text, c, len(t.replyImages), lost, nil
+}
+
+// missingImagesNote is the note on a reply whose generated images could
+// not all be fetched from the site ("" when nothing is missing or the
+// site does not note it).
+func (w *WebAgent) missingImagesNote(generated, fetched int) string {
+	if !w.site().noteMissingImages || fetched >= min(generated, MaxImages) {
+		return ""
+	}
+	if fetched == 0 {
+		return "The images could not be attached."
+	}
+	return fmt.Sprintf("%d of the images could not be attached.", min(generated, MaxImages)-fetched)
 }
 
 func imageCount(conv []Conversation) int {

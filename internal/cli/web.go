@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,8 +20,8 @@ import (
 func webCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
-		Short: "Run ChatGPT or Claude as a teammate through your logged-in browser",
-		Long: "A web agent makes chatgpt.com or claude.ai a teammate: a request's text is typed into your logged-in\n" +
+		Short: "Run ChatGPT, Claude, Grok or Gemini as a teammate through your logged-in browser",
+		Long: "A web agent makes chatgpt.com, claude.ai, grok.com or gemini.google.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
 			"with generated images attached. It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",
@@ -51,7 +54,7 @@ func webServeCmd() *cobra.Command {
 	var site, configPath, allowPath, statePath, name string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a web agent: answer teammates by asking ChatGPT or Claude in your browser",
+		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude or Gemini in your browser",
 		Long: "Long-polls the relay as the web agent and handles one request at a time:\n" +
 			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
 			"     with no file (or a * entry) any joined agent may ask;\n" +
@@ -114,11 +117,22 @@ func webServeCmd() *cobra.Command {
 			if me.Name != name {
 				return wrongWebAgent(name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
+			// A connected extension that reports the site ungranted cannot
+			// serve it, so the service waits here for the grant rather than
+			// exiting (the service manager would restart it every few
+			// seconds, forever). With no extension connected (launchd starts
+			// this at login, often before Chrome) it starts, and each request
+			// gets the matching reply.
+			native := history.NewClient()
+			if err := waitForSiteGrant(ctx, native, src, cmd.ErrOrStderr(), name); err != nil {
+				cmd.PrintErrf("tincan web %s: stopped\n", name)
+				return nil
+			}
 			agent := &history.WebAgent{
 				Relay:       r,
 				Site:        src,
 				Name:        name,
-				Native:      history.NewClient(),
+				Native:      native,
 				Allowlist:   history.FileAllowlist(allowPath),
 				StatePath:   expandHome(statePath),
 				JournalPath: history.DefaultWebJournalPath(name),
@@ -140,6 +154,39 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
 	return cmd
+}
+
+// webGrantRecheck is how often web serve asks the extension again while
+// it waits for a missing site grant. Tests shorten it.
+var webGrantRecheck = time.Minute
+
+// waitForSiteGrant returns once src can be served: at once when the
+// extension grants it or no extension answers, else after logging the
+// missing grant once (naming the options page) and asking again every
+// webGrantRecheck until it is granted or the extension goes away. It
+// fails only when ctx ends first.
+func waitForSiteGrant(ctx context.Context, native *history.Client, src history.Source, log io.Writer, name string) error {
+	err := native.CheckSiteGrant(ctx, src)
+	if err == nil {
+		return nil
+	}
+	fmt.Fprintf(log, "tincan web %s: waiting for the site grant, checking every %s: %v\n", name, webGrantRecheck, err)
+	t := time.NewTicker(webGrantRecheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+		if native.CheckSiteGrant(ctx, src) == nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(log, "tincan web %s: %s is granted (or no extension is connected); starting\n", name, src)
+			return nil
+		}
+	}
 }
 
 func expandHome(p string) string {

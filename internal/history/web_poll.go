@@ -30,6 +30,16 @@ const (
 	DefaultClaudeStableFor   = 10 * time.Second
 )
 
+// DefaultGeminiStablePolls and DefaultGeminiStableFor: Gemini's detail
+// has no finished marker, and Gemini can hold its text still for a long
+// while as it thinks or searches mid-answer, so its reply counts as
+// finished only once the same text is read on 4 consecutive polls
+// spanning at least 45 seconds (claude.ai's window is 10).
+const (
+	DefaultGeminiStablePolls = 4
+	DefaultGeminiStableFor   = 45 * time.Second
+)
+
 // A 429 while waiting for a reply waits the site's Retry-After, or backs
 // off from RateLimitBackoffStart, doubling up to RateLimitBackoffMax.
 const (
@@ -117,7 +127,7 @@ func (w *WebAgent) stableRule() *stableRule {
 // waitReply reads the conversation on the poll schedule until the reply
 // to this request's message is finished, and returns that read and the id
 // of this request's user message. On a site with a text-stability rule
-// (claude.ai), a reply without a stop_reason counts as finished once the
+// (claude.ai, Gemini), a reply without a stop_reason counts as finished once the
 // same reply is read on the rule's number of consecutive polls spanning
 // at least its time (see stableRule). onBind, when set,
 // is called once with the user message id when it is first seen. Errors
@@ -170,6 +180,20 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			if p.orphaned {
 				return nil, a.bound, errOrphaned
 			}
+			if p.limited {
+				// The turn ended on the account's rate or plan limit with
+				// no answer to deliver (progressOf sets limited only then;
+				// an answer that carries a stray limit error is returned
+				// as usual): the site is left alone for a while, and the
+				// asker is told the message went through.
+				after := w.site().planLimitCooldown
+				if after <= 0 {
+					after = RateLimitBackoffMax
+				}
+				w.Native.cooldown().Note(w.Site, after)
+				w.logf("conversation %s: %s answered with a rate or plan limit; holding requests back for %s", convID, siteLabel(w.Site), after)
+				return nil, a.bound, &UnavailableError{Source: w.Site, Kind: ErrRateLimited, Detail: "plan limit", RetryAfter: after}
+			}
 			if p.finished {
 				return raw, a.bound, nil
 			}
@@ -197,7 +221,8 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			}
 			w.logf("conversation %s: detail: %v (rate limited; next read in %s)", convID, err, after)
 			delay = after
-		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected):
+		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected),
+			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked):
 			return nil, a.bound, err
 		default:
 			failures++

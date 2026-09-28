@@ -232,9 +232,9 @@ func TestLimitNote(t *testing.T) {
 		{"live count can widen", count(50), history.SourceChatGPT, false,
 			prefix + "only the last 50 conversations were read (use --max to widen it)."},
 		{"chatgpt at the list cap", count(history.MaxListCount), history.SourceChatGPT, false,
-			prefix + "only the last 100 conversations were read (ChatGPT and claude.ai read at most 100)."},
+			prefix + "only the last 100 conversations were read (ChatGPT, claude.ai, Grok and Gemini read at most 100)."},
 		{"claude.ai at the list cap", count(history.MaxListCount), history.SourceClaudeAI, false,
-			prefix + "only the last 100 conversations were read (ChatGPT and claude.ai read at most 100)."},
+			prefix + "only the last 100 conversations were read (ChatGPT, claude.ai, Grok and Gemini read at most 100)."},
 		{"local source past the list cap", count(history.MaxListCount), history.SourceCodex, false,
 			prefix + "only the last 100 conversations were read (use --max to widen it)."},
 		{"listing", count(history.MaxListCount), history.SourceChatGPT, true,
@@ -509,7 +509,7 @@ func TestHistoryServeStartupLineDescribesWindow(t *testing.T) {
 	}
 	for file, want := range map[string]string{
 		missing: "window: the last 50 conversations, up to 30 days (default, no file at " + missing + ")",
-		set:     "window " + set + ": the last 150 conversations, up to 90 days (ChatGPT and claude.ai read at most 100)",
+		set:     "window " + set + ": the last 150 conversations, up to 90 days (ChatGPT, claude.ai, Grok and Gemini read at most 100)",
 		bad:     "window file " + bad + " is not valid",
 	} {
 		out := startupLine(t, "history", "history", "serve", "--allowlist", allow, "--window-file", file)

@@ -111,7 +111,7 @@ func TestQueryValidate(t *testing.T) {
 		}
 	}
 	bad := map[string]Query{
-		"unknown source":       {Source: "gemini", Mode: ModeLatest},
+		"unknown source":       {Source: "bard", Mode: ModeLatest},
 		"unknown mode":         {Source: SourceCodex, Mode: "delete"},
 		"search without terms": {Source: SourceCodex, Mode: ModeSearch},
 		"conversation no id":   {Source: SourceCodex, Mode: ModeConversation},

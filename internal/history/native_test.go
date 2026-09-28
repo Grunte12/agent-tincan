@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -759,5 +760,117 @@ func TestNativeHostFailedReloadWriteDoesNotStartCooldown(t *testing.T) {
 	host.onHello(loaded)
 	if out.Len() != 0 {
 		t.Fatalf("asked again inside the cooldown: %q", out.String())
+	}
+}
+
+// statusHost runs a native host whose extension side is driven by the
+// test: hello writes a raw hello frame, as the extension would.
+func statusHost(t *testing.T) (c *Client, hello func(v map[string]any), stop func()) {
+	t.Helper()
+	dir := filepath.Join(shortDir(t), "n")
+	sock := filepath.Join(dir, "host.sock")
+	chromeToHostR, chromeToHostW := io.Pipe()
+	hostToChromeR, hostToChromeW := io.Pipe()
+	seen := make(chan NativeRequest, 16)
+	fakeExtension(t, hostToChromeR, chromeToHostW, seen, func(req NativeRequest) []NativeResponse {
+		t.Errorf("host.status reached the extension: %+v", req)
+		return nil
+	})
+	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 5 * time.Second}
+	go func() { _ = host.Run(context.Background()) }()
+	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
+	var mu sync.Mutex
+	hello = func(v map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := WriteMessage(chromeToHostW, map[string]any{"id": 0, "hello": v}, MaxChromeMessage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c = &Client{Channel: &SocketChannel{Path: sock, ChromeRunning: func() bool { return true }}}
+	return c, hello, func() { chromeToHostW.Close() }
+}
+
+// The host answers host.status itself from the last hello: an extension
+// older than site grants has only ChatGPT and claude.ai, and a new hello
+// on the same connection (a grant from the options page) updates the
+// list without a reconnect.
+func TestNativeHostExtensionStatus(t *testing.T) {
+	c, hello, stop := statusHost(t)
+	defer stop()
+	ctx := context.Background()
+	st, err := c.ExtensionStatus(ctx)
+	if err != nil || st.Hello {
+		t.Fatalf("before any hello: %+v %v", st, err)
+	}
+	hello(map[string]any{"version": "0.3.2", "unpacked": true, "files": map[string]string{}})
+	waitFor(t, func() bool { st, _ = c.ExtensionStatus(ctx); return st.Hello })
+	if !slices.Equal(st.Granted, []string{"chatgpt", "claudeai"}) || st.Version != "0.3.2" {
+		t.Fatalf("old extension: %+v", st)
+	}
+	if !st.granted(SourceChatGPT) || !st.granted(SourceClaudeAI) {
+		t.Fatalf("old extension grants: %+v", st)
+	}
+	// Grok is an optional site: an older extension never has it, and web
+	// serve --site grok waits for the grant against it.
+	if st.granted(SourceGrok) {
+		t.Fatalf("old extension grants grok: %+v", st)
+	}
+	if err := c.CheckSiteGrant(ctx, SourceGrok); !errors.Is(err, ErrPermissionMissing) || !strings.Contains(err.Error(), "no access to grok.com") {
+		t.Fatalf("grok without a grant at startup: %v", err)
+	}
+	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{"claudeai"}})
+	waitFor(t, func() bool { st, _ = c.ExtensionStatus(ctx); return st.Version == "0.4.0" })
+	if !slices.Equal(st.Granted, []string{"claudeai"}) || st.granted(SourceChatGPT) {
+		t.Fatalf("chatgpt withheld: %+v", st)
+	}
+	if err := c.CheckSiteGrant(ctx, SourceChatGPT); !errors.Is(err, ErrPermissionMissing) || !strings.Contains(err.Error(), "Extension options") {
+		t.Fatalf("ungranted site at startup: %v", err)
+	}
+	if err := c.CheckSiteGrant(ctx, SourceClaudeAI); err != nil {
+		t.Fatalf("granted site at startup: %v", err)
+	}
+	// The owner grants it: the next hello, same connection.
+	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{"chatgpt", "claudeai", "grok"}})
+	waitFor(t, func() bool { return c.CheckSiteGrant(ctx, SourceChatGPT) == nil })
+	if err := c.CheckSiteGrant(ctx, SourceGrok); err != nil {
+		t.Fatalf("granted grok at startup: %v", err)
+	}
+	// An empty list is not an old extension: nothing is granted.
+	hello(map[string]any{"version": "0.4.0", "unpacked": true, "files": map[string]string{}, "granted": []string{}})
+	waitFor(t, func() bool { return c.CheckSiteGrant(ctx, SourceClaudeAI) != nil })
+}
+
+// With no extension connected (Chrome not started yet, as at login) or an
+// older host that does not know host.status, the startup check passes:
+// web serve starts and answers each request with the matching reply.
+func TestCheckSiteGrantWithoutConnectedExtension(t *testing.T) {
+	ctx := context.Background()
+	none := &Client{Channel: &SocketChannel{Path: filepath.Join(shortDir(t), "none.sock"), ChromeRunning: func() bool { return false }}}
+	if err := none.CheckSiteGrant(ctx, SourceChatGPT); err != nil {
+		t.Fatalf("no host: %v", err)
+	}
+	old := &Client{Channel: channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request", Message: `unknown operation "host.status"`}})
+		return err
+	})}
+	if err := old.CheckSiteGrant(ctx, SourceChatGPT); err != nil {
+		t.Fatalf("older host: %v", err)
+	}
+	if err := (&Client{}).CheckSiteGrant(ctx, SourceChatGPT); err != nil {
+		t.Fatalf("no channel: %v", err)
+	}
+}
+
+func TestPermissionMissingAndBlockedErrorCodes(t *testing.T) {
+	for code, want := range map[string]error{"permission_missing": ErrPermissionMissing, "blocked": ErrBlocked} {
+		err := fromNativeError(SourceClaudeAI, &NativeError{Code: code, Message: "detail"})
+		if !errors.Is(err, want) {
+			t.Errorf("%s: %v", code, err)
+		}
+	}
+	msg := fromNativeError(SourceClaudeAI, &NativeError{Code: "permission_missing", Message: "detail"}).Error()
+	if !strings.Contains(msg, "claude.ai") || !strings.Contains(msg, "chrome://extensions > Agent Tincan History > Details > Extension options") {
+		t.Fatalf("permission_missing reply: %s", msg)
 	}
 }

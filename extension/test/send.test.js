@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { SELECTORS, createSender, pageFill, pageProbe, pageSubmit } from '../send.js';
-import { createRunner, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
+import { SELECTORS, SITES, createSender, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
+import { createRunner, errorFrame, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
 // ---- A fake DOM, just enough for the page functions.
 
@@ -65,6 +65,9 @@ class El {
 
 let convSeq = 0;
 
+// CONV_PATH matches a conversation page's address on any of the sites.
+const CONV_PATH = /\/(?:c|chat|app)\/([A-Za-z0-9_-]+)/;
+
 // FakeSite simulates one chatgpt.com or claude.ai page. opts.match picks
 // which selector in the table the page answers to for each role, so tests
 // can exercise the fallbacks.
@@ -73,11 +76,12 @@ class FakeSite {
     this.site = site;
     this.sel = SELECTORS[site];
     this.opts = { execWorks: true, pasteWorks: false, streamTicks: 3, loadTicks: 1, ...opts };
-    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, ...(opts.match || {}) };
+    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, ...(opts.match || {}) };
+    this.home = url;
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
     this.messages = [];
-    const m = /\/(?:c|chat)\/([A-Za-z0-9_-]+)/.exec(this.href);
+    const m = CONV_PATH.exec(this.href);
     if (m) this.messages.push({ role: 'user', text: 'earlier question' }, { role: 'assistant', text: 'old answer' });
     // answering: the page is still writing an answer when it loads.
     this.generating = Boolean(this.opts.answering);
@@ -109,6 +113,9 @@ class FakeSite {
       case 'send':
         // sendReadyTick: the button stays disabled until that tick.
         if (this.opts.sendReadyTick) this.sendBtn.disabled = this.ticks < this.opts.sendReadyTick;
+        // sendAfterText: the button exists only while there is text
+        // (grok.com).
+        if (this.opts.sendAfterText && !this.composer.text) break;
         if (!this.opts.noSendButton) els.push(this.sendBtn);
         break;
       case 'stop':
@@ -120,16 +127,23 @@ class FakeSite {
       case 'login':
         if (this.opts.loggedOut) els.push(new El(this, 'A'));
         break;
+      case 'blocked':
+        // challengeFromTick / challengeUntilTick: the challenge appears
+        // after the page loaded, or passes by itself at that tick.
+        if (this.opts.challenge || (this.opts.challengeFromTick && this.ticks >= this.opts.challengeFromTick) || (this.opts.challengeUntilTick && this.ticks < this.opts.challengeUntilTick)) {
+          els.push(new El(this, 'FORM'));
+        }
+        break;
       case 'assistant':
       case 'user':
         for (const m of this.messages) if (m.role === r) els.push(new El(this, 'DIV', m.text));
         break;
     }
-    return s[r][this.match[r]] ? els : [];
+    return s[r] && s[r][this.match[r]] ? els : [];
   }
   lookup(sel) {
-    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login']) {
-      if (this.sel[r][this.match[r]] === sel) return this.role(r);
+    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked']) {
+      if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
     return [];
   }
@@ -170,12 +184,14 @@ class FakeSite {
     // moveAtTick/moveTo: the site changes the address at that tick (a
     // deleted conversation redirecting, or a fork).
     if (this.opts.moveTo && this.ticks === this.opts.moveAtTick) this.href = this.opts.moveTo;
+    // returnAtTick: a redirectTo bounce that comes back to the page.
+    if (this.opts.redirectTo && this.ticks === this.opts.returnAtTick) this.href = this.home;
     if (!this.generating) return;
     this.ticksSinceSubmit = (this.ticksSinceSubmit || 0) + 1;
-    if (!/\/(?:c|chat)\//.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
-      const id = `new-conv-${++convSeq}`;
+    if (!CONV_PATH.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
+      const id = this.site === 'gemini' ? (++convSeq).toString(16).padStart(16, '0') : `new-conv-${++convSeq}`;
       this.newID = id;
-      this.href = this.site === 'chatgpt' ? `https://chatgpt.com/c/${id}` : `https://claude.ai/chat/${id}`;
+      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}`, gemini: `https://gemini.google.com/app/${id}` }[this.site];
     }
     const last = this.messages.at(-1);
     if (last.role !== 'assistant') this.messages.push({ role: 'assistant', text: 'Part' });
@@ -674,4 +690,272 @@ test('helloMessage reports the version, unpacked, and the sha256 of each file', 
   const store = await helloMessage({ manifest: { ...manifest, update_url: 'https://clients2.google.com/service/update2/crx' }, getURL: (f) => f, fetch: async () => { throw new Error('x'); } });
   assert.equal(store.hello.unpacked, false);
   assert.equal(store.hello.files['ops.js'], '');
+});
+
+// ---- grok.com
+
+test('grok new chat: types into the ProseMirror composer, clicks the submit button that appears with the text, returns the /c/<id>', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { sendAfterText: true, neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('grok', { message: 'Draw a fox in a tin can', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://grok.com/');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['Draw a fox in a tin can']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://grok.com/c/${page.newID}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.deepEqual(await s.close('chatgpt', r.conversation_id), { closed: 0 }, 'close is per site');
+  assert.deepEqual(await s.close('grok', r.conversation_id), { closed: 1 });
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok continues /c/<id>; with no submit button it presses Enter', async () => {
+  const id = '0e1d0000-0000-4000-8000-000000000001';
+  const fc = fakeChrome((url) => new FakeSite('grok', url, { sendAfterText: true }));
+  const r = await sender(fc).send('grok', { message: 'shorter please', conversation_id: id });
+  assert.equal(fc.log.created[0].url, `https://grok.com/c/${id}`);
+  assert.equal(r.conversation_id, id);
+
+  let page;
+  const fc2 = fakeChrome((url) => (page = new FakeSite('grok', url, { noSendButton: true, match: { composer: 1 } })));
+  const r2 = await sender(fc2).send('grok', { message: 'enter please' });
+  assert.deepEqual(page.submitted, ['enter please']);
+  assert.equal(r2.conversation_id, page.newID);
+});
+
+test('grok page showing an anti-bot challenge is blocked: nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challenge: true })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok challenge that passes by itself during load: the send goes ahead', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challengeUntilTick: 4 })));
+  const r = await sender(fc, { loadMs: 10000 }).send('grok', { message: 'after the check' });
+  assert.deepEqual(page.submitted, ['after the check']);
+  assert.equal(r.conversation_id, page.newID);
+});
+
+test('grok challenge still showing when the load time runs out: blocked, nothing typed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { challenge: true })));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.ok(fc.log.scripts.filter((x) => x.func === pageProbe).length > 1, 'the challenge was polled, not refused at once');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('grok challenge appearing after the composer loaded: blocked, not send_failed', async () => {
+  // While the send button is still disabled (the submit loop).
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { sendDisabled: true, challengeFromTick: 2 })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+  // After the click, while waiting for the page to take the message.
+  const fc2 = fakeChrome((url) => new FakeSite('grok', url, { ignoreSubmit: true, challengeFromTick: 2 }));
+  await assert.rejects(sender(fc2).send('grok', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.deepEqual(fc2.log.removed, [100]);
+});
+
+test('grok logged-out page (sign-in link or /sign-in): not_logged_in, nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { loggedOut: true })));
+  await assert.rejects(sender(fc).send('grok', { message: 'x' }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+  const fc2 = fakeChrome((url) => new FakeSite('grok', url, { redirectTo: 'https://grok.com/sign-in?redirect=%2F' }));
+  await assert.rejects(sender(fc2).send('grok', { message: 'x' }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(fc2.log.removed, [100]);
+});
+
+test('runner: grok.send checks the grok.com session first; logged out or blocked opens no tab', async () => {
+  const LIST = 'https://grok.com/rest/app-chat/conversations?pageSize=1';
+  for (const [name, res, code] of [
+    ['401', () => jsonResponse({ error: 'unauthenticated' }, 401), 'not_logged_in'],
+    ['no list', () => jsonResponse({}), 'not_logged_in'],
+    ['anti-bot 403', () => jsonResponse({ error: { code: 7, message: 'Request rejected by anti-bot rules.' } }, 403), 'blocked'],
+  ]) {
+    const fc = fakeChrome((url) => new FakeSite('grok', url));
+    const calls = [];
+    const r = createRunner({ fetch: async (u) => (calls.push(String(u)), res()), sender: sender(fc) });
+    await assert.rejects(r.run('grok.send', { message: 'x' }, () => {}), (e) => e.code === code, name);
+    assert.deepEqual(calls, [LIST], name);
+    assert.equal(fc.log.created.length, 0, `${name}: no tab`);
+  }
+  // An empty list is not proof of a sign-in: a tab that opens on the
+  // sign-in page is still refused before anything is typed.
+  {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('grok', url, { loggedOut: true })));
+    const r = createRunner({ fetch: async () => jsonResponse({ conversations: [] }), sender: sender(fc) });
+    await assert.rejects(r.run('grok.send', { message: 'x' }, () => {}), (e) => e.code === 'not_logged_in', 'empty list, signed-out tab');
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(page.submitted, []);
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+  const fc = fakeChrome((url) => new FakeSite('grok', url, { neverFinish: true }));
+  const s = sender(fc);
+  const r = createRunner({ fetch: async () => jsonResponse({ conversations: [] }), sender: s });
+  const frames = [];
+  await r.run('grok.send', { message: 'hi grok' }, (f) => frames.push(f));
+  assert.match(frames[0].result.conversation_id, /^new-conv-/);
+  const closed = [];
+  await r.run('grok.close', { conversation_id: frames[0].result.conversation_id }, (f) => closed.push(f));
+  assert.deepEqual(closed, [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+// ---- Gemini.
+
+test('gemini new chat: opens /app in a background tab, types into the Quill composer, returns the URL hex id', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('gemini', { message: 'Draw a fox logo', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://gemini.google.com/app');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['Draw a fox logo']);
+  assert.match(r.conversation_id, /^[0-9a-f]{16}$/);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://gemini.google.com/app/${r.conversation_id}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.deepEqual(await s.close('gemini', r.conversation_id), { closed: 1 });
+});
+
+test('gemini continues /app/<id>; the id is read from /u/<n>/ and /gem/ addresses too', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { neverFinish: true })));
+  const r = await sender(fc).send('gemini', { message: 'and in French', conversation_id: '00000000000000d2' });
+  assert.equal(fc.log.created[0].url, 'https://gemini.google.com/app/00000000000000d2');
+  assert.equal(r.conversation_id, '00000000000000d2');
+  assert.deepEqual(page.submitted, ['and in French']);
+  const re = SITES.gemini.idFrom;
+  assert.equal(re.exec('https://gemini.google.com/u/1/app/00000000000000d2?hl=en')[1], '00000000000000d2');
+  assert.equal(re.exec('https://gemini.google.com/gem/coding-partner/00000000000000d2')[1], '00000000000000d2');
+  assert.equal(re.exec('https://gemini.google.com/app'), null);
+  assert.equal(re.exec('https://gemini.google.com.evil.example/app/00000000000000d2'), null);
+});
+
+test('a send tab sent to a sign-in host is not_logged_in, to /sorry/ is blocked; nothing is typed and the tab closes', async () => {
+  for (const [to, code] of [['https://accounts.google.com/v3/signin/identifier?continue=x', 'not_logged_in'], ['https://www.google.com/sorry/index?continue=x', 'blocked']]) {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: to })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code, to);
+    assert.deepEqual(page.submitted, []);
+    assert.equal(fc.log.scripts.length, 0, 'no script in a page on another host');
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+});
+
+test('a sign-in bounce that comes back while loading does not fail the send; one that stays does, after a settle', async () => {
+  let page;
+  let fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: 'https://accounts.google.com/ServiceLogin?continue=x', returnAtTick: 1, neverFinish: true })));
+  const r = await sender(fc, { settleMs: 1500 }).send('gemini', { message: 'hi', new_chat: true });
+  assert.deepEqual(page.submitted, ['hi']);
+  assert.equal(r.conversation_id, page.newID);
+  fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { redirectTo: 'https://accounts.google.com/ServiceLogin?continue=x' })));
+  await assert.rejects(sender(fc, { settleMs: 1500 }).send('gemini', { message: 'hi' }), (e) => e.code === 'not_logged_in');
+  assert.equal(fc.now(), 1500, 'one settle, then it fails');
+  assert.deepEqual(page.submitted, []);
+});
+
+test('a redirect after the composer was found stops the send: /sorry/ is blocked, a sign-in host not_logged_in', async () => {
+  for (const [to, code] of [['https://www.google.com/sorry/index?continue=x', 'blocked'], ['https://accounts.google.com/v3/signin/identifier?continue=x', 'not_logged_in']]) {
+    // While the send button is still disabled (before the click).
+    let page;
+    let fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { sendReadyTick: 5, moveTo: to, moveAtTick: 2 })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && !e.clicked && !errorFrame(e).error.clicked, `before the click: ${to}`);
+    assert.deepEqual(page.submitted, [], 'nothing sent on another host');
+    assert.deepEqual(fc.log.removed, [100]);
+    // After the click, while confirming.
+    fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, streamTicks: 99, moveTo: to, moveAtTick: 2 })));
+    // The click happened, so the failure says the message may have gone.
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && e.clicked === true && errorFrame(e).error.clicked === true, `confirming: ${to}`);
+    // While waiting for the new chat's id.
+    fc = fakeChrome((url) => (page = new FakeSite('gemini', url, { noId: true, neverFinish: true, moveTo: to, moveAtTick: 4 })));
+    await assert.rejects(sender(fc).send('gemini', { message: 'hi' }), (e) => e.code === code && e.clicked === true && errorFrame(e).error.clicked === true, `id wait: ${to}`);
+    assert.deepEqual(page.submitted, ['hi']);
+  }
+});
+
+test('capture fetches a Gemini image inside the tab the send left open, and only there', async () => {
+  const fc = fakeChrome((url) => new FakeSite('gemini', url, { neverFinish: true }));
+  const s = sender(fc);
+  const r = await s.send('gemini', { message: 'Draw a fox logo', new_chat: true });
+  const IMG = 'https://lh3.googleusercontent.com/gg/dummy-fox-1';
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 9]);
+  const saved = globalThis.fetch;
+  const fetched = [];
+  globalThis.fetch = async (url, init) => {
+    fetched.push([url, init.credentials]);
+    return url === IMG ? new Response(png, { status: 200, headers: { 'content-type': 'image/png' } }) : new Response('', { status: 403 });
+  };
+  try {
+    const before = fc.log.scripts.length;
+    const got = await s.capture('gemini', r.conversation_id, IMG, 1024);
+    assert.deepEqual(got, { ok: true, mime: 'image/png', data: Buffer.from(png).toString('base64') });
+    const inj = fc.log.scripts.slice(before);
+    assert.equal(inj.length, 1);
+    assert.equal(inj[0].func, pageFetchImage);
+    assert.equal(inj[0].world, 'ISOLATED');
+    assert.equal(inj[0].target.tabId, 100);
+    assert.deepEqual(inj[0].args, [IMG, 1024]);
+    assert.deepEqual(fetched, [[IMG, 'include']]);
+    // The page's fetch failing, too large, another conversation, another
+    // host, or after the close: null, and never a throw.
+    assert.equal(await s.capture('gemini', r.conversation_id, 'https://lh3.googleusercontent.com/gg/missing', 1024), null);
+    assert.equal(await s.capture('gemini', r.conversation_id, IMG, 3), null);
+    assert.equal(await s.capture('gemini', '00000000000000ff', IMG), null);
+    const n = fc.log.scripts.length;
+    assert.equal(await s.capture('gemini', r.conversation_id, 'https://evil.example/x.png'), null);
+    assert.equal(fc.log.scripts.length, n, 'no injection for a URL off the image host');
+    await s.close('gemini', r.conversation_id);
+    assert.equal(await s.capture('gemini', r.conversation_id, IMG), null);
+    assert.equal(fc.log.scripts.length, n);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test('pageFetchImage stops reading once an image passes maxBytes, and refuses a declared size over it unread', async () => {
+  const saved = globalThis.fetch;
+  let pulled = 0;
+  let cancelled = false;
+  // An endless image body, 1 KiB a chunk.
+  const endless = () =>
+    new ReadableStream({
+      pull(c) {
+        pulled++;
+        c.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+  try {
+    globalThis.fetch = async () => new Response(endless(), { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/big', 4096), { ok: false, code: 'size' });
+    assert.ok(pulled <= 8, `read ${pulled} chunks for a 4 KiB cap`);
+    assert.ok(cancelled, 'the body is cancelled');
+    pulled = 0;
+    globalThis.fetch = async () => new Response(endless(), { status: 200, headers: { 'content-type': 'image/png', 'content-length': '999999' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/big', 4096), { ok: false, code: 'size' });
+    assert.ok(pulled <= 1, `read ${pulled} chunks of a body declared too large`);
+    // One that fits comes back whole, in chunks or not.
+    const png = new Uint8Array(3000).map((_, i) => i % 251);
+    globalThis.fetch = async () => new Response(png, { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/ok', 4096), { ok: true, mime: 'image/png', data: Buffer.from(png).toString('base64') });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/ok', 2999), { ok: false, code: 'size' });
+    globalThis.fetch = async () => new Response(new Uint8Array(0), { status: 200, headers: { 'content-type': 'image/png' } });
+    assert.deepEqual(await pageFetchImage('https://lh3.googleusercontent.com/gg/empty', 4096), { ok: false, code: 'size' });
+  } finally {
+    globalThis.fetch = saved;
+  }
 });
