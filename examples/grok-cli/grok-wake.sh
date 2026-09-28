@@ -47,8 +47,9 @@
 #                                bootstrap, that is the native binary the
 #                                owner's Grok home points at
 #                                ($GROK_HOME/bin/grok, ~/.grok/bin/grok).
-#                                A binary under the wake home, the workdir
-#                                or a write root is refused.
+#                                A binary under the wake home, the
+#                                workdir, a write root or a temp directory
+#                                is refused.
 #   TINCAN_WAKE_STATE_DIR        as in the library, but by default
 #                                <name>.wake-state beside TINCAN_CONFIG,
 #                                outside the temp directories the run can
@@ -237,8 +238,16 @@ fi
 if [ ! -x "$GROK_EXE" ]; then
   tincan_wake_refuse "the grok binary $GROK_EXE is not executable"
 fi
-if tincan_wake_under_root "$GROK_EXE" "$wake_home_c:$workdir_c:$(printf '%s' "$roots" | tr '\n' ':')"; then
-  tincan_wake_refuse "the grok binary $GROK_EXE is where the sandboxed run can write (the wake home, the workdir or a write root); install Grok Build elsewhere or set GROK_BIN to a binary outside them"
+# The run can also write the temp directories: TMPDIR, /tmp, /var/tmp and,
+# on macOS, the per-user temp root (DARWIN_USER_TEMP_DIR and the
+# /var/folders directory above it). Roots that do not exist are skipped.
+temp_roots=${TMPDIR:-}:/tmp:/private/tmp:/var/tmp:/private/var/tmp
+if darwin_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) && [ -n "$darwin_tmp" ]; then
+  darwin_tmp=${darwin_tmp%/}
+  temp_roots=$temp_roots:$darwin_tmp:$(dirname -- "$darwin_tmp")
+fi
+if tincan_wake_under_root "$GROK_EXE" "$wake_home_c:$workdir_c:$(printf '%s' "$roots" | tr '\n' ':'):$temp_roots"; then
+  tincan_wake_refuse "the grok binary $GROK_EXE is where the sandboxed run can write (the wake home, the workdir, a write root or a temp directory); install Grok Build elsewhere or set GROK_BIN to a binary outside them"
 fi
 # Nothing runs a grok from the wake home; one found there is removed.
 if [ -e "$GROK_HOME_DIR/bin" ] || [ -L "$GROK_HOME_DIR/bin" ]; then

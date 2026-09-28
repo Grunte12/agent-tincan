@@ -111,7 +111,7 @@ The npm package (`@xai-official/grok`) puts a node script on your PATH (for exam
 
 - resolves `grok` on PATH (or `GROK_BIN`) to one file, following symlinks;
 - when that file is the node bootstrap, uses the native binary your own Grok home points at instead: `$GROK_HOME/bin/grok` from the listener's environment, else `~/.grok/bin/grok`, resolved to its versioned file (for example `~/.grok/bin/grok-1.0.40`). With no native binary there, it refuses and asks for `GROK_BIN`;
-- refuses a binary under the wake home, the workdir or a write root, where the run could replace it;
+- refuses a binary under the wake home, the workdir, a write root or a temp directory the run can write (`$TMPDIR`, `/tmp`, `/var/tmp` and the macOS per-user temp root under `/var/folders`), where the run could replace it;
 - removes the wake home's `.grok/bin`, if a run left one there;
 - runs that one file for the version check, `grok inspect` and the run, all with the wake's `HOME` and `GROK_HOME`, so the file it vetted is the file that runs.
 
@@ -139,7 +139,7 @@ Your own Grok CLI sessions (in `~/.grok`, or `$GROK_HOME`) are a history source,
 ## Limits
 
 - Every wake is a fresh session: the whole exchange has to finish inside one run.
-- The run can write the temp directories, so a binary installed under `/tmp` could be replaced by a run; install Grok Build (or point `GROK_BIN`) elsewhere.
+- The run can write the temp directories, so the wake refuses a grok binary under `$TMPDIR`, `/tmp`, `/var/tmp` or the macOS per-user temp root, as it does one under the wake home, the workdir or a write root. Install Grok Build (or point `GROK_BIN`) outside them.
 - `grok inspect` does not show a server's env, so the `TINCAN_CONFIG` check reads the `config.toml` entry the listing points at, one-line values only; an entry it cannot read is refused rather than trusted.
 - Under the sandbox, `tincan mcp` runs inside it too. It reaches the relay over the network and saves attachments to the folder the wake opens for it, but cannot save a relay move to its config file outside the workdir; `tincan doctor` reports that case.
 - Not yet verified live: that `--always-approve` lets headless Grok call the tincan MCP tools without a prompt, that Grok accepts the `tincan-wake` profile as written, and a full wake answering a teammate's ask. The binary check and the identity check were run against Grok Build 1.0.40's real `--version` and `grok inspect --json` output. Record the first live wake before relying on it.

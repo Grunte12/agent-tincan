@@ -83,6 +83,26 @@ type grokHarness struct {
 	t                                      *testing.T
 	dir, home, config, state, argv, notice string
 	wakeHome, grokHome, workdir, sessions  string
+	// bin holds the fake grok. The wake refuses a binary in the temp
+	// directories a run can write, where t.TempDir is, so it is made in
+	// the package directory instead.
+	bin string
+}
+
+// outsideTemp makes a directory outside the temp directories, removed when
+// the test ends.
+func outsideTemp(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp(".", "grokbin-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }
 
 func newGrokHarness(t *testing.T) *grokHarness {
@@ -102,8 +122,9 @@ func newGrokHarness(t *testing.T) *grokHarness {
 	h.grokHome = filepath.Join(h.wakeHome, ".grok")
 	h.workdir = filepath.Join(h.wakeHome, "work")
 	h.sessions = filepath.Join(h.home, ".config", "tincan", "grok-cli.wake-sessions")
+	h.bin = outsideTemp(t)
 	mkdirs(t, h.argv, h.grokHome)
-	if err := os.WriteFile(filepath.Join(dir, "grok"), []byte(fakeGrok), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(h.bin, "grok"), []byte(fakeGrok), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "tincan"), []byte(fakeTincan), 0o755); err != nil {
@@ -151,7 +172,7 @@ func (h *grokHarness) run(env ...string) grokRun {
 	cmd.Env = append([]string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + h.home,
-		"GROK_BIN=" + filepath.Join(h.dir, "grok"),
+		"GROK_BIN=" + filepath.Join(h.bin, "grok"),
 		"TINCAN_BIN=" + filepath.Join(h.dir, "tincan"),
 		"TINCAN_WAKE_STATE_DIR=" + h.state,
 		"TINCAN_WAKE_OPERATOR=ops",
@@ -509,7 +530,9 @@ func TestGrokWakePinsTheNativeBinary(t *testing.T) {
 	if err := os.Chmod(filepath.Join(npm, "grok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ownerBin := filepath.Join(h.home, ".grok", "bin")
+	// The owner's Grok home is outside temp, where a real one would be.
+	ownerGrok := filepath.Join(h.bin, ".grok")
+	ownerBin := filepath.Join(ownerGrok, "bin")
 	h.write(filepath.Join(ownerBin, "grok-1.0.40"), fakeGrok)
 	if err := os.Chmod(filepath.Join(ownerBin, "grok-1.0.40"), 0o755); err != nil {
 		t.Fatal(err)
@@ -519,7 +542,7 @@ func TestGrokWakePinsTheNativeBinary(t *testing.T) {
 	}
 	planted := filepath.Join(h.grokHome, "bin", "grok")
 	h.write(planted, "#!/bin/sh\necho planted >> \"$ARGV_DIR/planted\"\n")
-	r := h.run("GROK_BIN=", "PATH="+npm+":"+os.Getenv("PATH"))
+	r := h.run("GROK_BIN=", "GROK_HOME="+ownerGrok, "PATH="+npm+":"+os.Getenv("PATH"))
 	if r.err != nil || len(h.runs()) != 1 {
 		t.Fatalf("wake: %v, runs %d\n%s", r.err, len(h.runs()), r.stderr)
 	}
@@ -572,5 +595,31 @@ func TestGrokWakeStateOutsideTemp(t *testing.T) {
 	st, err := os.Stat(filepath.Join(filepath.Dir(h.config), "grok-cli.wake-state"))
 	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
 		t.Fatalf("state dir beside the config: %v %v", st, err)
+	}
+}
+
+// The run can write the temp directories too, so a grok binary under
+// TMPDIR (or /tmp) is refused.
+func TestGrokWakeRefusesABinaryInTemp(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "grok")
+	if err := os.WriteFile(bin, []byte(fakeGrok), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := newGrokHarness(t)
+	h.refused(h.run("GROK_BIN="+bin, "TMPDIR="+tmp), "the sandboxed run can write")
+
+	if _, err := os.Stat("/tmp"); err == nil {
+		d, err := os.MkdirTemp("/tmp", "tincan-grok-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(d) })
+		bin := filepath.Join(d, "grok")
+		if err := os.WriteFile(bin, []byte(fakeGrok), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		h2 := newGrokHarness(t)
+		h2.refused(h2.run("GROK_BIN="+bin, "TMPDIR="), "the sandboxed run can write")
 	}
 }
