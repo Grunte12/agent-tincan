@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
@@ -68,7 +71,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -135,7 +138,7 @@ func inviteCmd() *cobra.Command {
 			}
 			code, err := r.InviteKind(cmd.Context(), args[0], kind)
 			if err != nil {
-				return err
+				return olderRelayKind(err, args[0], kind, true)
 			}
 			valid := "valid 10 minutes"
 			if kind != "" {
@@ -164,6 +167,26 @@ func inviteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&kind, "kind", "", "the agent's runtime (hermes, codex, ...), recorded on join so tincan onboard tailors its block")
 	return cmd
+}
+
+// olderRelayKind turns a relay's "unknown kind" rejection of a kind this
+// client knows into an upgrade hint. The relay checks kinds against its own
+// list, so a relay older than this client refuses kinds added since, while
+// onboarding (which runs here) already knows them. invite says whether the
+// rejected call was an invite; otherwise it was tincan kind on an existing
+// agent, which needs no new invite.
+func olderRelayKind(err error, name, kind string, invite bool) error {
+	apiErr, ok := errors.AsType[*client.APIError](err)
+	if !ok || apiErr.Code != http.StatusBadRequest || !strings.Contains(apiErr.Message, "unknown kind") ||
+		kind == "" || !onboard.KnownKind(kind) {
+		return err
+	}
+	if invite {
+		return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet: upgrade the relay to this release and restart it, "+
+			"or leave %s without a kind (tincan invite %s with no --kind) and tailor its block with tincan onboard --kind %s=%s", err, kind, name, name, name, kind)
+	}
+	return fmt.Errorf("%w. The relay is older than this tincan and does not know kind %s yet, so %s keeps its current kind: upgrade the relay to this release and restart it, "+
+		"or pass tincan onboard --kind %s=%s every time you generate its block (that override is not saved on the relay)", err, kind, name, name, kind)
 }
 
 // inviteRelayURL is the relay URL to print in an invite's join line: the
@@ -276,6 +299,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if a.Version != "" {
 			fmt.Fprintf(&b, " version=%s", a.Version)
 		}
+		if backlog := a.Backlog(now); backlog != "" {
+			fmt.Fprintf(&b, " %s", backlog)
+		}
 		b.WriteString("\n")
 	}
 	if b.Len() == 0 {
@@ -287,10 +313,10 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent string
-	var notify, asJSON bool
+	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
-		Use:   "ask <agent> <message...>",
+		Use:   "ask <agent[,agent...]> <message...>",
 		Short: "Ask another agent to do something and wait briefly for the reply",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -299,35 +325,67 @@ func askCmd() *cobra.Command {
 				return err
 			}
 			body := strings.Join(args[1:], " ")
+			targets, err := client.NormalizeTargets(strings.Split(args[0], ","), "")
+			if err != nil {
+				return err
+			}
+			if len(targets) > 1 {
+				kind := envelope.KindAsk
+				if notify {
+					kind = envelope.KindNotify
+				}
+				g, err := r.SendGroup(cmd.Context(), targets, body, kind, parent, attach, urgent)
+				if err != nil {
+					return err
+				}
+				if !notify {
+					g, err = r.WaitGroup(cmd.Context(), g, client.ClampWait(wait))
+					if err != nil {
+						return err
+					}
+				}
+				return printGroup(cmd, g, asJSON, notify)
+			}
+			args[0] = targets[0]
+
 			ups, err := r.UploadFiles(cmd.Context(), attach)
 			if err != nil {
 				return err
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids)
+				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
 				if asJSON {
 					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req})
 				}
-				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
+				if req.Status == envelope.StatusHeld {
+					cmd.Printf("Request %s: held, waiting for the owner's approval.\n", req.ID)
+				} else {
+					cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
+				}
 				return nil
 			}
-			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
+			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait), urgent)
 			if err != nil {
 				return err
 			}
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)
 			}
-			cmd.Print(client.FormatResult(res))
+			if res.Status == envelope.StatusHeld {
+				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+			} else {
+				cmd.Print(client.FormatResult(res))
+			}
 			return nil
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
+	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")
@@ -338,13 +396,21 @@ func getCmd() *cobra.Command {
 	var wait time.Duration
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "get <request-id>",
+		Use:   "get <request-or-group-id>",
 		Short: "Check on a request you sent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, _, err := connect()
 			if err != nil {
 				return err
+			}
+
+			if strings.HasPrefix(args[0], "group-") {
+				g, err := r.GetGroup(cmd.Context(), args[0], client.ClampWait(wait))
+				if err != nil {
+					return err
+				}
+				return printGroup(cmd, g, asJSON, false)
 			}
 			res, err := r.Get(cmd.Context(), args[0], client.ClampWait(wait))
 			if err != nil {
@@ -353,7 +419,11 @@ func getCmd() *cobra.Command {
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)
 			}
-			cmd.Print(client.FormatResult(res))
+			if res.Status == envelope.StatusHeld {
+				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+			} else {
+				cmd.Print(client.FormatResult(res))
+			}
 			return nil
 		},
 	}
@@ -450,6 +520,7 @@ type inboxRequestJSON struct {
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
+	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
 	Requests         []inboxRequestJSON `json:"requests"`
 	Replies          []client.Result    `json:"replies"`
 	RepliesRemaining int                `json:"replies_remaining,omitempty"`
@@ -461,6 +532,8 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 	if err != nil {
 		return err
 	}
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	return printInboxJSON(ctx, r, in, out, errOut)
 }
 
@@ -468,6 +541,7 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 // only then acknowledges the replies, as checkInbox does.
 func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
 	doc := inboxJSON{
+		UpgradeAvailable: in.UpgradeAvailable,
 		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
 		Replies:          in.Replies,
 		RepliesRemaining: in.RepliesRemaining,
@@ -485,7 +559,7 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 	if err := writeJSON(out, doc); err != nil {
 		return err
 	}
-	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+	if err := r.AckReplies(ctx, nil, in.ReplyAcks()...); err != nil {
 		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
 	}
 	return nil
@@ -500,10 +574,12 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	if err != nil {
 		return err
 	}
+	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
+	defer retry(ctx)
 	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
 		return err
 	}
-	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+	if err := r.AckReplies(ctx, nil, in.ReplyAcks()...); err != nil {
 		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
 	}
 	return nil
@@ -519,17 +595,44 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	if len(in.Replies) > 0 {
 		b.WriteString(wake.WaitingMessage(0, len(in.Replies)) + "\n")
 	}
+	b.WriteString(client.UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
+}
+
+func progressCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "progress <request-id> <note...>",
+		Short: "Post progress on a claimed request and renew its lease",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, _, err := connect()
+			if err != nil {
+				return err
+			}
+			if err := r.Progress(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
+				return err
+			}
+			cmd.Println("Progress recorded.")
+			return nil
+		},
+	}
 }
 
 func replyCmd() *cobra.Command {
 	var status string
+	var needsInput bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "reply <request-id> <message...>",
 		Short: "Answer a request from a teammate",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if needsInput {
+				status = string(envelope.StatusNeedsInput)
+			}
+			if status == string(envelope.StatusNeedsInput) && len(attach) > 0 {
+				return errors.New("clarifications do not accept attachments")
+			}
 			r, _, err := connect()
 			if err != nil {
 				return err
@@ -546,9 +649,30 @@ func replyCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "answered", "answered, failed, or declined")
+	cmd.Flags().StringVar(&status, "status", "answered", "answered, failed, declined, or needs_input")
+	cmd.Flags().BoolVar(&needsInput, "needs-input", false, "ask the sender a clarifying question (up to 16 KB)")
+	cmd.MarkFlagsMutuallyExclusive("status", "needs-input")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	return cmd
+}
+
+func answerCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "answer <request-id> <message...>",
+		Short: "Answer a teammate's clarification question on your request",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, _, err := connect()
+			if err != nil {
+				return err
+			}
+			if _, err := r.Answer(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
+				return err
+			}
+			cmd.Printf("Answered clarification; resumed %s.\n", args[0])
+			return nil
+		},
+	}
 }
 
 func cancelCmd() *cobra.Command {
@@ -577,7 +701,8 @@ func waitCmd() *cobra.Command {
 		Short: "Block until a teammate's request or a reply to your own request arrives, print it, and exit",
 		Long: `Block until a request arrives, claim and print it, then exit. A reply to
 one of your own requests also ends the wait: it prints a count and leaves the
-reply for check_inbox (or "tincan inbox") to show.
+reply for check_inbox (or "tincan inbox") to show. An available relay upgrade
+is printed with that output; an upgrade alone does not end the wait.
 
 For agents that get a new turn when a background command finishes (like
 Muse): run "tincan wait &" and the arriving request or reply wakes you. Start
@@ -594,7 +719,9 @@ flaky tailnet path does not end the wait.`,
 				ctx, cancel = context.WithTimeout(ctx, limit)
 				defer cancel()
 			}
-			in, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			in, finish, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesKeep)
+			// Print first; any pong still retrying finishes before exit.
+			defer finish(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -610,24 +737,35 @@ flaky tailnet path does not end the wait.`,
 // says what the poll does with replies), retrying transient errors with
 // jittered backoff. It gives up only on ctx or a hard refusal
 // (for example, this machine is not a joined agent).
-func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, error) {
+func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, func(context.Context), error) {
 	backoff := time.Second
+	// Failed pongs retry in the background, so they never hold up the next
+	// poll or the work it brings; the returned func waits for them.
+	var retries client.PongRetries
+	finish := func(context.Context) { retries.Wait() }
 	for {
 		in, err := r.PollReplies(ctx, hold, replies)
+		pingFailed := false
+		if err == nil {
+			var retry func(context.Context)
+			in, retry, err = client.AnswerPings(ctx, r, in, "wait")
+			pingFailed = err != nil
+			retries.Go(ctx, retry)
+		}
 		switch {
-		case err == nil && !in.Empty():
-			return in, nil
+		case (err == nil || pingFailed) && !in.Empty():
+			return in, finish, nil
 		case err == nil:
 			backoff = time.Second
 			continue
 		case ctx.Err() != nil:
-			return client.Inbox{}, ctx.Err()
-		case client.IsStatus(err, 403):
-			return client.Inbox{}, err
+			return client.Inbox{}, finish, ctx.Err()
+		case client.IsStatus(err, 403) && !pingFailed:
+			return client.Inbox{}, finish, err
 		}
 		select {
 		case <-ctx.Done():
-			return client.Inbox{}, ctx.Err()
+			return client.Inbox{}, finish, ctx.Err()
 		case <-time.After(jitter(backoff)):
 		}
 		backoff = min(backoff*2, 30*time.Second)
@@ -636,4 +774,75 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 
 func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(time.Now().UnixNano()%int64(d/2+1))
+}
+
+func heldCmd() *cobra.Command {
+	var socket, relayURL string
+	cmd := &cobra.Command{Use: "held", Short: "List requests waiting for owner approval (admin only)", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			var reqs []envelope.Request
+			if err := r.Raw(cmd.Context(), "GET", "/v1/admin/held", nil, &reqs); err != nil {
+				return err
+			}
+			for _, req := range reqs {
+				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, req.To, strings.Join(req.Chain, " -> "), req.Body)
+			}
+			return nil
+		}}
+	cmd.Flags().StringVar(&socket, "socket", "", "local admin socket")
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL")
+	return cmd
+}
+
+func approvalCmd(action string) *cobra.Command {
+	var socket, relayURL string
+	cmd := &cobra.Command{Use: action + " <id>", Short: action + " a held request (admin only)", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			in := map[string]string{"reason": strings.Join(args[1:], " ")}
+			if err := r.Raw(cmd.Context(), "POST", "/v1/admin/requests/"+url.PathEscape(args[0])+"/"+action, in, nil); err != nil {
+				return err
+			}
+			cmd.Printf("%s: %s\n", action, args[0])
+			return nil
+		}}
+	if action == "deny" {
+		cmd.Use = "deny <id> [reason...]"
+		cmd.Args = cobra.MinimumNArgs(1)
+	}
+	cmd.Flags().StringVar(&socket, "socket", "", "local admin socket")
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL")
+	return cmd
+}
+
+func printGroup(cmd *cobra.Command, g client.GroupResult, asJSON, notify bool) error {
+	code := g.ExitCode()
+	if notify {
+		code = 0
+		g.Outcome = "sent"
+		for _, r := range g.Results {
+			if r.Status == envelope.StatusFailed {
+				code = 1
+				g.Outcome = "failed"
+			}
+		}
+	}
+	if asJSON {
+		if err := writeJSON(cmd.OutOrStdout(), g); err != nil {
+			return err
+		}
+	} else {
+		cmd.Print(client.FormatGroup(g))
+	}
+	if code != 0 {
+		return &ExitError{Code: code, Silent: true}
+	}
+	return nil
 }

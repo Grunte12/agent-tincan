@@ -31,11 +31,17 @@ type mcpConfigEntry struct {
 func mcpConfigFiles(extra []string) []string {
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
+	// Grok Build reads $GROK_HOME/config.toml, ~/.grok by default.
+	grokHome := os.Getenv("GROK_HOME")
+	if grokHome == "" {
+		grokHome = filepath.Join(home, ".grok")
+	}
 	files := []string{
 		filepath.Join(home, ".claude.json"),
 		filepath.Join(home, ".claude", "settings.json"),
 		filepath.Join(home, ".cursor", "mcp.json"),
 		filepath.Join(home, ".codex", "config.toml"),
+		filepath.Join(grokHome, "config.toml"),
 		filepath.Join(home, ".gemini", "settings.json"),
 		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
 		filepath.Join(home, ".hermes", "config.yaml"),
@@ -205,8 +211,9 @@ var (
 	tomlItem    = regexp.MustCompile(`"([^"]*)"`)
 )
 
-// tomlServers reads [mcp_servers.<name>] tables from a Codex config.toml.
-// It understands only the flat command/args/enabled keys Codex uses.
+// tomlServers reads [mcp_servers.<name>] tables from a Codex or Grok Build
+// config.toml. It understands only the flat command/args/enabled keys they
+// use.
 func tomlServers(s string) []mcpConfigEntry {
 	var out []mcpConfigEntry
 	var cur *mcpConfigEntry

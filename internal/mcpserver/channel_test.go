@@ -3,6 +3,7 @@ package mcpserver_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,5 +100,13 @@ func TestChannelDeclaresCapabilityAndPushesEvents(t *testing.T) {
 	// Tools still work alongside the channel.
 	if _, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_agents"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChannelInstructionsExplainUpgradeEvents(t *testing.T) {
+	for _, want := range []string{`kind="upgrade"`, "tincan upgrade", "needs no check_inbox"} {
+		if !strings.Contains(mcpserver.ChannelInstructions, want) {
+			t.Errorf("channel instructions lack %q", want)
+		}
 	}
 }

@@ -33,6 +33,10 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // Capabilities is what a relay says it supports, from GET /v1/capabilities.
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
+	Groups             bool  `json:"groups,omitempty"`
+	Progress           bool  `json:"progress,omitempty"`
+	Search             bool  `json:"search,omitempty"`
+	NeedsInput         bool  `json:"needs_input,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
@@ -169,8 +173,8 @@ func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) 
 // relay supports attachments and returns ErrAttachmentsUnsupported without
 // sending if not, since an older relay would deliver the request without
 // them.
-func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string) (envelope.Request, error) {
-	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent}
+func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent bool) (envelope.Request, error) {
+	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
 		return envelope.Request{}, err
 	}
@@ -180,19 +184,30 @@ func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope
 }
 
 // AskAttached is Ask with attachments; see SendAttached.
-func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration) (Result, error) {
-	req, err := r.SendAttached(ctx, to, body, envelope.KindAsk, parent, attachments)
+func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent bool) (Result, error) {
+	req, err := r.SendAttached(ctx, to, body, envelope.KindAsk, parent, attachments, urgent)
 	if err != nil {
 		return Result{}, err
 	}
 	if wait <= 0 {
-		return Result{Request: req, Status: envelope.StatusQueued}, nil
+		return Result{Request: req, Status: sentStatus(req)}, nil
 	}
 	return r.Get(ctx, req.ID, wait)
 }
 
 // ReplyAttached is Reply with attachments; see SendAttached.
 func (r *Relay) ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error) {
+	if status == envelope.StatusNeedsInput {
+		if err := r.requireNeedsInput(ctx); err != nil {
+			return envelope.Reply{}, err
+		}
+		if err := envelope.ValidateInput(body); err != nil {
+			return envelope.Reply{}, err
+		}
+		if len(attachments) != 0 {
+			return envelope.Reply{}, errors.New("clarifications do not accept attachments")
+		}
+	}
 	in := map[string]any{"body": body, "status": status}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
 		return envelope.Reply{}, err
