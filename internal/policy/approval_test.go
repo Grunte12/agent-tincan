@@ -162,3 +162,50 @@ func TestApprovalSeesSameSizeSameMtimeEdit(t *testing.T) {
 		t.Fatalf("edit missed: held=%v err=%v", held, err)
 	}
 }
+
+// A ping carries no body and does no work, so the gate lets it through;
+// ordinary sends to the same target are still held.
+func TestApprovalLetsPingsThrough(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, Config{Approval: a})
+	ping := envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindPing}
+	if err := f.pol.Prepare(t.Context(), &ping); err != nil || ping.Status == envelope.StatusHeld {
+		t.Fatalf("ping = %+v, %v", ping, err)
+	}
+	ask := envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk, Body: "x"}
+	if err := f.pol.Prepare(t.Context(), &ask); err != nil || ask.Status != envelope.StatusHeld {
+		t.Fatalf("ask = %+v, %v", ask, err)
+	}
+}
+
+// A send the gate refuses (its policy file broke with no valid copy) gives
+// back the urgent slot it took.
+func TestApprovalFailureRefundsUrgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval.json")
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`broken`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, Config{Approval: a, UrgentPerHour: 1})
+	req := envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk, Body: "x", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &req); err == nil {
+		t.Fatal("broken gate accepted a send")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	req = envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk, Body: "x", Urgent: true}
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatalf("urgent slot not refunded: %v", err)
+	}
+}

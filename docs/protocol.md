@@ -127,6 +127,8 @@ receive 403:
 Approval and denial require an unexpired held request; other states return 409.
 The sweep expires overdue holds and logs `hold_expired`. Holds survive restarts
 with their original deadline. Policy changes apply only to future sends.
+A `ping` is never held: it has no body and runs no model work. Search results
+leave out a held, never-approved request for every caller but its sender and admins.
 The other transitions are audited as `held`, `approved`, and `denied`.
 An optional relay-authored operator `notify` bypasses the gate and is logged
 as `approval_notified`; it never grants the notified agent admin access.

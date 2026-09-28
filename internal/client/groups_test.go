@@ -416,3 +416,30 @@ func TestGroupForwardsUrgent(t *testing.T) {
 		}
 	}
 }
+
+// A member the relay holds for the owner's approval reports held, as a
+// single send does, not queued.
+func TestGroupReportsHeldMembers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in envelope.Request
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		out := envelope.Request{ID: "r-" + in.To, To: in.To, Group: in.Group}
+		if in.To == "muse" {
+			out.Status = envelope.StatusHeld
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+	c, err := client.NewRelay(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := c.SendGroup(t.Context(), []string{"instinct", "muse"}, "hello", envelope.KindAsk, "", nil, false)
+	if err != nil || len(g.Results) != 2 {
+		t.Fatalf("%+v %v", g, err)
+	}
+	if g.Results[0].Status != envelope.StatusQueued || g.Results[1].Status != envelope.StatusHeld {
+		t.Fatalf("statuses = %s, %s", g.Results[0].Status, g.Results[1].Status)
+	}
+}

@@ -719,7 +719,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req = sent
 			}
 		}
-		res := Result{Request: req, Status: envelope.StatusQueued}
+		res := Result{Request: req, Status: sentStatus(req)}
 		if err != nil {
 			res.Status = envelope.StatusFailed
 			res.Reply = &envelope.Reply{From: target, Status: envelope.StatusFailed, Body: err.Error()}

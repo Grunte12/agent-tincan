@@ -231,3 +231,28 @@ func TestSearchWalksOlderVisibleChunks(t *testing.T) {
 		}
 	}
 }
+
+// A request held for the owner and never approved is readable only by its
+// sender and admins, so search hides it from everyone else in the chain,
+// the target included, until the owner approves it.
+func TestSearchHidesHeldUntilApproved(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	req, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Body: "secret dinner plan", Status: envelope.StatusHeld, HoldTTL: time.Hour}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, who := range []string{"a", ""} {
+		if hits, err := s.Search(t.Context(), "secret", who, 20); err != nil || len(hits) != 1 || hits[0].RequestID != req.ID {
+			t.Fatalf("%q: hits = %+v, %v", who, hits, err)
+		}
+	}
+	if hits, err := s.Search(t.Context(), "secret", "b", 20); err != nil || len(hits) != 0 {
+		t.Fatalf("target sees held request: %+v, %v", hits, err)
+	}
+	if _, err := s.Release(t.Context(), req.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if hits, err := s.Search(t.Context(), "secret", "b", 20); err != nil || len(hits) != 1 {
+		t.Fatalf("approved request hidden: %+v, %v", hits, err)
+	}
+}
