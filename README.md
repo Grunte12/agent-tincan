@@ -12,6 +12,7 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [New in v0.7.0](#new-in-v070)
 - [New in v0.6.0](#new-in-v060)
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
@@ -24,9 +25,21 @@ Contents:
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
 
+## New in v0.7.0
+
+- Two new web teammates. [perplexity-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) asks Perplexity through your own signed-in account and returns the answer with its source links. [copilot-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) does the same for Microsoft Copilot on a personal Microsoft account.
+- The [history agent](#the-history-agent) now also reads Copilot chat history (`tincan history copilot`). Perplexity is not a history source.
+- Extension 0.5.0 adds Perplexity and Copilot as optional sites that you grant from its [options page](#the-tincan-chrome-extension).
+
+Before you upgrade:
+
+- Upgrade the relay to v0.7.0 before inviting `perplexity-web` or `copilot-web`. An older relay refuses the new kinds.
+- Update the extension to 0.5.0 and grant Perplexity or Copilot on its options page. Nothing already granted needs approving again. Until 0.5.0 is published on the Chrome Web Store, load it unpacked from the release zip.
+- Both teammates pass their tests, but live end-to-end runs through the extension are still pending. Copilot may show a "Verify you are human" check; the agent does not touch it and reports the request as `blocked`, so complete the check in Chrome and ask again.
+
 ## New in v0.6.0
 
-- Four new teammates. [grok-web and gemini-web](#the-chatgpt-claude-grok-and-gemini-web-agents-chatgpt-web-claude-web-grok-web-and-gemini-web) make your own Grok and Gemini accounts teammates. [grok-cli](#grok-cli-command-wake-wake-home-of-its-own) and [gemini-cli](#gemini-through-antigravity-cli-or-gemini-cli-tincan-listen-wake-script) wake xAI's Grok Build CLI and Gemini on your Mac, through a shared [wake library](examples/lib/tincan-wake-lib.sh) for command-woken CLI teammates. The [history agent](#the-history-agent) now also reads Grok, Gemini and Grok CLI history.
+- Four new teammates. [grok-web and gemini-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) make your own Grok and Gemini accounts teammates. [grok-cli](#grok-cli-command-wake-wake-home-of-its-own) and [gemini-cli](#gemini-through-antigravity-cli-or-gemini-cli-tincan-listen-wake-script) wake xAI's Grok Build CLI and Gemini on your Mac, through a shared [wake library](examples/lib/tincan-wake-lib.sh) for command-woken CLI teammates. The [history agent](#the-history-agent) now also reads Grok, Gemini and Grok CLI history.
 - [Clarifying questions](#requests-and-replies): a teammate can reply `needs_input`, and the asker answers with `tincan answer`.
 - [Progress notes](#requests-and-replies) on a claimed request with `tincan progress`.
 - [Urgent requests](#wake-methods) with `--urgent`: they wake at once and come first.
@@ -41,7 +54,7 @@ Contents:
 Before you upgrade:
 
 - Upgrade the relay to v0.6.0 before inviting the new kinds. An older relay refuses `grok-web`, `gemini-web`, `grok-cli` and `gemini-cli`, and clarifications, owner approval, ping and search need the new relay too.
-- The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. 0.4.0 is pending Chrome Web Store review; until it is published there, load it unpacked from the release zip.
+- The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. Extension 0.5.0 (v0.7.0) includes everything in 0.4.0; until it is published on the Chrome Web Store, load it unpacked from the release zip.
 - gemini-cli without an API key runs agy, which has no sandbox, so the wake runs it only when the listener has the `TINCAN_GEMINI_ALLOW_UNCONFINED=1` opt-in. See [Set up with a Google account](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key).
 - The four new teammates pass their tests, but live end-to-end checks against a relay are still pending.
 
@@ -144,7 +157,7 @@ OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP ser
 
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox only while you are chatting with it; nothing can wake it.
 
-History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
+History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
 ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first, and xAI's terms prohibit automated access, so turn it on only if you accept that risk to the account ([details](docs/adapters/web-agents.md#grok-grant-it-first)).
 
@@ -170,7 +183,7 @@ In one table:
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
-| history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
@@ -973,7 +986,7 @@ For each request it:
 3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|gemini|codex|claude-code|grok-cli>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|gemini|copilot|codex|claude-code|grok-cli>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -995,15 +1008,15 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 - It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex or grok-cli wake) can read local Codex, Claude Code and Grok CLI history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
-- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI".
+- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI".
 - "Grok" means grok.com and "Grok CLI" means Grok Build sessions on this machine (`~/.grok`); grok-cli wake runs are left out unless `--all`.
-- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai, Grok and Gemini read at most 100 conversations whatever the window says.
+- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai, Grok, Gemini and Copilot read at most 100 conversations whatever the window says.
 
 #### Adapter doc
 
 [docs/adapters/history.md](docs/adapters/history.md)
 
-### The ChatGPT, Claude, Grok and Gemini web agents (chatgpt-web, claude-web, grok-web and gemini-web)
+### The web agents (chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web and copilot-web)
 
 #### What it is
 
@@ -1054,7 +1067,7 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 - Perplexity: its terms do not allow automated use. Perplexity answers signed-out visitors, so the extension asks Perplexity's session endpoint for a signed-in user before it opens a tab, and checks the page again before typing. Perplexity is not a history source. See [web-agents.md](docs/adapters/web-agents.md#perplexity).
 - Copilot: the Microsoft Services Agreement does not allow automated access, and Microsoft's enforcement can reach the owner's whole Microsoft account. It needs a personal Microsoft account; a sign-in, terms or work-account page in its tab means nothing is sent and the reply says what to finish in Chrome. A "Verification required" human check is never touched: the reply says to complete it in Chrome, and Copilot is held back for 5 minutes. See [web-agents.md](docs/adapters/web-agents.md#copilot).
 - All six sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
-- The ChatGPT and Claude send operations need extension version 0.3.0 or later; Grok and Gemini need 0.4.0 and the site granted on its options page; Perplexity and Copilot need the extension from this release and their grant.
+- The ChatGPT and Claude send operations need extension version 0.3.0 or later; Grok and Gemini need 0.4.0 and the site granted on its options page; Perplexity and Copilot need 0.5.0 and their grant.
 - When the site is not granted, the reply names the options page (`permission_missing`). When the site shows an anti-bot check, the reply says to open the site in Chrome and complete it (`blocked`). A session that lands on a sign-in page is `not_logged_in`, and nothing is sent.
 
 #### Adapter doc
@@ -1077,7 +1090,7 @@ What it cannot do:
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
 - Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok, gemini.google.com and `lh3.googleusercontent.com` only after the owner grants Gemini, www.perplexity.ai only after the owner grants Perplexity, and copilot.com and copilot.microsoft.com only after the owner grants Copilot, on the extension's options page (optional host permissions, so installing or updating asks nothing for any of them).
 
-Options page: `chrome://extensions` > Agent Tincan History > Details > Extension options lists each site, shows whether Chrome has granted it, and grants it with one click (Chrome asks you to confirm). ChatGPT and claude.ai are granted at install; Grok, Gemini, Perplexity and Copilot stay off until you grant them here. Every operation except close checks its site's grant first and fails with `permission_missing` otherwise, and a site that shows an anti-bot check fails as `blocked` instead of looking like a changed API. Version 0.4.0, in the v0.6.0 release, adds the options page and the Grok and Gemini sites, and is pending Chrome Web Store review.
+Options page: `chrome://extensions` > Agent Tincan History > Details > Extension options lists each site, shows whether Chrome has granted it, and grants it with one click (Chrome asks you to confirm). ChatGPT and claude.ai are granted at install; Grok, Gemini, Perplexity and Copilot stay off until you grant them here. Every operation except close checks its site's grant first and fails with `permission_missing` otherwise, and a site that shows an anti-bot check fails as `blocked` instead of looking like a changed API. Version 0.4.0, in the v0.6.0 release, added the options page and the Grok and Gemini sites. Version 0.5.0, in the v0.7.0 release, adds the Perplexity and Copilot sites, and is pending Chrome Web Store review.
 
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
@@ -1089,7 +1102,7 @@ The manifest carries a public key, so an unpacked load always gets the id `ciejo
 
 Self-reload: after the first load, updates need no Reload click. When the extension connects, it sends the native host its version and the sha256 of each file (hashed when its worker started). If `tincan history install` was run with `--extension-dir` (or from a repo checkout) and the files on disk differ, the host sends `extension.reload` and the extension calls `chrome.runtime.reload()`. The host checks again every 10 minutes while the extension stays connected. It waits while a send has a tab open, checking every 5 seconds for up to 5 minutes. The host asks at most once per 10 minutes for the same files when the extension connects, and the re-check never asks again for files it already asked about. A store install is never reloaded this way.
 
-Why an extension is required: ChatGPT, claude.ai, grok.com and gemini.google.com offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
+Why an extension is required: ChatGPT, claude.ai, grok.com, gemini.google.com, www.perplexity.ai and copilot.com offer no official API for reading your own chat history or sending as you, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
 
 ## Onboarding
 
@@ -1137,9 +1150,9 @@ Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm6
 Releases are cut by hand; CI does not publish them. From a clean checkout of the commit to release:
 
 ```bash
-git tag v0.5.0 && git push origin v0.5.0
+git tag v0.7.0 && git push origin v0.7.0
 make release-mac # make dist (four static binaries, checksums.txt, extension zip in dist/), then sign and notarize the macOS binaries
-gh release create v0.5.0 --title v0.5.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
+gh release create v0.7.0 --title v0.7.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
 ```
 
 `make dist` stamps the version from `git describe`, so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:

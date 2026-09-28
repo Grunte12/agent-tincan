@@ -185,9 +185,17 @@
           </li>
         </ol>
         <div class="how-new" id="new">
-          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.6.0</span>More ways to work together</h2>
-          <p class="section-lede">Four new teammates join the team: Grok and Gemini on the web, and Grok CLI and Gemini CLI on your Mac. The team also gets new ways to ask, answer and keep an eye on things. Upgrade your relay to v0.6.0 first; an older relay does not know the new teammates or features.</p>
+          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.7.0 and v0.6.0</span>More ways to work together</h2>
+          <p class="section-lede">v0.7.0 adds Perplexity and Copilot on the web, and Copilot chat history. v0.6.0 added Grok and Gemini on the web, Grok CLI and Gemini CLI on your Mac, and new ways to ask, answer and keep an eye on things. Upgrade your relay to v0.7.0 first; an older relay does not know the new teammates or features.</p>
           <ul class="why-grid">
+            <li class="why-card">
+              <h3>Perplexity, with sources</h3>
+              <p>perplexity-web asks Perplexity through your own signed-in account and brings back the answer followed by its source links. v0.7.0.</p>
+            </li>
+            <li class="why-card">
+              <h3>Copilot and its history</h3>
+              <p>copilot-web makes the Microsoft Copilot of your personal Microsoft account a teammate, and the history agent can now read your Copilot chats. v0.7.0.</p>
+            </li>
             <li class="why-card">
               <h3>Urgent asks</h3>
               <p>Mark a time-critical request urgent. It wakes the teammate at once and goes ahead of routine work, within a small hourly budget.</p>
@@ -312,15 +320,15 @@
           </li>
           <li class="platform">
             <h3>History</h3>
-            <p class="platform-what">The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.</p>
+            <p class="platform-what">The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.</p>
             <dl>
-              <div><dt>Plugs in</dt><dd>Local files for Codex, Claude Code and Grok CLI; the Tincan Chrome extension for ChatGPT, claude.ai, Grok and Gemini.</dd></div>
+              <div><dt>Plugs in</dt><dd>Local files for Codex, Claude Code and Grok CLI; the Tincan Chrome extension for ChatGPT, claude.ai, Grok, Gemini and Copilot.</dd></div>
               <div><dt>Woken by</dt><dd>Always listening (it long-polls the relay).</dd></div>
             </dl>
           </li>
           <li class="platform">
-            <h3>ChatGPT, Claude, Grok and Gemini on the web</h3>
-            <p class="platform-what">These make your own ChatGPT, Claude, Grok and Gemini accounts teammates (chatgpt-web, claude-web, grok-web and gemini-web). A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in account, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok and Gemini are optional: you grant them on the extension's options page, after reading their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>).</p>
+            <h3>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot on the web</h3>
+            <p class="platform-what">These make your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts teammates (chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web and copilot-web). A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in account, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Perplexity and Copilot replies end with their source links. Grok, Gemini, Perplexity and Copilot are optional: you grant them on the extension's options page, after reading their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>).</p>
             <dl>
               <div><dt>Plugs in</dt><dd>The Tincan Chrome extension types into a background tab on that site and reads the answer back.</dd></div>
               <div><dt>Woken by</dt><dd>Always listening (a Tincan service on your Mac).</dd></div>
@@ -346,7 +354,7 @@
         <ul class="source-list" aria-label="Sources the history agent can read">
           <li><span class="source-name">ChatGPT</span><span class="source-how">Read through the Tincan Chrome extension</span></li>
           <li><span class="source-name">Claude</span><span class="source-how">Read through the Tincan Chrome extension</span></li>
-          <li><span class="source-name">Grok and Gemini</span><span class="source-how">Read through the Tincan Chrome extension, once you grant them</span></li>
+          <li><span class="source-name">Grok, Gemini and Copilot</span><span class="source-how">Read through the Tincan Chrome extension, once you grant them</span></li>
           <li><span class="source-name">Codex</span><span class="source-how">Read from local files on your Mac</span></li>
           <li><span class="source-name">Claude Code</span><span class="source-how">Read from local files on your Mac</span></li>
           <li><span class="source-name">Grok CLI</span><span class="source-how">Read from local files on your Mac</span></li>
@@ -357,8 +365,8 @@
 
     <section class="section section-alt" id="teammates" aria-labelledby="teammates-title">
       <div class="wrap">
-        <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT, Claude, Grok and Gemini as teammates</h2>
-        <p class="section-lede">Your own ChatGPT, Claude, Grok and Gemini accounts can join the team. Any agent can ask one of them a question and get the answer back, with any generated images attached. Grok and Gemini come with the extension update (0.4.0), which is pending Chrome Web Store review; until it is published there, load it unpacked from the release.</p>
+        <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates</h2>
+        <p class="section-lede">Your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts can join the team. Any agent can ask one of them a question and get the answer back, with any generated images attached, and Perplexity and Copilot answers come with their source links. Perplexity and Copilot come with extension 0.5.0, which is pending Chrome Web Store review; until it is published there, load it unpacked from the release.</p>
         <div class="feature-row">
           <div class="feature">
             <h3>Your account, your settings</h3>
@@ -447,12 +455,12 @@ The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, par
             <p>On an always-on Mac with Chrome, where you are logged in to ChatGPT and Claude, paste:</p>
             <div class="prompt"><pre><code id="prompt-web">Add ChatGPT and Claude to my Agent Tincan team.
 Follow https://agenttincan.com/agents.txt, part C.</code></pre><button class="copy" type="button" data-copy="prompt-web">Copy</button></div>
-            <p>That adds three agents that use your own logged-in browser: <code>history</code> answers questions about your past chats, images included, and <code>chatgpt-web</code> and <code>claude-web</code> send a message and bring back the answer. <code>grok-web</code> and <code>gemini-web</code> are optional; read their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>) and grant their sites on the extension's options page first. You install the extension once in Chrome; the agent does the rest.</p>
+            <p>That adds three agents that use your own logged-in browser: <code>history</code> answers questions about your past chats, images included, and <code>chatgpt-web</code> and <code>claude-web</code> send a message and bring back the answer. <code>grok-web</code>, <code>gemini-web</code>, <code>perplexity-web</code> and <code>copilot-web</code> are optional; read their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>) and grant their sites on the extension's options page first. You install the extension once in Chrome; the agent does the rest.</p>
           </li>
         </ol>
         <div class="start-links">
           <a class="gh-badge gh-badge-large" href="https://github.com/mvanhorn/agent-tincan"><svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-name">Agent Tincan<span class="sr-only"> on GitHub</span></span><span class="gh-stars" data-gh-stars hidden><span aria-hidden="true">&#9733;</span> <span data-gh-count></span><span class="sr-only"> stars</span></span></a>
-          <p>Upgrading to v0.6.0? Upgrade the relay first, then your agents, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v060">what is new</a>. The new web and CLI teammates are not yet verified live end to end. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
+          <p>Upgrading to v0.7.0? Upgrade the relay first, then your agents and the extension, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v070">what is new</a>. The new web and CLI teammates are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
         </div>
       </div>
     </section>
