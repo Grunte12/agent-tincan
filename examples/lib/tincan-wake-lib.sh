@@ -117,10 +117,14 @@ tincan_wake_begin() {
 }
 
 # tincan_wake_lock takes the lock directory (mkdir is atomic) and records
-# this script's pid in it. A lock whose pid is gone was left by a run that
-# was killed, and is broken. So is one older than a whole wake can take
-# (_tw_lock_max_minutes), whatever its pid says, since pids are reused. Returns 1 when a live run holds it,
-# 2 when the state directory cannot be made.
+# in it how long this run may hold it (max, in minutes) and this script's
+# pid. A lock whose pid is gone was left by a run that was killed, and is
+# broken. So is one older than its holder's recorded bound, whatever its pid
+# says, since pids are reused. The holder's bound is used rather than this
+# run's, so a wake configured with shorter timeouts does not break a longer
+# run's lock early; only a lock without one (left by an older library) falls
+# back to this run's own (_tw_lock_max_minutes). Returns 1 when a live run
+# holds it, 2 when the state directory cannot be made.
 tincan_wake_lock() {
   { mkdir -p "$_tw_state" && chmod 700 "$_tw_state"; } 2>/dev/null || return 2
   trap '_tw_cleanup' EXIT
@@ -129,7 +133,8 @@ tincan_wake_lock() {
   trap 'exit 143' TERM
   if ! mkdir "$_tw_lock" 2>/dev/null; then
     _tw_pid=$(cat "$_tw_lock/pid" 2>/dev/null) || _tw_pid=
-    _tw_max=$(_tw_lock_max_minutes)
+    _tw_max=$(cat "$_tw_lock/max" 2>/dev/null) || _tw_max=
+    case $_tw_max in '' | *[!0-9]*) _tw_max=$(_tw_lock_max_minutes) ;; esac
     if [ -n "$_tw_pid" ] && kill -0 "$_tw_pid" 2>/dev/null && ! _tw_older "$_tw_lock" "$_tw_max"; then
       return 1
     fi
@@ -149,6 +154,8 @@ tincan_wake_lock() {
     tincan_wake_log "broke a stale lock left by pid ${_tw_pid:-unknown}"
     mkdir "$_tw_lock" 2>/dev/null || return 1
   fi
+  # The bound goes in before the pid, so a lock with a pid has its bound.
+  _tw_lock_max_minutes >"$_tw_lock/max"
   echo $$ >"$_tw_lock/pid"
   _tw_locked=1
 }
