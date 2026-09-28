@@ -392,3 +392,27 @@ func TestStopDropsAndEndsNudges(t *testing.T) {
 		t.Fatalf("audit = %s, want the cut-short nudge recorded as failed", got)
 	}
 }
+
+// A restarted relay re-arms the request wakes the old process lost. The
+// nudge counts the queued requests when it fires, so one a poller took in
+// the meantime wakes nobody, and agents woken by their own side are skipped.
+func TestRequestsWaitingCountsAtFireTime(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var queuedN atomic.Int32
+	queuedN.Store(2)
+	cfg := Config{"grokbot": {Method: Webhook, URL: ts.URL}, "muse": {Method: Command}}
+	w := New(cfg, nil, Options{Debounce: time.Millisecond, Queued: func(string) int { return int(queuedN.Load()) }})
+	w.RequestsWaiting("grokbot")
+	w.RequestsWaiting("muse")
+	w.Flush()
+	if rc.count() != 1 || !strings.Contains(rc.bodies[0], "2 requests") {
+		t.Fatalf("wakes = %q, want one for grokbot's 2 requests", rc.bodies)
+	}
+	queuedN.Store(0) // a poller took them before the nudge fired
+	w.RequestsWaiting("grokbot")
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("woke %d times for requests already taken", rc.count())
+	}
+}

@@ -310,6 +310,21 @@ func (w *Waker) ReplyWaiting(agent string) {
 	w.arm(agent, w.opts.ReplyGrace)
 }
 
+// RequestsWaiting schedules a debounced nudge for agent's queued requests.
+// A restarted relay calls it for each agent that still has requests waiting,
+// since a nudge the old process had scheduled died with it. The waiting
+// requests are counted when the nudge fires, so one a poller took by then
+// wakes nobody.
+func (w *Waker) RequestsWaiting(agent string) {
+	if !w.relaySide(agent) || w.opts.Queued == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nudgeFor(agent).recheck = true
+	w.arm(agent, w.opts.Debounce)
+}
+
 // schedule debounces a relay-side nudge for agent. checkOnline skips agents
 // whose poller already has the request.
 func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
@@ -385,8 +400,8 @@ func (w *Waker) Flush() { w.wg.Wait() }
 
 // Stop drops the nudges still waiting for their timers, ends the ones being
 // sent, and waits for them to return. Nothing is scheduled afterwards. The
-// relay calls it on shutdown; a restarted relay schedules reply wakes again
-// for every reply still unseen.
+// relay calls it on shutdown; a restarted relay schedules wakes again for
+// every request still queued and every reply still unseen.
 func (w *Waker) Stop() {
 	w.mu.Lock()
 	w.stopped = true

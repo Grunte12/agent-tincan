@@ -7,9 +7,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -96,16 +98,29 @@ type relayProcess struct {
 	done chan error
 }
 
-func startRelayProcess(t *testing.T) *relayProcess {
+// relayStateDir makes a relay state dir. The admin socket lives in it, and
+// unix socket paths are length-limited, so it sits directly under /tmp.
+func relayStateDir(t *testing.T) string {
 	t.Helper()
-	// The admin socket lives in the state dir, and unix socket paths are
-	// length-limited, so the state dir sits directly under /tmp.
 	dir, err := os.MkdirTemp("/tmp", "tincan-relay-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func startRelayProcess(t *testing.T) *relayProcess {
+	t.Helper()
+	return startRelayProcessIn(t, relayStateDir(t))
+}
+
+// startRelayProcessIn starts a relay on the state dir dir, which may hold
+// the state of an earlier relay.
+func startRelayProcessIn(t *testing.T, dir string) *relayProcess {
+	t.Helper()
 	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	os.Remove(filepath.Join(dir, "url"))
 	p := &relayProcess{dir: dir, out: &lockedBuffer{}, done: make(chan error, 1)}
 	p.cmd = exec.Command(os.Args[0], "-test.run=^TestRelayProcessHelper$")
 	p.cmd.Env = append(os.Environ(), relayHelperEnv+"="+dir)
@@ -314,4 +329,62 @@ func waitOnline(t *testing.T, r *client.Relay, name string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("%s never showed as polling", name)
+}
+
+// A request sent to a webhook agent just before the relay stops still wakes
+// that agent: the restarted relay schedules the nudge the old process never
+// sent.
+func TestRelayProcessRestartWakesForQueuedRequests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a relay process")
+	}
+	var mu sync.Mutex
+	var bodies []string
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer hook.Close()
+	woken := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(bodies)
+	}
+
+	dir := relayStateDir(t)
+	cfg := `{"worker": {"method": "webhook", "url": "` + hook.URL + `"}}`
+	if err := os.WriteFile(filepath.Join(dir, "wake.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startRelayProcessIn(t, dir)
+	asker := p.agent(t, "asker")
+	p.agent(t, "worker")
+	if _, err := asker.Send(t.Context(), "worker", "are you there?", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	// Stop inside the wake debounce, before the nudge goes out.
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.waitExit(t, time.Now(), 10*time.Second); err != nil {
+		t.Fatalf("relay exit: %v\n%s", err, p.out)
+	}
+	if got := woken(); len(got) != 0 {
+		t.Fatalf("worker woken before the restart: %q", got)
+	}
+
+	p = startRelayProcessIn(t, dir)
+	deadline := time.Now().Add(15 * time.Second)
+	for len(woken()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the restarted relay never woke worker for its queued request:\n%s", p.out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := woken(); len(got) != 1 || !strings.Contains(got[0], "1 request") {
+		t.Fatalf("wakes after the restart: %q", got)
+	}
 }
