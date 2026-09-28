@@ -10,7 +10,7 @@ From a checkout of the release tag:
 make store
 ```
 
-This writes `dist/tincan-history-extension-store.zip` and prints its sha256. It holds exactly the files Chrome loads (`manifest.json`, `background.js`, `ops.js`, `send.js`), with the manifest's `key` field removed: the Web Store rejects a manifest with a `key` because it assigns the id itself. `extension/manifest.json` and the release zip (`make extension`) keep the key, so the unpacked install keeps its fixed id `ciejooalclcpgpapboofdbbddphldhnh`. `TestStoreZip` in `internal/history` checks the zip.
+This writes `dist/tincan-history-extension-store.zip` and prints its sha256. It holds exactly the files Chrome loads (`manifest.json`, `background.js`, `ops.js`, `send.js`, `options.html`, `options.js` and the icons), with the manifest's `key` field removed: the Web Store rejects a manifest with a `key` because it assigns the id itself. `extension/manifest.json` and the release zip (`make extension`) keep the key, so the unpacked install keeps its fixed id `ciejooalclcpgpapboofdbbddphldhnh`. `TestStoreZip` in `internal/history` checks the zip.
 
 The listing was submitted on September 24, 2026 as item `goldflchpojcjmifnljlfkgoahjgeajn` (publisher MVH). Each store upload needs a higher `version` in the manifest than the last one published.
 
@@ -63,6 +63,8 @@ Permission justifications (the dashboard asks for each one):
 | `https://chatgpt.com/*` | Lists and reads the user's ChatGPT conversations and their files through ChatGPT's own endpoints with the user's session, and opens the background tab used to send a message. |
 | `https://*.oaiusercontent.com/*` | ChatGPT stores generated and uploaded images behind signed download links on this domain. The extension downloads those images, without cookies or credentials, when the user's agent asks for a conversation's images. |
 | `https://claude.ai/*` | Lists and reads the user's claude.ai conversations and their files through claude.ai's own endpoints with the user's session, and opens the background tab used to send a message. |
+
+Site access is also checked at run time. Before any operation (other than closing its own tab) the extension asks Chrome whether it holds the site's own page origins (for ChatGPT, `chatgpt.com`; the `*.oaiusercontent.com` file host is needed only by the image downloads that reach it), and refuses with `permission_missing` when it does not (for example when the user withheld the site in Chrome's site access settings). The extension's options page (`options.html`, reached from `chrome://extensions` > Agent Tincan History > Details > Extension options) lists each site, shows whether it is granted, and has a Grant button that calls `chrome.permissions.request` from the click, so Chrome shows its own prompt. Sites added in later versions go under `optional_host_permissions` and are granted there, so an update that adds a site does not disable the extension or prompt users who do not use that site. The current version has no optional sites, so the manifest has no `optional_host_permissions` key yet. The options page is a packaged extension page with no inline script and no remote code.
 
 Remote code: No, I am not using remote code. (All code is in the package; messages are inserted as text, never executed.)
 

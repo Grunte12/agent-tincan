@@ -11,6 +11,11 @@
 // unpacked files after an update. Nothing in a message or a response is
 // ever executed; responses are returned as data.
 //
+// Every operation but close first checks that Chrome has granted the
+// extension its site's page origins (SITE_ACCESS) and fails permission_missing
+// without a tab or a fetch when it has not. The hello lists the granted
+// sites, and the worker says hello again whenever a grant changes.
+//
 // ChatGPT's access token is read from /api/auth/session inside this worker
 // and used only for the Authorization header of the next requests. It is
 // never returned, logged or stored.
@@ -25,7 +30,47 @@ export const CHUNK_BYTES = 384 * 1024;
 export const MAX_MESSAGE_BYTES = 32 * 1024;
 // EXTENSION_FILES are the files the hello message reports hashes of, so the
 // native host can tell when the unpacked files on disk have changed.
-export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js', 'icon16.png', 'icon48.png', 'icon128.png']);
+export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js', 'options.html', 'options.js', 'icon16.png', 'icon48.png', 'icon128.png']);
+
+// SITE_ACCESS is each site's host access, keyed by its op prefix: origins
+// are all the origins its operations fetch and open tabs on (what the
+// options page asks Chrome for), and pageOrigins the site's own pages,
+// which must be granted before any of its operations runs. An origin in
+// origins but not pageOrigins (ChatGPT's file host) is needed only by the
+// fetches that reach it, which fail without it as any fetch to an
+// ungranted host does, so withholding it leaves list and read working.
+// A required site's origins
+// are the manifest's host_permissions, granted at install (the owner can
+// still withhold them in Chrome's site access settings); any other site's
+// are optional_host_permissions, granted from the options page, so adding
+// a site never disables an existing install until the owner accepts it.
+export const SITE_ACCESS = Object.freeze({
+  chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), pageOrigins: Object.freeze(['https://chatgpt.com/*']), required: true }),
+  claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
+});
+
+// siteGranted reports whether permissions (chrome.permissions) holds
+// site's page origins, what its operations need, or with all set every
+// one of its origins (the options page's full grant); an API failure
+// counts as not granted.
+export async function siteGranted(permissions, site, { all = false } = {}) {
+  const s = SITE_ACCESS[site];
+  if (!s) return false;
+  try {
+    return (await permissions.contains({ origins: [...(all ? s.origins : s.pageOrigins)] })) === true;
+  } catch {
+    return false;
+  }
+}
+
+// grantedSites lists the SITE_ACCESS keys whose page origins are granted.
+export async function grantedSites(permissions) {
+  const out = [];
+  for (const site of Object.keys(SITE_ACCESS)) {
+    if (await siteGranted(permissions, site)) out.push(site);
+  }
+  return out;
+}
 
 // extension.reload waits while the sender has tabs (a reload would lose
 // track of them), checking every RELOAD_RETRY_MS for at most
@@ -169,15 +214,18 @@ export async function hashFiles({ getURL, fetch }) {
   return files;
 }
 
-// helloMessage is what the worker tells the native host when it connects:
-// its version, whether it is unpacked (only an unpacked extension picks up
-// new files on reload), and the sha256 of each of its files as Chrome
-// loaded them: files when given (hashFiles from worker start), else
-// hashed now.
-export async function helloMessage({ manifest, getURL, fetch, files }) {
+// helloMessage is what the worker tells the native host when it connects
+// and when a site grant changes: its version, whether it is unpacked (only
+// an unpacked extension picks up new files on reload), the sha256 of each
+// of its files as Chrome loaded them (files when given, hashFiles from
+// worker start, else hashed now), and, given permissions, the sites whose
+// access Chrome has granted.
+export async function helloMessage({ manifest, getURL, fetch, files, permissions }) {
   const hashes = files && typeof files === 'object' ? files : await hashFiles({ getURL, fetch });
   const m = manifest && typeof manifest === 'object' ? manifest : {};
-  return { id: 0, hello: { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files: hashes } };
+  const hello = { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files: hashes };
+  if (permissions) hello.granted = await grantedSites(permissions);
+  return { id: 0, hello };
 }
 
 function pathOf(url) {
@@ -192,14 +240,87 @@ function contentType(res) {
   return (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
 }
 
+// finalURL is where the response came from after redirects, url when
+// the response does not say.
+function finalURL(res, url) {
+  try {
+    return new URL(res.url || url);
+  } catch {
+    return null;
+  }
+}
+
+// ANTI_BOT_TEXT marks a challenge or anti-bot refusal in a body: a
+// Cloudflare interstitial ("Just a moment...") or a JSON refusal naming
+// anti-bot rules or a captcha.
+const ANTI_BOT_TEXT = /just a moment\.\.\.|cf-challenge|challenge-platform|anti-?bot|captcha/i;
+
+// BODY_TEXT_BYTES caps how much of a body bodyText reads, and
+// BODY_TEXT_MS how long it waits for it: a body that sends a little and
+// then stalls is judged on what arrived, so the error reply is not held
+// until the request times out.
+const BODY_TEXT_BYTES = 64 * 1024;
+export const BODY_TEXT_MS = 2000;
+
+// bodyText reads at most BODY_TEXT_BYTES of a copy of res's body, for at
+// most ms milliseconds, '' when it cannot. It streams the copy and stops
+// at either cap, so a large or stalled page is never waited on whole.
+async function bodyText(res, ms = BODY_TEXT_MS) {
+  let reader;
+  let timer;
+  try {
+    const body = res.clone().body;
+    if (!body) return '';
+    reader = body.getReader();
+    const expired = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ done: true, value: undefined }), ms);
+    });
+    const parts = [];
+    let total = 0;
+    while (total < BODY_TEXT_BYTES) {
+      const { done, value } = await Promise.race([reader.read(), expired]);
+      if (done) break;
+      const part = value.subarray(0, BODY_TEXT_BYTES - total);
+      parts.push(part);
+      total += part.length;
+    }
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const part of parts) {
+      bytes.set(part, off);
+      off += part.length;
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return '';
+  } finally {
+    clearTimeout(timer);
+    if (reader) reader.cancel().catch(() => {});
+  }
+}
+
+// antiBot reports whether res is an anti-bot page rather than the site's
+// answer: Cloudflare's cf-mitigated header, a redirect to Google's
+// /sorry/ interstitial, or (when body is read) a challenge marker.
+function antiBot(res, url, body) {
+  if ((res.headers.get('cf-mitigated') || '') !== '') return true;
+  const u = finalURL(res, url);
+  if (u && u.pathname.startsWith('/sorry/')) return true;
+  return body !== undefined && ANTI_BOT_TEXT.test(body);
+}
+
 // check maps an HTTP status to an error class. notFound marks endpoints
-// where 404 means the item is gone rather than the API moved.
-function check(res, url, notFound) {
-  if (res.ok) return;
+// where 404 means the item is gone rather than the API moved. Anti-bot
+// pages are blocked whatever their status, except that a 401 stays
+// not_logged_in.
+async function check(res, url, notFound, sniffMs = BODY_TEXT_MS) {
   const where = `HTTP ${res.status} from ${pathOf(url)}`;
+  if (res.status !== 401 && antiBot(res, url)) throw new OpError('blocked', `anti-bot check (${where})`);
+  if (res.ok) return;
   if (res.status === 401) throw new OpError('not_logged_in', where);
   if (res.status === 403) {
     if (contentType(res) === 'text/html') throw new OpError('blocked', where);
+    if (antiBot(res, url, await bodyText(res, sniffMs))) throw new OpError('blocked', `anti-bot check (${where})`);
     throw new OpError('not_logged_in', where);
   }
   if (res.status === 404 || res.status === 410) throw new OpError(notFound ? 'not_found' : 'endpoint_changed', where);
@@ -218,7 +339,12 @@ function b64(bytes) {
 // createRunner returns the operation runner. sender (send.js) carries out
 // the send operations; reload reloads the extension. Either may be absent,
 // and its operations then fail as unsupported.
-export function createRunner({ fetch, sender = null, reload = null }) {
+//
+// permissions (chrome.permissions) is asked before each operation whether
+// its site is granted; without it every site counts as granted. sniffMs
+// bounds how long an error or non-JSON body is read for anti-bot markers
+// (BODY_TEXT_MS unless a test shortens it).
+export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS }) {
   let claudeOrg = null;
   let reloadPending = false;
 
@@ -255,10 +381,18 @@ export function createRunner({ fetch, sender = null, reload = null }) {
     }
   }
 
+  // getJSON fetches one of a site's JSON endpoints. An answer that came
+  // from another host means the site sent the browser to a sign-in page
+  // (the session probes run first, so a logged-out browser never sends).
   async function getJSON(url, init, notFound = false) {
     const res = await send(url, { credentials: 'include', ...init });
-    check(res, url, notFound);
-    if (!contentType(res).includes('json')) throw new OpError('endpoint_changed', `non-JSON answer from ${pathOf(url)}`);
+    await check(res, url, notFound, sniffMs);
+    const at = finalURL(res, url);
+    if (at && at.host !== new URL(url).host) throw new OpError('not_logged_in', `redirected to ${at.host}`);
+    if (!contentType(res).includes('json')) {
+      if (antiBot(res, url, await bodyText(res, sniffMs))) throw new OpError('blocked', `anti-bot check from ${pathOf(url)}`);
+      throw new OpError('endpoint_changed', `non-JSON answer from ${pathOf(url)}`);
+    }
     try {
       return await res.json();
     } catch {
@@ -294,7 +428,7 @@ export function createRunner({ fetch, sender = null, reload = null }) {
 
   async function emitFile(url, init, emit) {
     const res = await send(url, init);
-    check(res, url, true);
+    await check(res, url, true, sniffMs);
     const declared = Number(res.headers.get('content-length') || 0);
     if (declared > MAX_FILE_BYTES) throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
     const mime = contentType(res);
@@ -427,11 +561,25 @@ export function createRunner({ fetch, sender = null, reload = null }) {
     },
   };
 
+  // requireGrant fails permission_missing when op's site's page origins
+  // are not granted.
+  // Closing a tab the extension opened reaches no site, so it runs
+  // regardless: a grant revoked while a reply is read still lets the tab
+  // close.
+  async function requireGrant(op) {
+    const [site, verb] = op.split('.');
+    if (!permissions || !Object.hasOwn(SITE_ACCESS, site) || verb === 'close') return;
+    if (!(await siteGranted(permissions, site))) {
+      throw new OpError('permission_missing', `the extension has no access to ${SITE_ACCESS[site].label}; grant it on the extension's options page`);
+    }
+  }
+
   return {
     // run executes one validated operation, calling emit with each
     // response frame (without the request id). It throws OpError.
     async run(op, args, emit) {
       if (!Object.hasOwn(handlers, op)) throw bad('unknown operation');
+      await requireGrant(op);
       try {
         const result = await handlers[op](args, emit);
         if (result !== undefined) emit({ ok: true, result });

@@ -1,11 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
@@ -99,5 +106,170 @@ func TestHistoryInstallExtensionDir(t *testing.T) {
 	}
 	if _, err := run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan", "--no-service", "--extension-dir", t.TempDir()); err == nil {
 		t.Fatal("dir without a manifest accepted")
+	}
+}
+
+// shortNativeDir is a native host directory short enough for a unix
+// socket path, with HOME moved so nothing touches the real config.
+func shortNativeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "tcw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", dir)
+	t.Setenv("HOME", t.TempDir())
+	return dir
+}
+
+// fakeHostStatus serves the native host socket in dir and answers
+// host.status with status(), as a native host would.
+func fakeHostStatus(t *testing.T, dir string, status func() history.ExtensionStatus) {
+	t.Helper()
+	ln, err := history.ListenSocket(filepath.Join(dir, "host.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			b, err := history.ReadMessage(conn, 1<<20)
+			var req history.NativeRequest
+			if err == nil && json.Unmarshal(b, &req) == nil {
+				resp := history.NativeResponse{ID: req.ID, Error: &history.NativeError{Code: "bad_request", Message: "unexpected op"}}
+				if req.Op == history.OpHostStatus {
+					res, _ := json.Marshal(status())
+					resp = history.NativeResponse{ID: req.ID, OK: true, Result: res}
+				}
+				_ = history.WriteMessage(conn, resp, 1<<20)
+			}
+			conn.Close()
+		}
+	}()
+}
+
+// The extension is connected and says chatgpt.com is not granted: web
+// serve does not exit (the service manager would restart it every few
+// seconds, forever). It logs the missing grant once, naming the options
+// page, makes no poll while it waits, and starts serving once the grant
+// appears.
+func TestWebServeWaitsForAMissingGrant(t *testing.T) {
+	dir := shortNativeDir(t)
+	old := webGrantRecheck
+	webGrantRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { webGrantRecheck = old })
+	var granted atomic.Bool
+	fakeHostStatus(t, dir, func() history.ExtensionStatus {
+		if granted.Load() {
+			return history.ExtensionStatus{Hello: true, Granted: []string{"claudeai", "chatgpt"}}
+		}
+		return history.ExtensionStatus{Hello: true, Granted: []string{"claudeai"}}
+	})
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": "chatgpt-web"})
+		case "/v1/poll":
+			polls.Add(1)
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := Root()
+	var out syncBuffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"web", "serve", "--site", "chatgpt", "--config", serveConfig(t, srv.URL, "chatgpt-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+	time.Sleep(400 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("web serve exited on a missing grant: %v\n%s", err, out.String())
+	default:
+	}
+	log := out.String()
+	if n := strings.Count(log, "no access to chatgpt.com"); n != 1 || !strings.Contains(log, "Extension options") {
+		t.Fatalf("want the missing grant logged once, naming the options page:\n%s", log)
+	}
+	if n := polls.Load(); n != 0 {
+		t.Fatalf("%d polls while the grant is missing", n)
+	}
+	granted.Store(true)
+	deadline := time.Now().Add(5 * time.Second)
+	for polls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if polls.Load() == 0 {
+		t.Fatalf("web serve did not start serving after the grant:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "serving chatgpt") {
+		t.Fatalf("no serving line:\n%s", out.String())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("web serve did not stop")
+	}
+}
+
+// launchd starts web serve at login, often before Chrome: with no
+// extension connected it starts, holds one long poll (no tight loop), and
+// stops cleanly.
+func TestWebServeWithoutExtensionStartsAndDoesNotLoop(t *testing.T) {
+	shortNativeDir(t)
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": "chatgpt-web"})
+		case "/v1/poll":
+			polls.Add(1)
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := Root()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"web", "serve", "--site", "chatgpt", "--config", serveConfig(t, srv.URL, "chatgpt-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+	time.Sleep(700 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("web serve exited without an extension: %v\n%s", err, out.String())
+	default:
+	}
+	if n := polls.Load(); n != 1 {
+		t.Fatalf("%d polls in 700ms; want one held long poll", n)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("web serve did not stop")
 	}
 }

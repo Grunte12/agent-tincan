@@ -55,7 +55,7 @@
     <article class="section prose">
       <div class="wrap narrow">
         <h1>Privacy policy</h1>
-        <p class="updated">Last updated September 24, 2026</p>
+        <p class="updated">Last updated September 27, 2026</p>
 
         <p>This policy covers Agent Tincan and its Chrome extension, Agent Tincan History (the "extension"). Agent Tincan is software you run yourself: a small relay on your own private Tailscale network, a local helper on your own computer, and the agents you choose to connect. Agent Tincan does not operate any server that receives your data.</p>
         <p>In short: the extension reads and sends ChatGPT and Claude conversations only when your own agents ask for it, and hands the results only to the Agent Tincan helper on your computer. Nothing goes to us. There is no analytics, no advertising, and no sale of data.</p>
@@ -100,12 +100,13 @@
           <li><code>https://*.oaiusercontent.com/*</code>: to download images that ChatGPT stores behind signed links on this domain. These downloads carry no cookies or credentials.</li>
           <li><code>https://claude.ai/*</code>: to list and read your claude.ai conversations and their files, and to send messages to Claude, with your existing session.</li>
         </ul>
+        <p>The extension checks that Chrome has granted it a site before it reads from or opens a tab on that site, and refuses otherwise. Its options page (in <code>chrome://extensions</code>, Agent Tincan History, Details, Extension options) shows which sites are granted and lets you grant one; Chrome asks you to confirm. Sites added in later versions are optional: the extension has no access to them until you grant them there.</p>
 
         <h2>Your control</h2>
         <ul>
           <li>By default, every agent you have joined to your relay may use the history agent and the ChatGPT and Claude web agents. Allowlists narrow that to the agents you list. They are plain text files on your computer (<code>~/.config/tincan/history-allow.txt</code>, <code>chatgpt-web-allow.txt</code>, <code>claude-web-allow.txt</code>). Each file is reread for every request, the check covers the whole chain of agents that led to a request, and a file that cannot be read declines everyone.</li>
           <li>You can remove an agent from your relay at any time with <code>tincan remove &lt;agent&gt;</code>.</li>
-          <li>To stop the extension, disable or remove it in <code>chrome://extensions</code>.</li>
+          <li>To stop the extension, disable or remove it in <code>chrome://extensions</code>. To take away its access to one site, change that site's access in the extension's details page; the extension then refuses every request for that site.</li>
           <li>To remove the helper's connection to Chrome, delete its native messaging manifest. On macOS: <code>rm ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On Linux: <code>rm ~/.config/google-chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On macOS, also stop the helper services with <code>launchctl bootout gui/$(id -u)/com.agenttincan.history</code> (and the same for <code>com.agenttincan.web.chatgpt</code> and <code>com.agenttincan.web.claude-ai</code> if you installed the web agents) and delete their <code>.plist</code> files in <code>~/Library/LaunchAgents</code>. On Linux, stop them with <code>systemctl --user disable --now tincan-history.service</code> (and the web agent units).</li>
           <li>To remove the helper's state files, delete <code>~/.config/tincan</code>.</li>
         </ul>

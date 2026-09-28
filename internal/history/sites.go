@@ -27,6 +27,9 @@ type webSite struct {
 	// fileTakesConversation: the file operation may carry the
 	// conversation id.
 	fileTakesConversation bool
+	// alwaysGranted: the extension had this site's host access before it
+	// reported grants, so an extension whose hello lists none has it.
+	alwaysGranted bool
 	// reader returns the site's history reader over c.
 	reader func(c *Client, now func() time.Time) liveReader
 	// nodes reads a detail result into the web agent's view of the
@@ -64,6 +67,7 @@ var webSites = []*webSite{
 		agent:                 "chatgpt-web",
 		opPrefix:              "chatgpt",
 		fileTakesConversation: true,
+		alwaysGranted:         true,
 		reader: func(c *Client, now func() time.Time) liveReader {
 			r := NewChatGPT(c)
 			r.Now = now
@@ -73,11 +77,12 @@ var webSites = []*webSite{
 		convPath: convURLPattern,
 	},
 	{
-		source:   SourceClaudeAI,
-		label:    "claude.ai",
-		host:     "claude.ai",
-		agent:    "claude-web",
-		opPrefix: "claudeai",
+		source:        SourceClaudeAI,
+		label:         "claude.ai",
+		host:          "claude.ai",
+		agent:         "claude-web",
+		opPrefix:      "claudeai",
+		alwaysGranted: true,
 		reader: func(c *Client, now func() time.Time) liveReader {
 			r := NewClaudeAI(c)
 			r.Now = now
