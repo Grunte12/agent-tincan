@@ -511,6 +511,7 @@ func TestRedeliveredAddOfTrashedNoteRepliesWithIt(t *testing.T) {
 		t.Fatalf("notes = %d", len(notes))
 	}
 	r.helper.setState(t, notes[0].ID, "trashed")
+	r.helper.setTitle(t, notes[0].ID, "Renamed by the owner")
 	r.replyFail.Store(false)
 	time.Sleep(200 * time.Millisecond)
 	r.mesh.Server.Sweep(t.Context())
@@ -518,6 +519,9 @@ func TestRedeliveredAddOfTrashedNoteRepliesWithIt(t *testing.T) {
 	res := r.get(t, "grokbot", req.ID)
 	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, notes[0].ID) || !strings.Contains(res.Reply.Body, "trash") {
 		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	if strings.Contains(res.Reply.Body, "Renamed by the owner") {
+		t.Fatalf("resent reply exposed the note's current title: %q", res.Reply.Body)
 	}
 	if len(r.helper.notes()) != 1 {
 		t.Fatalf("a new note was created: %+v", r.helper.notes())

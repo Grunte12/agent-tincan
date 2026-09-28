@@ -347,6 +347,19 @@ func (h *fakeHelper) setState(t *testing.T, id, state string) {
 	t.Fatalf("no note %s", id)
 }
 
+// setTitle renames note id in the fake library, as the owner would.
+func (h *fakeHelper) setTitle(t *testing.T, id, title string) {
+	t.Helper()
+	for _, n := range h.notes() {
+		if n.ID == id {
+			n.Title = title
+			saveFakeNote(h.lib, n)
+			return
+		}
+	}
+	t.Fatalf("no note %s", id)
+}
+
 // argValue returns the value after --name in args.
 func argValue(args []string, name string) (string, bool) {
 	for i := 1; i+1 < len(args); i++ {

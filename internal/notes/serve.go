@@ -472,14 +472,16 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 // was just claimed from the poll loop, which is when a progress note can
 // reach the asker. An entry already decided only resends its recorded
 // reply: the relay and the allowlist are not asked again and nothing is
-// created. A saved note the owner has since trashed or archived is named
-// as such (AE3), from a read of the note.
+// created. When the owner has since trashed or archived a saved note, the
+// recorded reply gains only that state (AE3); nothing else is read from the
+// note, so a later rename is never sent to an asker who may have lost read
+// access.
 func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
 	if _, decided := e.Outcome.status(); decided {
 		if e.Outcome == OutcomeSaved && e.NoteID != "" {
 			if n, err := s.helper.Read(ctx, e.NoteID); err == nil && n.Summary.State != StateActive {
-				e.Reply = addedReply(CreateResult{Note: n, Existed: true})
+				e.Reply += " " + laterStateNote(n.Summary.State)
 			}
 		}
 		s.logf("request %s from %s: resending the recorded %s reply", req.ID, req.From, e.Outcome)
@@ -795,6 +797,18 @@ func addedReply(res CreateResult) string {
 		where = fmt.Sprintf(", which is now %s", n.State)
 	}
 	return fmt.Sprintf("This request was already saved as note %q (id %s)%s. No new note was created.", oneLine(n.Title), n.ID, where)
+}
+
+// laterStateNote says what the owner has since done with a saved note,
+// without naming anything else about it.
+func laterStateNote(state string) string {
+	switch state {
+	case "trashed":
+		return "The note has since been moved to the trash."
+	case "archived":
+		return "The note has since been archived."
+	}
+	return fmt.Sprintf("The note is now %s.", oneLine(state))
 }
 
 func notFoundReply(id string) string { return fmt.Sprintf("No note with id %s was found.", id) }
