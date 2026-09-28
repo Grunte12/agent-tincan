@@ -1,0 +1,17 @@
+{
+  "slug": "0e1d0000-0000-4000-8000-0000000000a2",
+  "entries": [
+    {
+      "backend_uuid": "0e1d0000-0000-4000-8000-0000000000b3",
+      "uuid": "0e1d0000-0000-4000-8000-0000000000d3",
+      "status": "PENDING",
+      "query_str": "Still thinking about this one",
+      "thread_url_slug": "0e1d0000-0000-4000-8000-0000000000a2",
+      "entry_created_datetime": "2026-09-20T11:00:00.000000",
+      "blocks": [
+        {"intended_usage": "ask_text", "markdown_block": {"progress": "IN_PROGRESS", "chunks": ["Half an ans"], "answer": ""}}
+      ]
+    }
+  ],
+  "status": "success"
+}

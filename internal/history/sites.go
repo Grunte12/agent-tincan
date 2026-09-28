@@ -1,8 +1,9 @@
 package history
 
 // The live sites: everything that differs between chatgpt.com, claude.ai,
-// grok.com and gemini.google.com, in one table. Adding a site is one entry here plus its
-// reader file; nothing else branches on which site it is.
+// grok.com, gemini.google.com and www.perplexity.ai, in one table. Adding a
+// site is one entry here plus its reader file; nothing else branches on
+// which site it is.
 
 import (
 	"encoding/json"
@@ -62,6 +63,13 @@ type webSite struct {
 	// this long after it showed an anti-bot check, so the agent does not
 	// keep tripping it on the owner's account.
 	blockedCooldown time.Duration
+	// webOnly: the site fronts a web agent only and is not a history
+	// source. It has no list or file operation, is not in Sources, and the
+	// history readers and prose lists leave it out.
+	webOnly bool
+	// sources: the site's answers carry web source links, which the web
+	// agent's reply lists after the answer text (see sourcesFooter).
+	sources bool
 }
 
 // canonical returns id in the site's canonical form.
@@ -156,6 +164,23 @@ var webSites = []*webSite{
 		noteLostImages:  true,
 		blockedCooldown: DefaultBlockedCooldown,
 	},
+	{
+		source:   SourcePerplexity,
+		label:    "Perplexity",
+		host:     "www.perplexity.ai",
+		agent:    "perplexity-web",
+		opPrefix: "perplexity",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewPerplexity(c)
+			r.Now = now
+			return r
+		},
+		nodes:           perplexityNodes,
+		convPath:        perplexityConvPath,
+		blockedCooldown: DefaultBlockedCooldown,
+		webOnly:         true,
+		sources:         true,
+	},
 }
 
 // grokConvPath is grok.com's conversation path, /c/<id>.
@@ -205,6 +230,12 @@ func (k opKind) valid() bool {
 // op is the site's operation of kind k.
 func (s *webSite) op(k opKind) Op { return Op(s.opPrefix + "." + string(k)) }
 
+// hasOp reports whether the site has operations of kind k: a web-only
+// site has no list or file operation.
+func (s *webSite) hasOp(k opKind) bool {
+	return !s.webOnly || (k != opList && k != opFile)
+}
+
 // resolve returns op's site and kind; ok is false for an operation no
 // site has (extension.reload included).
 func (op Op) resolve() (*webSite, opKind, bool) {
@@ -213,7 +244,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 		return nil, "", false
 	}
 	for _, s := range webSites {
-		if s.opPrefix == prefix {
+		if s.opPrefix == prefix && s.hasOp(opKind(verb)) {
 			return s, opKind(verb), true
 		}
 	}
@@ -221,7 +252,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 }
 
 // WebSiteNames lists the --site values, for help and errors
-// ("chatgpt, claude-ai, grok or gemini").
+// ("chatgpt, claude-ai, grok, gemini or perplexity").
 func WebSiteNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -231,7 +262,7 @@ func WebSiteNames() string {
 }
 
 // SourceNames lists every history source, for errors ("chatgpt,
-// claude-ai, grok, gemini, codex or claude-code").
+// claude-ai, grok, gemini, codex, claude-code or grok-cli").
 func SourceNames() string {
 	names := make([]string, len(Sources))
 	for i, s := range Sources {
@@ -241,7 +272,7 @@ func SourceNames() string {
 }
 
 // WebAgentNames lists the sites' default web agent names ("chatgpt-web,
-// claude-web, grok-web or gemini-web").
+// claude-web, grok-web, gemini-web or perplexity-web").
 func WebAgentNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -250,24 +281,36 @@ func WebAgentNames() string {
 	return joinList(names, "or")
 }
 
-// LiveSourcesLabel names the live sources in prose ("ChatGPT, claude.ai,
-// Grok and Gemini").
+// LiveSourcesLabel names the live history sources in prose ("ChatGPT,
+// claude.ai, Grok and Gemini"); web-only sites are not among them.
 func LiveSourcesLabel() string {
-	labels := make([]string, len(webSites))
-	for i, s := range webSites {
-		labels[i] = s.label
+	var labels []string
+	for _, s := range webSites {
+		if !s.webOnly {
+			labels = append(labels, s.label)
+		}
 	}
 	return joinList(labels, "and")
 }
 
-// IsLiveSource reports whether src is read live through the extension.
-func IsLiveSource(src Source) bool { return siteFor(src) != nil }
+// historySite returns src's table entry when it is a live history source,
+// nil for a local source or a web-only site.
+func historySite(src Source) *webSite {
+	if s := siteFor(src); s != nil && !s.webOnly {
+		return s
+	}
+	return nil
+}
+
+// IsLiveSource reports whether src is a history source read live through
+// the extension.
+func IsLiveSource(src Source) bool { return historySite(src) != nil }
 
 // NewLiveReader returns the history reader for live source src over c,
 // with now as its clock (the real clock when nil); ok is false when src is
-// not a live source.
+// not a live history source.
 func NewLiveReader(src Source, c *Client, now func() time.Time) (Reader, bool) {
-	s := siteFor(src)
+	s := historySite(src)
 	if s == nil {
 		return nil, false
 	}
@@ -289,3 +332,18 @@ func siteSources() []Source {
 	}
 	return out
 }
+
+// historySiteSources lists the live sites that are history sources, in the
+// table's order.
+func historySiteSources() []Source {
+	var out []Source
+	for _, s := range webSites {
+		if !s.webOnly {
+			out = append(out, s.source)
+		}
+	}
+	return out
+}
+
+// perplexityConvPath is www.perplexity.ai's thread path, /search/<slug>.
+var perplexityConvPath = regexp.MustCompile(`^/search/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/?$`)

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES } from '../ops.js';
+import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES, PERPLEXITY_MAX_PAGES, PERPLEXITY_ENTRY_FIELDS } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -379,7 +379,7 @@ test('worker code has no dynamic code execution', () => {
   const injected = [...send.matchAll(/inject\((?:tab\.id|entry\[0\]), (\w+),/g)].map((m) => m[1]);
   assert.equal(injected.length, [...send.matchAll(/await inject\(/g)].length, 'every injection is listed');
   for (const f of injected) {
-    assert.ok(['pageProbe', 'pageFill', 'pageSubmit', 'pageFetchImage'].includes(f), f);
+    assert.ok(['pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage'].includes(f), f);
   }
 });
 
@@ -406,11 +406,12 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   const required = Object.values(SITE_ACCESS).filter((s) => s.required).flatMap((s) => s.origins);
   const optional = Object.values(SITE_ACCESS).filter((s) => !s.required).flatMap((s) => s.origins);
   // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new;
-  // Grok and Gemini are optional, granted from the options page.
+  // Grok, Gemini and Perplexity are optional, granted from the options page.
   assert.deepEqual(m.host_permissions, ['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
-  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']);
+  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://www.perplexity.ai/*']);
   assert.equal(SITE_ACCESS.grok.required, false);
   assert.equal(SITE_ACCESS.gemini.required, false);
+  assert.equal(SITE_ACCESS.perplexity.required, false);
   assert.ok(m.description.length <= 132, 'the store caps the description at 132 characters');
   assert.deepEqual(m.host_permissions, required);
   assert.deepEqual(m.optional_host_permissions || [], optional);
@@ -984,4 +985,107 @@ test('gemini ops need the Gemini page grant; the options page grants the image h
   assert.deepEqual(SITE_ACCESS.gemini.origins, GEMINI_GRANT);
   assert.deepEqual(SITE_ACCESS.gemini.pageOrigins, ['https://gemini.google.com/*']);
   assert.equal(SITE_ACCESS.gemini.required, false, 'an optional site: upgrading asks for nothing');
+});
+
+// ---- Perplexity: a signed-in session check, then /rest/thread reads.
+
+const PX = 'https://www.perplexity.ai';
+const PX_SESSION = `${PX}/api/auth/session`;
+const PX_SLUG = '0e1d0000-0000-4000-8000-0000000000a1';
+const PX_FIRST = `${PX}/rest/thread/${PX_SLUG}?with_parent_info=true&with_schematized_response=true&version=2.18&source=default&limit=10&offset=0&from_first=true`;
+const pxPage = (cursor) => `${PX}/rest/thread/${PX_SLUG}?with_parent_info=true&with_schematized_response=true&version=2.18&source=default&limit=10&cursor=${cursor}`;
+const PX_USER = { expires: '2026-12-31T00:00:00.000Z', user: { id: 'dummy-user-id', email: 'owner@example.com', username: 'dummy' } };
+
+test('perplexity.detail reads the thread page by page and returns only the entry fields the Go side reads', async () => {
+  const thread = fixture(`perplexity/thread-${PX_SLUG}.json`);
+  const [e1, e2] = thread.entries;
+  const f = fakeFetch({
+    [PX_FIRST]: jsonResponse({ status: 'success', entries: [{ ...e1, read_write_token: 'dummy-thread-token', author_username: 'dummy' }], has_next_page: true, next_cursor: 'cur+/1' }),
+    [pxPage('cur%2B%2F1')]: jsonResponse({ status: 'success', entries: [e2], has_next_page: false, next_cursor: null }),
+  });
+  const frames = await run(createRunner({ fetch: f }), 'perplexity.detail', { id: PX_SLUG });
+  assert.equal(frames.length, 1);
+  const r = frames[0].result;
+  assert.equal(r.slug, PX_SLUG);
+  assert.equal(r.more, undefined);
+  assert.deepEqual(r.entries, [e1, e2].map((e) => Object.fromEntries(Object.entries(e).filter(([k]) => PERPLEXITY_ENTRY_FIELDS.includes(k)))));
+  assert.ok(!JSON.stringify(r).includes('dummy-thread-token'), 'the thread token never leaves the worker');
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[0].init.credentials, 'include');
+  assert.equal(f.calls[0].init.method, 'GET');
+
+  // A deleted thread is not_found; a moved API endpoint_changed; a 429
+  // rate_limited; a Cloudflare challenge blocked.
+  await assert.rejects(run(createRunner({ fetch: fakeFetch({}) }), 'perplexity.detail', { id: PX_SLUG }), (x) => x.code === 'not_found');
+  for (const body of [{ status: 'success' }, { entries: {} }, { entries: ['e1'] }, [1]]) {
+    const shape = fakeFetch({ [PX_FIRST]: jsonResponse(body) });
+    await assert.rejects(run(createRunner({ fetch: shape }), 'perplexity.detail', { id: PX_SLUG }), (x) => x.code === 'endpoint_changed', JSON.stringify(body));
+  }
+  const limited = fakeFetch({ [PX_FIRST]: () => new Response('{}', { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '60' } }) });
+  await assert.rejects(run(createRunner({ fetch: limited }), 'perplexity.detail', { id: PX_SLUG }), (x) => x.code === 'rate_limited' && x.retryAfter === 60);
+  const cf = fakeFetch({ [PX_FIRST]: () => new Response('<title>Just a moment...</title>', { status: 403, headers: { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } }) });
+  await assert.rejects(run(createRunner({ fetch: cf }), 'perplexity.detail', { id: PX_SLUG }), (x) => x.code === 'blocked');
+  // Only valid ids reach a URL.
+  assert.throws(() => validate({ id: 1, op: 'perplexity.detail', args: { id: '../x' } }), (e) => e.code === 'bad_request');
+  assert.throws(() => validate({ id: 1, op: 'perplexity.list', args: { count: 1 } }), (e) => e.code === 'bad_request');
+  assert.throws(() => validate({ id: 1, op: 'perplexity.file', args: { file_id: 'x' } }), (e) => e.code === 'bad_request');
+});
+
+test('perplexity.detail stops after PERPLEXITY_MAX_PAGES pages and says more exist', async () => {
+  const [e1] = fixture(`perplexity/thread-${PX_SLUG}.json`).entries;
+  const calls = [];
+  const f = async (url) => {
+    calls.push(String(url));
+    return jsonResponse({ entries: [{ ...e1, uuid: `e-${calls.length}` }], has_next_page: true, next_cursor: `c${calls.length}` });
+  };
+  const frames = await run(createRunner({ fetch: f }), 'perplexity.detail', { id: PX_SLUG });
+  assert.equal(calls.length, PERPLEXITY_MAX_PAGES);
+  assert.equal(frames[0].result.entries.length, PERPLEXITY_MAX_PAGES);
+  assert.equal(frames[0].result.more, true);
+  // A cursor that does not move ends the read.
+  const stuck = [];
+  const s = async (url) => (stuck.push(String(url)), jsonResponse({ entries: [], has_next_page: true, next_cursor: 'same' }));
+  await run(createRunner({ fetch: s }), 'perplexity.detail', { id: PX_SLUG });
+  assert.equal(stuck.length, 2);
+});
+
+test('perplexity.send needs a signed-in user first; signed out, a sign-in redirect or a challenge opens no tab', async () => {
+  const sent = [];
+  const sender = { send: async (site, a) => (sent.push([site, a]), { conversation_id: PX_SLUG, url: '', submitted_at: 1 }), close: async () => ({ closed: 1 }) };
+  const ok = fakeFetch({ [PX_SESSION]: jsonResponse(PX_USER) });
+  const frames = await run(createRunner({ fetch: ok, sender }), 'perplexity.send', { message: 'hi', conversation_id: PX_SLUG });
+  assert.equal(frames[0].result.conversation_id, PX_SLUG);
+  assert.ok(!JSON.stringify(frames).includes('owner@example.com') && !JSON.stringify(frames).includes('dummy-user-id'), 'the session answer is never returned');
+  assert.deepEqual(sent, [['perplexity', { message: 'hi', conversation_id: PX_SLUG }]]);
+  assert.equal(ok.calls[0].init.credentials, 'include');
+  // Signed out Perplexity answers {} (and still offers an anonymous composer).
+  for (const body of [{}, { user: null }, { user: {} }, { user: { id: '' } }, { user: 'x' }, []]) {
+    const out = fakeFetch({ [PX_SESSION]: jsonResponse(body) });
+    await assert.rejects(run(createRunner({ fetch: out, sender }), 'perplexity.send', { message: 'hi' }), (e) => e.code === 'not_logged_in', JSON.stringify(body));
+  }
+  const away = fakeFetch({ [PX_SESSION]: () => redirectedTo(jsonResponse({ user: { id: 'x' } }), 'https://accounts.example.com/login') });
+  await assert.rejects(run(createRunner({ fetch: away, sender }), 'perplexity.send', { message: 'hi' }), (e) => e.code === 'not_logged_in');
+  const cf = fakeFetch({ [PX_SESSION]: () => new Response('<title>Just a moment...</title>', { status: 403, headers: { 'content-type': 'text/html', 'cf-mitigated': 'challenge' } }) });
+  await assert.rejects(run(createRunner({ fetch: cf, sender }), 'perplexity.send', { message: 'hi' }), (e) => e.code === 'blocked');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(await run(createRunner({ fetch: ok, sender }), 'perplexity.close', { conversation_id: PX_SLUG }), [{ ok: true, result: { closed: 1 } }]);
+});
+
+test('perplexity ops need the www.perplexity.ai grant', async () => {
+  const f = fakeFetch({ [PX_SESSION]: jsonResponse(PX_USER) });
+  const sent = [];
+  const sender = { send: async (site) => (sent.push(site), { conversation_id: PX_SLUG }), close: async () => ({ closed: 1 }) };
+  const perms = fakePermissions(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
+  const r = createRunner({ fetch: f, sender, permissions: perms });
+  for (const [op, args] of [['perplexity.send', { message: 'hi' }], ['perplexity.detail', { id: PX_SLUG }]]) {
+    await assert.rejects(run(r, op, args), (e) => e.code === 'permission_missing' && /Perplexity/.test(e.message), op);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(sent, []);
+  perms.granted.add('https://www.perplexity.ai/*');
+  await run(r, 'perplexity.send', { message: 'hi' });
+  assert.deepEqual(sent, ['perplexity']);
+  assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai', 'perplexity']);
+  assert.deepEqual(SITE_ACCESS.perplexity.origins, ['https://www.perplexity.ai/*']);
+  assert.deepEqual(SITE_ACCESS.perplexity.pageOrigins, ['https://www.perplexity.ai/*']);
 });

@@ -1,10 +1,11 @@
 package history
 
 // Web agents make ChatGPT (chatgpt.com), Claude (claude.ai), Grok
-// (grok.com) and Gemini (gemini.google.com) teammates:
-// a request's body is typed into the owner's logged-in site through the
-// Tincan Chrome extension, and the reply comes back as the answer, with
-// generated images attached. See docs/adapters/web-agents.md.
+// (grok.com), Gemini (gemini.google.com) and Perplexity (www.perplexity.ai)
+// teammates: a request's body is typed into the owner's logged-in site
+// through the Tincan Chrome extension, and the reply comes back as the
+// answer, with generated images attached and, on a site whose answers
+// cite the web, its source links. See docs/adapters/web-agents.md.
 
 import (
 	"context"
@@ -33,8 +34,9 @@ const DefaultWebRequestTimeout = 8 * time.Minute
 // site may date the new message and still have it count as this send's.
 const webClockSkew = 2 * time.Minute
 
-// maxWebReplyBytes caps the reply text, leaving room in the relay's body
-// limit for the footer and notes.
+// maxWebReplyBytes caps a web agent's reply: the answer text with its
+// truncation notice, sources list, notes and conversation footer. Image
+// attachment lines are added after it, inside the relay's body limit.
 const maxWebReplyBytes = 64 << 10
 
 // WebSites are the sites a web agent can front, in the site table's order.
@@ -367,14 +369,24 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		}
 	}
 	anchor, err := w.anchorFor(ctx, convID, wr.message)
+	var note string
+	if errors.Is(err, errThreadTooLong) {
+		if !remembered {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the conversation %s is longer than tincan reads, so its reply could not be seen. Ask without a conversation: line, or with new chat, to start a new one.", label, convID), envelope.StatusFailed, nil)
+			return
+		}
+		note = fmt.Sprintf("Your previous %s conversation (id %s) is longer than tincan reads, so this went to a new chat.", label, convID)
+		delete(st.Conversations, req.From)
+		convID, newChat, err = "", true, nil
+		anchor = replyAnchor{message: wr.message}
+	}
 	if err != nil {
 		w.logf("request %s from %s: reading the conversation before the send: %v; not sending", req.ID, req.From, err)
 		w.reply(ctx, req, w.rateLimitReply(), envelope.StatusFailed, nil)
 		return
 	}
 	res, err := w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
-	var note string
-	if remembered && errors.Is(err, ErrNotFound) {
+	if remembered && convID != "" && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
@@ -428,28 +440,13 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 		w.reply(ctx, req, w.waitFailure(err, convID), envelope.StatusFailed, nil)
 		return
 	}
-	text, conv, generated, lost, err := w.readReply(ctx, convID, userID, raw)
+	rr, err := w.readReply(ctx, convID, userID, raw)
 	if err != nil {
 		w.logf("request %s from %s: reading the reply in %s: %v", req.ID, req.From, convID, err)
 		w.reply(ctx, req, w.waitFailure(err, convID), envelope.StatusFailed, nil)
 		return
 	}
-	body, truncated := capReply(text)
-	n := imageCount(conv)
-	missing := w.missingImagesNote(generated, n)
-	if missing != "" {
-		n = generated
-	}
-	if strings.TrimSpace(text) == "" && n > 0 {
-		what := "an image"
-		if n > 1 {
-			what = "images"
-		}
-		body = fmt.Sprintf("(%s replied with %s and no text)", label, what)
-	}
-	if truncated {
-		body += fmt.Sprintf("\n\n(reply truncated: showing %d of %d bytes)", len(body), len(text))
-	}
+	text, conv, generated, lost := rr.text, rr.conv, rr.generated, rr.lost
 	if lost > 0 && w.site().noteLostImages {
 		what := "image"
 		if lost > 1 {
@@ -462,10 +459,40 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 			note = lostNote
 		}
 	}
-	if note != "" {
-		body += "\n\n" + note
+	// Everything after the answer text (the sources list, any note and
+	// the conversation footer) is kept whole: the answer text is what
+	// gives way to keep the reply inside the cap.
+	var tail string
+	if w.site().sources {
+		if sources := sourcesFooter(rr.sources); sources != "" {
+			tail += "\n\n" + sources
+		}
 	}
-	body += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
+	if note != "" {
+		tail += "\n\n" + note
+	}
+	tail += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
+	body, truncated := capReplyTo(text, maxWebReplyBytes-len(tail))
+	if truncated {
+		// Room for the notice comes out of the text too; its numbers are
+		// at most len(text), so this length is an upper bound.
+		const notice = "\n\n(reply truncated: showing %d of %d bytes)"
+		body, _ = capReplyTo(text, maxWebReplyBytes-len(tail)-len(fmt.Sprintf(notice, len(text), len(text))))
+		body += fmt.Sprintf(notice, len(body), len(text))
+	}
+	n := imageCount(conv)
+	missing := w.missingImagesNote(generated, n)
+	if missing != "" {
+		n = generated
+	}
+	if strings.TrimSpace(text) == "" && n > 0 {
+		what := "an image"
+		if n > 1 {
+			what = "images"
+		}
+		body = fmt.Sprintf("(%s replied with %s and no text)", label, what)
+	}
+	body += tail
 
 	ids := w.attachImages(ctx, req, conv, &body)
 	if missing != "" {
@@ -477,15 +504,79 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 	w.reply(ctx, req, body, envelope.StatusAnswered, ids)
 }
 
-func capReply(s string) (string, bool) {
+// capReplyTo caps the reply text at n bytes (none when n is negative).
+func capReplyTo(s string, n int) (string, bool) {
+	n = max(n, 0)
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "(the reply was empty)", false
 	}
-	if len(s) <= maxWebReplyBytes {
+	if len(s) <= n {
 		return s, false
 	}
-	return capBytes(s, maxWebReplyBytes), true
+	return capBytes(s, n), true
+}
+
+// webSource is one web source an answer cites. n, when set, is its
+// number in the site's own list (the answer's [n] markers name it).
+type webSource struct {
+	n          int
+	title, url string
+}
+
+// maxReplySources caps the sources listed after an answer; the rest are
+// counted in an "(and N more)" line.
+const maxReplySources = 10
+
+// maxSourceTitle caps one source's title in bytes.
+const maxSourceTitle = 200
+
+// maxSourceURL is the longest source URL listed; a longer one is left out
+// (its number still counts), so the whole list stays well inside
+// maxWebReplyBytes.
+const maxSourceURL = 2048
+
+// sourcesFooter formats an answer's sources: "Sources:", then one
+// "- <title> <url>" line per source ("- [n] <title> <url>" when the site
+// numbers them), in the site's order. Only http and https URLs are
+// listed, each once (its first occurrence, with that number), and none
+// over maxSourceURL bytes; titles are put on one line and capped. After maxReplySources the rest are counted.
+// It is "" when there is nothing to list.
+func sourcesFooter(srcs []webSource) string {
+	seen := map[string]bool{}
+	var lines []string
+	more := 0
+	for _, s := range srcs {
+		u, err := url.Parse(strings.TrimSpace(s.url))
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			continue
+		}
+		link := u.String()
+		if len(link) > maxSourceURL || seen[link] {
+			continue
+		}
+		seen[link] = true
+		if len(lines) == maxReplySources {
+			more++
+			continue
+		}
+		title := capBytes(strings.Join(strings.Fields(s.title), " "), maxSourceTitle)
+		line := "-"
+		if s.n > 0 {
+			line += fmt.Sprintf(" [%d]", s.n)
+		}
+		if title != "" {
+			line += " " + title
+		}
+		lines = append(lines, line+" "+link)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if more > 0 {
+		lines = append(lines, fmt.Sprintf("(and %d more)", more))
+	}
+	return "Sources:\n" + strings.Join(lines, "\n")
 }
 
 // rateLimitReply is the answer while the site rate-limits the account.
@@ -547,6 +638,8 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 	switch {
 	case errors.Is(err, errOrphaned):
 		return fmt.Sprintf("Sorry, another message was sent in the %s conversation %s before this one was answered, so there is no reply to return.", label, convID)
+	case errors.Is(err, errThreadTooLong):
+		return fmt.Sprintf("Sorry, the message was sent to %s, but the conversation %s is now longer than tincan reads, so the reply could not be read. Open the conversation to see it, and start a new chat next time.", label, convID)
 	case errors.Is(err, errReplyUnreadable):
 		return fmt.Sprintf("Sorry, the message was sent to %s (conversation %s) and it answered, but the reply could not be read.", label, convID)
 	}
@@ -577,7 +670,8 @@ type replyAnchor struct {
 // anchorFor reads the conversation's last user message before a send into
 // an existing conversation. When that read fails, prevUser stays empty and
 // the message is found by its text and time alone. A rate limit is
-// returned instead: sending now would only add to it.
+// returned instead: sending now would only add to it. So is
+// errThreadTooLong: the reply could never be seen.
 func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (replyAnchor, error) {
 	a := replyAnchor{message: message}
 	if convID == "" {
@@ -596,7 +690,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 			return a, nil
 		}
 	}
-	if _, ok := rateLimited(err); ok {
+	if _, ok := rateLimited(err); ok || errors.Is(err, errThreadTooLong) {
 		return a, err
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -848,16 +942,29 @@ var errOrphaned = errors.New("another message was sent in the conversation befor
 // errReplyUnreadable: the finished read could not be turned into a reply.
 var errReplyUnreadable = errors.New("the reply could not be read")
 
+// errThreadTooLong: the conversation is longer than the extension reads,
+// so its newest turns (this request's) cannot be seen.
+var errThreadTooLong = errors.New("the conversation is longer than tincan reads")
+
+// webReply is the answer read from the finished conversation: its text,
+// its fetched images (conv), how many images it had before any failed to
+// fetch (generated), how many could not be fetched (lost), and the web
+// sources it cites.
+type webReply struct {
+	text            string
+	conv            []Conversation
+	generated, lost int
+	sources         []webSource
+}
+
 // readReply builds the answer from the finished read: the reply to this
 // request's user message (userID), with its generated images fetched
-// through the file operation. generated is how many images the reply
-// had before any failed to fetch; lost is how many of the reply's images
-// could not be fetched.
-func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw json.RawMessage) (text string, conv []Conversation, generated, lost int, err error) {
+// through the file operation.
+func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw json.RawMessage) (webReply, error) {
 	l := w.live()
 	th, err := l.parseDetail(convID, raw)
 	if err != nil {
-		return "", nil, 0, 0, fmt.Errorf("%w: %v", errReplyUnreadable, err)
+		return webReply{}, fmt.Errorf("%w: %v", errReplyUnreadable, err)
 	}
 	i := -1
 	for j, t := range th.turns {
@@ -866,17 +973,19 @@ func (w *WebAgent) readReply(ctx context.Context, convID, userID string, raw jso
 		}
 	}
 	if i < 0 {
-		return "", nil, 0, 0, fmt.Errorf("%w: this request's turn is not in the conversation", errReplyUnreadable)
+		return webReply{}, fmt.Errorf("%w: this request's turn is not in the conversation", errReplyUnreadable)
 	}
 	t := th.turns[i]
+	r := webReply{text: t.reply.Text, sources: t.replySources}
 	if len(t.replyImages) == 0 {
-		return t.reply.Text, nil, 0, 0, nil
+		return r, nil
 	}
 	c := []Conversation{{Source: w.Site, ID: convID, Messages: []Message{{Role: RoleAssistant, Images: t.replyImages}}}}
 	c = l.resolve(ctx, c)
-	lost = max(len(t.replyImages)-imageCount(c), 0)
+	r.lost = max(len(t.replyImages)-imageCount(c), 0)
 	capImages(c)
-	return t.reply.Text, c, len(t.replyImages), lost, nil
+	r.conv, r.generated = c, len(t.replyImages)
+	return r, nil
 }
 
 // missingImagesNote is the note on a reply whose generated images could

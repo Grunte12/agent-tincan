@@ -1,0 +1,61 @@
+{
+  "slug": "0e1d0000-0000-4000-8000-0000000000a1",
+  "entries": [
+    {
+      "backend_uuid": "0e1d0000-0000-4000-8000-0000000000b1",
+      "context_uuid": "0e1d0000-0000-4000-8000-0000000000c1",
+      "uuid": "0e1d0000-0000-4000-8000-0000000000d1",
+      "frontend_context_uuid": "0e1d0000-0000-4000-8000-0000000000e1",
+      "frontend_uuid": "0e1d0000-0000-4000-8000-0000000000f1",
+      "status": "COMPLETED",
+      "query_str": "What is a tin can telephone?",
+      "thread_title": "Tin can telephones",
+      "thread_url_slug": "0e1d0000-0000-4000-8000-0000000000a1",
+      "entry_created_datetime": "2026-09-20T10:00:00.000000",
+      "entry_updated_datetime": "2026-09-20T10:00:20.000000",
+      "blocks": [
+        {"intended_usage": "plan", "plan_block": {"progress": "DONE", "goals": []}},
+        {"intended_usage": "pro_search_steps", "plan_block": {"progress": "DONE", "steps": []}},
+        {
+          "intended_usage": "web_results",
+          "web_result_block": {
+            "progress": "DONE",
+            "web_results": [
+              {"name": "Example page one", "snippet": "dummy", "timestamp": "2026-01-01T00:00:00", "url": "https://example.com/one", "meta_data": {}, "is_attachment": false, "is_image": false, "is_code_interpreter": false, "is_knowledge_card": false, "is_navigational": false, "is_widget": false, "is_focused_web": false, "is_client_context": false, "is_memory": false, "is_conversation_history": false, "is_conversation_summary": false},
+              {"name": "An image result", "snippet": "dummy", "url": "https://example.com/image.png", "is_image": true},
+              {"name": "Example page two", "snippet": "dummy", "url": "https://example.org/two", "is_image": false},
+              {"name": "Example page one again", "snippet": "dummy", "url": "https://example.com/one", "is_image": false},
+              {"name": "A memory", "snippet": "dummy", "url": "https://www.perplexity.ai/memory/1", "is_memory": true}
+            ]
+          }
+        },
+        {
+          "intended_usage": "ask_text",
+          "markdown_block": {
+            "progress": "DONE",
+            "chunks": ["A tin can telephone is two cans ", "joined by a string [1][3]."],
+            "chunk_starting_offset": 0,
+            "answer": "A tin can telephone is two cans joined by a string [1][3]."
+          }
+        }
+      ]
+    },
+    {
+      "backend_uuid": "0e1d0000-0000-4000-8000-0000000000b2",
+      "context_uuid": "0e1d0000-0000-4000-8000-0000000000c1",
+      "uuid": "0e1d0000-0000-4000-8000-0000000000d2",
+      "status": "COMPLETED",
+      "query_str": "How long can the string be?",
+      "thread_url_slug": "0e1d0000-0000-4000-8000-0000000000a1",
+      "entry_created_datetime": "2026-09-20T10:05:00.000000",
+      "entry_updated_datetime": "2026-09-20T10:05:30.000000",
+      "blocks": [
+        {"intended_usage": "web_results", "web_result_block": {"progress": "DONE", "web_results": [{"name": "Example page three", "url": "https://example.net/three"}]}},
+        {"intended_usage": "ask_text", "markdown_block": {"progress": "DONE", "chunks": [], "answer": "Tens of meters, if it is kept taut [1]."}}
+      ]
+    }
+  ],
+  "has_next_page": false,
+  "next_cursor": null,
+  "status": "success"
+}

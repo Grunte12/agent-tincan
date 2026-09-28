@@ -9,7 +9,7 @@ import (
 // a fixed per-site config path matching tincan web install's service, and
 // setup that says they act as the owner in the site.
 func TestWebAgentKinds(t *testing.T) {
-	for kind, site := range map[string]string{KindChatGPTWeb: "chatgpt", KindClaudeWeb: "claude-ai", KindGrokWeb: "grok", KindGeminiWeb: "gemini"} {
+	for kind, site := range map[string]string{KindChatGPTWeb: "chatgpt", KindClaudeWeb: "claude-ai", KindGrokWeb: "grok", KindGeminiWeb: "gemini", KindPerplexityWeb: "perplexity"} {
 		k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: kind, Wake: "wait"}}})
 		a := block(t, k, kind)
 		if a.Kind != kind || a.Wake != "wait" {
@@ -46,7 +46,7 @@ func TestWebAgentKinds(t *testing.T) {
 			t.Errorf("%s recipe has no title", kind)
 		}
 	}
-	if !KnownKind(KindChatGPTWeb) || !KnownKind(KindClaudeWeb) || !KnownKind(KindGrokWeb) || !KnownKind(KindGeminiWeb) {
+	if !KnownKind(KindChatGPTWeb) || !KnownKind(KindClaudeWeb) || !KnownKind(KindGrokWeb) || !KnownKind(KindGeminiWeb) || !KnownKind(KindPerplexityWeb) {
 		t.Fatal("web kinds not known to the relay's kind check")
 	}
 }
@@ -115,5 +115,40 @@ func TestGeminiWebSetup(t *testing.T) {
 	c := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "claude-web", Wake: "wait"}}}), KindClaudeWeb)
 	if strings.Contains(strings.Join(c.Setup, "\n"), "Gmail") {
 		t.Error("claude-web setup carries the Gemini data note")
+	}
+}
+
+// perplexity-web's setup carries what is particular to Perplexity: the
+// grant on the options page, the signed-in check, the account risk and
+// the sources in its replies; the other web agents carry none of it.
+func TestPerplexityWebSetup(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "perplexity-web", Wake: "wait"}, {Name: "grok-web", Wake: "wait"}}})
+	a := block(t, k, KindPerplexityWeb)
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{
+		"logged in to www.perplexity.ai",
+		"Grant next to Perplexity",
+		"tincan web serve --site perplexity waits",
+		"refuses to send anonymously",
+		"Perplexity's terms",
+		"Matt's own account",
+		"com.agenttincan.web.perplexity.plist",
+		"~/.config/tincan/perplexity-web-allow.txt",
+		"Sources:",
+		"not a history source",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("perplexity-web setup missing %q:\n%s", want, setup)
+		}
+	}
+	if !strings.Contains(a.Instructions, "Perplexity (www.perplexity.ai)") || !strings.Contains(a.Instructions, "source links") || strings.Contains(a.Instructions, "generated images") {
+		t.Errorf("instructions: %s", a.Instructions)
+	}
+	if r := recipe(t, k, KindPerplexityWeb); !strings.Contains(r.Title, "Perplexity") {
+		t.Errorf("title %q", r.Title)
+	}
+	other := strings.Join(block(t, k, "grok-web").Setup, "\n")
+	if strings.Contains(other, "Perplexity") {
+		t.Errorf("grok-web setup carries Perplexity steps:\n%s", other)
 	}
 }
