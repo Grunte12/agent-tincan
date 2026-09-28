@@ -863,3 +863,26 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 		t.Fatalf("check_inbox = %q", out)
 	}
 }
+
+func TestListAgentsShowsBacklog(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	if out := call(t, cs, "list_agents", nil); strings.Contains(out, "queued") || strings.Contains(out, "claimed") {
+		t.Fatalf("idle roster = %q", out)
+	}
+	sender := m.Client(t, "grokbot")
+	for i := range 2 {
+		req, err := sender.Send(t.Context(), "muse", "work", envelope.KindAsk, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if _, err := m.Client(t, "muse").Claim(t.Context(), req.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if out := call(t, cs, "list_agents", nil); !strings.Contains(out, "1 queued (oldest 0m), 1 claimed") {
+		t.Fatalf("busy roster = %q", out)
+	}
+}

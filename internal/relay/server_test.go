@@ -640,3 +640,54 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
 	}
 }
+
+func TestAgentsListQueueStats(t *testing.T) {
+	h := newHarness(t, Config{})
+	ctx := context.Background()
+	req, err := h.st.Enqueue(ctx, envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := h.st.Enqueue(ctx, envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.Claim(ctx, claimed.ID, "muse", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var out client.Roster
+	rec := h.do(grokAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	for _, a := range out.Agents {
+		if a.Name == "muse" && (a.Queued != 1 || a.Claimed != 1 || !a.OldestQueued.Equal(req.CreatedAt)) {
+			t.Fatalf("muse = %+v", a)
+		}
+	}
+	var raw struct{ Agents []map[string]json.RawMessage }
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range raw.Agents {
+		for _, field := range []string{"queued", "oldest_queued_at", "claimed"} {
+			if _, present := a[field]; present != (string(a["name"]) == `"muse"`) {
+				t.Fatalf("field %s: %s", field, rec.Body.String())
+			}
+		}
+	}
+	var old struct {
+		Agents []struct {
+			Name   string
+			Online bool
+			Wake   string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &old); err != nil || len(old.Agents) != 3 {
+		t.Fatalf("old client = %+v, %v", old, err)
+	}
+	var legacy client.Roster
+	if err := json.Unmarshal([]byte(`{"agents":[{"name":"muse","online":true,"wake":"wait"}]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Agents[0].Backlog(time.Now()) != "" {
+		t.Fatalf("legacy = %+v", legacy)
+	}
+}

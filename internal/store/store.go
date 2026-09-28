@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS requests (
   attachments TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
+-- QueueStats groups open requests across every agent; leading with status
+-- keeps it to the open rows instead of the whole request history.
+CREATE INDEX IF NOT EXISTS requests_status_to ON requests(status, to_agent);
 CREATE TABLE IF NOT EXISTS replies (
   request_id TEXT PRIMARY KEY REFERENCES requests(id),
   from_agent TEXT NOT NULL,
@@ -529,6 +532,48 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
 	return n, err
+}
+
+// QueueStat is one agent's backlog: requests waiting to be claimed, the
+// creation time of the oldest of them, and claims whose lease is still live.
+type QueueStat struct {
+	Queued       int
+	OldestQueued time.Time
+	Claimed      int
+}
+
+// QueueStats returns every agent's backlog in one grouped query. Expired and
+// finished requests, and claims whose lease ran out, are not counted.
+func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
+	now := s.now().UnixMilli()
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
+		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
+		AND (status != 'claimed' OR lease_until > ?) GROUP BY to_agent, status`, now, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]QueueStat)
+	for rows.Next() {
+		var agent, status string
+		var count int
+		var oldest int64
+		if err := rows.Scan(&agent, &status, &count, &oldest); err != nil {
+			return nil, err
+		}
+		stat := out[agent]
+		if status == string(envelope.StatusClaimed) {
+			stat.Claimed += count
+		} else {
+			stat.Queued += count
+			at := time.UnixMilli(oldest)
+			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
+				stat.OldestQueued = at
+			}
+		}
+		out[agent] = stat
+	}
+	return out, rows.Err()
 }
 
 // PendingRequests names up to limit of agent's queued requests, oldest

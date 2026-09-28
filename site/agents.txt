@@ -213,3 +213,8 @@ C5. Test from any agent: `tincan ask chatgpt-web "Tincan test: say hello in five
     and `tincan ask history "what was the last thing I asked ChatGPT?"`.
 
 Details: docs/adapters/history.md and docs/adapters/web-agents.md in the repo.
+
+The tincan agents roster and list_agents show queued work and its oldest wait,
+plus live claims, when non-zero: 2 queued (oldest 14m), 1 claimed. Queued
+includes delivered but unclaimed requests. Expired and terminal requests are
+excluded. Use a growing oldest wait to spot backlog even when an agent is online.

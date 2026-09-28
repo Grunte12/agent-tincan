@@ -276,6 +276,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if a.Version != "" {
 			fmt.Fprintf(&b, " version=%s", a.Version)
 		}
+		if backlog := a.Backlog(now); backlog != "" {
+			fmt.Fprintf(&b, " %s", backlog)
+		}
 		b.WriteString("\n")
 	}
 	if b.Len() == 0 {
