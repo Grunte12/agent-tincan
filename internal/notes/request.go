@@ -11,6 +11,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
 // Op is what a request asks the notes agent to do.
@@ -70,24 +72,9 @@ const structuredMarker = "note:"
 const StructuredHelp = `Put "note:" first and one JSON object after it. To save a note: note: {"op":"add","title":"...","body":"...","tags":["..."]}. To search: note: {"op":"search","query":"...","count":10} (count 1 to 20). To read one: note: {"op":"read","id":"<note id>"}.`
 
 // structuredBody reports whether body is a structured request and returns
-// its JSON text. The first line, trimmed and in any case, must be exactly
-// "note:" (the JSON on the following lines) or "note:" followed by
-// optional spaces or tabs and a JSON object on the same line. Anything
-// else is free text.
+// its JSON text; anything else is free text.
 func structuredBody(body string) (string, bool) {
-	first, rest, _ := strings.Cut(body, "\n")
-	head := strings.TrimSpace(first)
-	n := len(structuredMarker)
-	if len(head) < n || !strings.EqualFold(head[:n], structuredMarker) {
-		return "", false
-	}
-	switch inline := strings.TrimLeft(head[n:], " \t"); {
-	case inline == "":
-		return rest, true
-	case strings.HasPrefix(inline, "{"):
-		return inline + "\n" + rest, true
-	}
-	return "", false
+	return history.StructuredBody(body, structuredMarker)
 }
 
 // wireRequest has a pointer per field, so a field that was sent can be

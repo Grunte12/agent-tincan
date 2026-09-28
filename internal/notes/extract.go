@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
 // MaxExtractTextBytes caps the free text handed to the extractor. Longer
@@ -72,34 +74,6 @@ const extractSchema = `{
 }
 `
 
-// codexExtractArgs are the flags for one extractor run, in order, before
-// the prompt argument; the same as history's (see there for each flag):
-// read-only sandbox, no approvals, no user config and so no MCP servers,
-// no plugins, apps, shell, browser, computer use, image generation or web
-// search, no session file.
-func codexExtractArgs(cwd, schema, out string) []string {
-	return []string{
-		"exec",
-		"--ignore-user-config",
-		"--ephemeral",
-		"--sandbox", "read-only",
-		"-c", "approval_policy=never",
-		"-c", "mcp_servers={}",
-		"-c", "web_search=disabled",
-		"--disable", "plugins",
-		"--disable", "apps",
-		"--disable", "shell_tool",
-		"--disable", "browser_use",
-		"--disable", "computer_use",
-		"--disable", "image_generation",
-		"--skip-git-repo-check",
-		"--color", "never",
-		"--cd", cwd,
-		"--output-schema", schema,
-		"--output-last-message", out,
-	}
-}
-
 // Extract implements Extractor. Empty or oversized text and an "unclear"
 // answer are ErrUnclearRequest; a run that fails or answers outside the
 // schema is any other error, so the service leaves the request for
@@ -143,9 +117,9 @@ func (c *CodexExtractor) Extract(ctx context.Context, text string) (Request, err
 	if bin == "" {
 		bin = "codex"
 	}
-	cmd := exec.CommandContext(ctx, bin, append(codexExtractArgs(cwd, schema, out), extractInstructions)...)
+	cmd := exec.CommandContext(ctx, bin, append(history.CodexExtractArgs(cwd, schema, out), extractInstructions)...)
 	cmd.Dir = cwd
-	cmd.Env = extractEnv(os.Environ())
+	cmd.Env = history.ExtractEnv(os.Environ(), "AGENT_NOTES_")
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Stdout = io.Discard
 	stderr := &limitedBuffer{b: &bytes.Buffer{}, n: 2 << 10}
@@ -153,25 +127,11 @@ func (c *CodexExtractor) Extract(ctx context.Context, text string) (Request, err
 	if err := cmd.Run(); err != nil {
 		return Request{}, fmt.Errorf("request extractor: %w: %s", err, strings.TrimSpace(stderr.b.String()))
 	}
-	raw, err := readCapped(out, 64<<10)
+	raw, err := history.ReadCapped(out, 64<<10)
 	if err != nil {
 		return Request{}, fmt.Errorf("request extractor wrote no answer: %w", err)
 	}
 	return parseExtraction(raw)
-}
-
-// extractEnv is the environment for the extractor run: the service's own,
-// minus anything that would point a tincan client at a relay identity or
-// the helper at a library.
-func extractEnv(env []string) []string {
-	out := env[:0:0]
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "TINCAN_") || strings.HasPrefix(kv, "AGENT_NOTES_") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
 }
 
 // extraction is the extractor's output schema.
@@ -224,21 +184,4 @@ func parseExtraction(raw []byte) (Request, error) {
 		return Request{}, fmt.Errorf("%w: the extractor could not tell", ErrUnclearRequest)
 	}
 	return Request{}, fmt.Errorf("request extractor answered op %q", e.Op)
-}
-
-// readCapped reads at most limit bytes of path.
-func readCapped(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("answer larger than %d bytes", limit)
-	}
-	return b, nil
 }

@@ -33,19 +33,6 @@ func notesCmd() *cobra.Command {
 	return cmd
 }
 
-// defaultNotesConfig is the notes agent's own client config: TINCAN_CONFIG
-// when set, else ~/.config/tincan/notes.json.
-func defaultNotesConfig() string {
-	if os.Getenv("TINCAN_CONFIG") != "" {
-		return client.ConfigPath()
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return client.ConfigPath()
-	}
-	return filepath.Join(home, ".config", "tincan", "notes.json")
-}
-
 // defaultNotesAppSupport is the service's own Application Support root on
 // this machine.
 func defaultNotesAppSupport() string {
@@ -83,7 +70,7 @@ func notesServeCmd() *cobra.Command {
 				return errors.New("--library-root is required: the Agent Notes library folder the notes agent saves into")
 			}
 			if configPath == "" {
-				configPath = defaultNotesConfig()
+				configPath = serviceConfigPath(notes.DefaultAgentName)
 			}
 			configPath = expandHome(configPath)
 			cfg, err := client.LoadConfigFrom(configPath)
@@ -94,7 +81,7 @@ func notesServeCmd() *cobra.Command {
 				return fmt.Errorf("no relay configured in %s: run TINCAN_CONFIG=%s tincan join <code> --relay http://tincan-relay", configPath, configPath)
 			}
 			if cfg.Agent != "" && cfg.Agent != notes.DefaultAgentName {
-				return wrongNotesAgent(configPath+" is joined as", cfg.Agent)
+				return wrongServeAgent("notes serve", notes.DefaultAgentName, configPath+" is joined as", cfg.Agent)
 			}
 			appSupport, spoolDir = notesPaths(appSupport, spoolDir)
 			if scratchDir == "" {
@@ -130,7 +117,7 @@ func notesServeCmd() *cobra.Command {
 				return fmt.Errorf("notes serve: could not confirm this agent's identity with the relay: %w", client.RejoinHint(err, cfg.Relay))
 			}
 			if me.Name != notes.DefaultAgentName {
-				return wrongNotesAgent("the relay knows the machine using "+configPath+" as", me.Name)
+				return wrongServeAgent("notes serve", notes.DefaultAgentName, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			if me.Kind != notes.DefaultAgentName {
 				cmd.PrintErrf("tincan notes: warning: the relay stores kind %q for this agent, not \"notes\", so adds wait only 24 hours for this Mac; fix it with: tincan kind notes notes\n", me.Kind)
@@ -153,14 +140,6 @@ func notesServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&addAllow, "add-allowlist", "~/.config/tincan/notes-add-allow.txt", "file of agents allowed to add notes, one per line (missing means every joined agent)")
 	cmd.Flags().StringVar(&scratchDir, "codex-scratch", "", "empty working directory for the tool-less codex step (default: <app-support>/codex-scratch)")
 	return cmd
-}
-
-// wrongNotesAgent is the refusal when notes serve would run as another
-// agent and so poll and claim that agent's requests.
-func wrongNotesAgent(who, agent string) error {
-	return fmt.Errorf("notes serve refuses to run: %s %q, not \"notes\", so it would claim that agent's requests. "+
-		"Point --config (or TINCAN_CONFIG) at the notes agent's own config, normally ~/.config/tincan/notes.json "+
-		"(join it with TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay <relay url>)", who, agent)
 }
 
 func notesInstallCmd() *cobra.Command {
@@ -218,7 +197,7 @@ func notesDoctorCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if configPath == "" {
-				configPath = defaultNotesConfig()
+				configPath = serviceConfigPath(notes.DefaultAgentName)
 			}
 			exe, err := os.Executable()
 			if err == nil {

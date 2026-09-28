@@ -127,7 +127,7 @@ func (g *GrokCLI) candidates(ctx context.Context) ([]grokEntry, error) {
 			}
 			dir := filepath.Join(cwdDir, s.Name())
 			e := grokEntry{id: s.Name(), dir: dir, cwdDir: cwdDir, cwd: decoded}
-			raw, serr := readCapped(filepath.Join(dir, "summary.json"), 1<<20)
+			raw, serr := ReadCapped(filepath.Join(dir, "summary.json"), 1<<20)
 			chat, cerr := os.Stat(filepath.Join(dir, "chat_history.jsonl"))
 			if serr != nil && cerr != nil {
 				continue
