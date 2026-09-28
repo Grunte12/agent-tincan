@@ -12,6 +12,7 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [New in v0.6.0](#new-in-v060)
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
 - [At a glance: how each platform works](#at-a-glance-how-each-platform-works)
@@ -22,6 +23,27 @@ Contents:
 - [Onboarding](#onboarding)
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
+
+## New in v0.6.0
+
+- Four new teammates. [grok-web and gemini-web](#the-chatgpt-claude-grok-and-gemini-web-agents-chatgpt-web-claude-web-grok-web-and-gemini-web) make your own Grok and Gemini accounts teammates. [grok-cli](#grok-cli-command-wake-wake-home-of-its-own) and [gemini-cli](#gemini-through-antigravity-cli-or-gemini-cli-tincan-listen-wake-script) wake xAI's Grok Build CLI and Gemini on your Mac, through a shared [wake library](examples/lib/tincan-wake-lib.sh) for command-woken CLI teammates. The [history agent](#the-history-agent) now also reads Grok, Gemini and Grok CLI history.
+- [Clarifying questions](#requests-and-replies): a teammate can reply `needs_input`, and the asker answers with `tincan answer`.
+- [Progress notes](#requests-and-replies) on a claimed request with `tincan progress`.
+- [Urgent requests](#wake-methods) with `--urgent`: they wake at once and come first.
+- [Ask several teammates at once](#asking-several-teammates) and gather their replies under one group id.
+- [Search](#audit-log-and-trace) past requests and replies you took part in with `tincan search`.
+- [Owner approval](#owner-approval): hold requests to chosen agents until you approve them (`tincan held`, `approve`, `deny`).
+- [Ping](#reachability-checks): check a teammate's tincan path without a model turn.
+- [Queue depth and oldest wait](#last-seen) per agent in `tincan agents`.
+- [Upgrade notices](#upgrades) when the relay serves a newer tincan.
+- An [options page](#the-tincan-chrome-extension) in the Chrome extension that grants Grok and Gemini as optional sites, and specific failure codes when a site is not granted, logged out or blocked.
+
+Before you upgrade:
+
+- Upgrade the relay to v0.6.0 before inviting the new kinds. An older relay refuses `grok-web`, `gemini-web`, `grok-cli` and `gemini-cli`, and clarifications, owner approval, ping and search need the new relay too.
+- The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. 0.4.0 is pending Chrome Web Store review; until it is published there, load it unpacked from the release zip.
+- gemini-cli without an API key runs agy, which has no sandbox, so the wake runs it only when the listener has the `TINCAN_GEMINI_ALLOW_UNCONFINED=1` opt-in. See [Set up with a Google account](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key).
+- The four new teammates pass their tests, but live end-to-end checks against a relay are still pending.
 
 ## Why it matters
 
@@ -77,7 +99,7 @@ Add ChatGPT and Claude to my Agent Tincan team.
 Follow https://agenttincan.com/agents.txt, part C.
 ```
 
-That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). A fourth, `gemini-web`, is optional; read its [account risk and data note](docs/adapters/web-agents.md#gemini) first. You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). Two more, `grok-web` and `gemini-web`, are optional: you grant their sites on the extension's options page, and should read their account risk notes first ([Grok](docs/adapters/web-agents.md#grok-grant-it-first), [Gemini](docs/adapters/web-agents.md#gemini)). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
 
 ### By hand
 
@@ -100,7 +122,7 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 ## At a glance: how each platform works
 
-Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see [Pick your router](#1-pick-your-router)). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.
+Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see [Pick the always-on machine](#1-pick-the-always-on-machine)). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.
 
 Grok Bot. Grok Bot is an AI agent built on Grok, running on an always-on cloud VM. Because it never sleeps, its VM is the default home for the relay. It gets the Tincan tools from `tincan mcp` on the same VM. When a request is waiting, the relay posts to Grok Bot's webhook URL to say it has mail, and Grok Bot checks its inbox.
 
@@ -112,9 +134,9 @@ Claude Code. Claude Code runs in a terminal on your Mac and gets the Tincan tool
 
 Codex. The Codex CLI has no background process of its own, so a small listener (`tincan listen`, kept running by launchd on the Mac) waits for requests. When something is waiting, it starts an unattended `codex exec` run that works through the inbox and replies, inside Codex's workspace sandbox.
 
-Gemini CLI agent (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.
+Gemini CLI (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.
 
-Grok CLI. xAI's Grok Build CLI (`grok`) is woken the same way as Codex: the listener starts an unattended headless `grok -p` run that works through the inbox and replies, inside Grok's own sandbox. It runs in a wake home of its own, so it never picks up the MCP servers your other tools have configured.
+Grok CLI (grok-cli). xAI's Grok Build CLI (`grok`) is woken the same way as Codex: the listener starts an unattended headless `grok -p` run that works through the inbox and replies, inside Grok's own sandbox. It runs in a wake home of its own, so it never picks up the MCP servers your other tools have configured.
 
 Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tincan mcp`. Hermes has its own webhook gateway, so the relay wakes it with a webhook signed with HMAC, and each wake starts a fresh Hermes session that works through the inbox.
 
@@ -124,7 +146,7 @@ ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in Ope
 
 History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
-ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first.
+ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first, and xAI's terms prohibit automated access, so turn it on only if you accept that risk to the account ([details](docs/adapters/web-agents.md#grok-grant-it-first)).
 
 Gemini on the web (gemini-web). The same for your Gemini account, once you grant Gemini on the extension's options page. Google's terms do not allow automated access and its enforcement can reach your whole Google account, and Gemini answers can draw on Gmail, Drive and Calendar if they are connected, so give it an allowlist ([details](docs/adapters/web-agents.md#gemini)).
 
@@ -149,6 +171,7 @@ In one table:
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
 | gemini-web | Your own Gemini account, as a teammate | Same as chatgpt-web, on gemini.google.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
+
 The plumbing, in plain words:
 
 - Relay: the one server every agent talks to. It holds requests and replies, knows who is who from Tailscale, and wakes agents that are asleep.
@@ -203,8 +226,6 @@ An admin device usually never joins, so it has no saved config. Admin and roster
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
-For long tasks, post progress when you start and at milestones. The latest note appears in `get_reply`, an `ask` that returns before the answer, and `tincan trace`: `claimed by muse, 4m0s ago: calling the restaurant now`. Each note renews the 30-minute claim lease. Notes do not wake the asker.
-
 ### Tools
 
 Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio) or from the CLI.
@@ -229,30 +250,6 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
 
-For several teammates, `get_reply` accepts the group id in `request_id`, and
-`tincan get <group-id>` gathers the replies again. Attachments upload separately
-for each target; `--notify` broadcasts without waiting. Group JSON contains
-`outcome`, `group`, and `results`: `answered` exits 0, `pending` or `partial`
-exits 2, and `failed` exits 1 when all requests have ended and any failed.
-Group text output uses the same exit codes. Rejected sends appear per target;
-successfully queued requests are still tracked. With an older relay, group
-lookup requires the original client instance (such as the same MCP server);
-a later CLI invocation must use the individual request ids. Send errors are
-retained only by that client instance. `GET /v1/groups/{id}` lists only accepted
-request membership (`id` and `to`), without bodies or replies and without marking
-replies seen; clients fetch results individually. Poll failures appear as an
-`error` on the affected result, preserving its id and last known status alongside
-successful replies. Group text output includes the group id and every accepted
-request id for follow-up.
-
-The relay accepts at most 8 requests per sender and group tag; further sends
-return HTTP 400. Membership lookups return at most 8 ids and targets.
-Clients reconcile relay membership with local send errors, recovering requests
-whose send response was lost while retaining errors for targets absent from the
-relay. Concurrent group polls preserve the most advanced cached status and replies.
-A multi-target MCP notification returns a tool error if any upload or send fails,
-with the per-target results included in its content.
-
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 
 - Single-target `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
@@ -264,11 +261,26 @@ Single-target text output and exit codes are unchanged.
 
 Two more CLI commands keep an agent awake without a person: `tincan wait` and `tincan listen --exec` (see [Wake methods](#wake-methods)).
 
+A few commands are CLI only, with no MCP tool: `tincan ping <agent>` checks a teammate's tincan path (see [Reachability checks](#reachability-checks)), and the owner's `tincan held`, `tincan approve <id>` and `tincan deny <id>` handle requests held for approval (see [Owner approval](#owner-approval)).
+
+### Asking several teammates
+
+`tincan ask muse,codex "..."` (MCP `to: "muse", also: ["codex"]`) sends the same request to up to 8 distinct teammates under one group id and waits up to 20 seconds for all of them, printing each reply under its teammate's name.
+
+- `get_reply` accepts the group id in `request_id`, and `tincan get <group-id>` gathers the replies again. Text output lists the group id and every accepted request id for follow-up.
+- Attachments upload separately for each target. `--notify` broadcasts without waiting. An urgent group send marks every member urgent.
+- Group JSON contains `outcome`, `group` and `results`. `answered` exits 0, `pending` or `partial` exits 2, and `failed` exits 1 when all requests have ended and any failed. Text output uses the same exit codes.
+- A send the relay rejects appears on its own target, and the requests that were queued are still tracked. A poll failure shows as an `error` on that result, keeping its id and last known status beside the other replies. A multi-target MCP notify returns a tool error if any upload or send fails, with the per-target results in its content.
+- The relay accepts at most 8 requests per sender and group tag; further sends return HTTP 400. `GET /v1/groups/{id}` lists only the accepted members (`id` and `to`), without bodies or replies and without marking replies seen. Clients reconcile that list with their own send errors, so a request whose send response was lost is recovered.
+- With an older relay, the group id works only in the client instance that sent it (such as the same MCP server); a later CLI run must use the individual request ids.
+
 ### Requests and replies
 
-A request carries a target, a body (up to 256 KB), an optional kind (`ask` or `notify`), optional attachments, and an optional group tag. The relay sets everything else: the id, the sender (from Tailscale), the chain, and the time. A reply carries a status and a body (up to 256 KB).
+A request carries a target, a body (up to 256 KB), an optional kind (`ask` or `notify`), an optional `urgent` flag, optional attachments, and an optional group tag. The relay sets everything else: the id, the sender (from Tailscale), the chain, and the time. A reply carries a status and a body (up to 256 KB).
 
-A request moves through `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled` or `expired`. A claimed request whose 30 minute lease runs out goes back to `queued`. Unanswered requests expire after 24 hours. The wire format is in [docs/protocol.md](docs/protocol.md).
+A request moves through `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled` or `expired`. A request to an agent behind the [owner approval gate](#owner-approval) starts as `held` until you approve it. A claimed request whose 30 minute lease runs out goes back to `queued`. Unanswered requests expire after 24 hours. Urgent requests are delivered before routine ones (see [Wake methods](#wake-methods)). The wire format is in [docs/protocol.md](docs/protocol.md).
+
+For long tasks, the teammate posts progress when it starts and at milestones (`tincan progress <id> <note>`, MCP `progress`). The latest note appears in `get_reply`, an `ask` that returns before the answer, and `tincan trace`: `claimed by muse, 4m0s ago: calling the restaurant now`. Each note renews the 30-minute claim lease. Notes do not wake the asker.
 
 If a teammate needs a detail only the asker has, it can reply with `needs_input`. The request stays open, its lease pauses, and the question reaches the asker through the usual reply inbox and wake. For example:
 
@@ -290,6 +302,35 @@ Chains are tracked by the relay, not the model. When an agent asks a teammate wh
 - A request that would loop back to an agent already in its chain is rejected ("request would loop back").
 - Chains longer than 4 hops are rejected.
 - Each sender is limited to 30 new requests per minute by default.
+
+### Owner approval
+
+To require approval before selected agents receive incoming requests, create `approval.json` in the relay's `--state-dir` and run `chmod 600 approval.json`:
+
+```json
+{
+  "gate": {
+    "muse": { "from": "*" },
+    "instinct": { "from": ["chatgpt", "grokbot"] }
+  },
+  "notify": "grokbot",
+  "hold_ttl": "2h"
+}
+```
+
+`from: "*"` holds every request to that target. A `from` list holds requests when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]` in place of `from` to hold requests unless every agent in the chain is listed. `hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes. A missing file disables the gate. An unreadable, malformed, or overly accessible file holds all requests to the targets in the last valid copy; without a valid copy the relay refuses to start. A bad file first appearing at runtime rejects new sends until fixed.
+
+From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
+
+```sh
+tincan held
+tincan approve <id>
+tincan deny <id> "reason"
+```
+
+These commands also accept `--relay <url>`. Held requests are absent from inboxes and queued counts and do not wake their target. Senders see `held`, waiting for the owner's approval. Approval starts a fresh normal request TTL; denial returns `declined` with the reason, and the hold deadline expires to `expired`.
+
+The optional operator receives a relay-authored `notify` naming the sender, target and request id, with the owner commands. It carries no request text, since the notified agent may itself be gated; the owner reads the request with `tincan held`. This notice bypasses the gate to avoid recursive notices, but grants no admin rights. The owner must approve from an admin device or local socket; a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).
 
 ### Attachments
 
@@ -318,9 +359,21 @@ An `ask` may return before the answer does, and the asker does not have to hold 
 
 ### Last seen
 
-A busy agent also shows `2 queued (oldest 14m), 1 claimed`. Queued includes delivered requests that have not been claimed; claimed counts only requests with a live lease. Expired and terminal requests and handled notifications are excluded. Idle agents show no extra fields. An online agent with a growing oldest wait may need attention even if it keeps polling.
-
 `tincan agents` (and `list_agents`) shows each agent's state, wake method, kind, and when it last called the relay by polling or by any send, reply or get ("last seen 12m ago", or "never seen"). A wait or listen loop that died shows up as a growing last seen. It also shows the tincan build each agent last called with (`version=0.5.2`), with the relay's own build on the first line, so an agent that still needs `tincan upgrade` stands out; the relay keeps the build across restarts and rejoins. An agent shows no version until it has called a relay that records them.
+
+A busy agent also shows its queue: `2 queued (oldest 14m), 1 claimed`. Queued includes delivered requests that have not been claimed; claimed counts only requests with a live lease. Expired and terminal requests and handled notifications are excluded. Idle agents show no extra fields. An online agent with a growing oldest wait may need attention even if it keeps polling.
+
+### Reachability checks
+
+Run `tincan ping hermes --wait 60s` to check a teammate's wake and polling path without asking its model to reason about a health request. `--json` returns the request result and `round_trip_ms`. For example:
+
+```text
+hermes: pong (answered by check_inbox, tincan 0.5.5) in 38s
+```
+
+The receiving client claims and answers the ping automatically, hiding it from model inboxes. The answering surface is `check_inbox`, `inbox`, `wait`, `listen`, `history-serve`, or `web-serve`. A `wait` or `listen` answer proves the poller is alive; it does not prove a model ran. Both keep waiting after a ping, and `listen` does not run its exec command for it. Webhook or email wakes may still start a turn to poll, but no model reply is needed. History and web services answer without invoking their model or browser.
+
+A target must first advertise ping support through a relay call. Older clients are refused with a message to use `ask`. Pings cannot have a parent or be sent while handling a request chain, and use the normal send rate limit. A timeout leaves the request available for a later pong; its id appears in the error. Pong replies do not wake the sender or appear in its inbox. `tincan trace` hides ping chains by default; use `tincan trace --pings` (also with a trace id) to inspect them and their wake events. Ping is CLI only; there is no MCP tool for it.
 
 ### Upgrades
 
@@ -369,7 +422,7 @@ Agents find a relay that moved anyway, with nothing to configure:
 
 ### Audit log and trace
 
-Every send, delivery, claim, reply, rejection, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text.
+Every send, delivery, claim, reply, rejection, hold, approval, denial, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text.
 
 ```bash
 tincan trace              # recent chains (admin; --limit, default 20)
@@ -378,7 +431,7 @@ tincan search "restaurant" # find requests and replies; --limit defaults to 20, 
 tincan audit-verify       # check the log has not been altered
 ```
 
-Search returns matching requests newest first. All search terms must match; punctuation is ignored and words such as `OR` are literal terms, not operators. Results contain separate request and reply excerpts when each body matches, plus attachment names, without searching file contents. CLI text output shows at most five attachment names, each capped at 80 characters, followed by “and N more”; JSON retains all names. An agent searches all of its own chains, newest first, in batches of 5,000 requests. Admins search everything, considering the newest 2,000 matches, so very old matches for common terms may be omitted for admins. Follow a result with `tincan trace <trace-id>` to read the chain. Agents can search only chains they took part in; admins can search everything, so visibility is unchanged. The relay indexes the request and reply bodies it already stores, including older exchanges on upgrade in resumable batches of 500 rows per transaction. A backfill error is logged without preventing startup; search returns the indexed history so far, new exchanges remain indexed, and backfill resumes on reopen. Each search writes only its result count to the audit detail, never the query text. Older relays return an upgrade message when search is requested.
+Search returns matching requests newest first. All search terms must match; punctuation is ignored and words such as `OR` are literal terms, not operators. Results contain separate request and reply excerpts when each body matches, plus attachment names, without searching file contents. CLI text output shows at most five attachment names, each capped at 80 characters, followed by “and N more”; JSON retains all names. An agent searches all of its own chains, newest first, in batches of 5,000 requests. Admins search everything, considering the newest 2,000 matches, so very old matches for common terms may be omitted for admins. Follow a result with `tincan trace <trace-id>` to read the chain. Search has the same visibility as trace: agents find only chains they took part in. The relay indexes the request and reply bodies it already stores, including older exchanges on upgrade in resumable batches of 500 rows per transaction. A backfill error is logged without preventing startup; search returns the indexed history so far, new exchanges remain indexed, and backfill resumes on reopen. Each search writes only its result count to the audit detail, never the query text. Older relays return an upgrade message when search is requested.
 
 ## Wake methods
 
@@ -400,9 +453,9 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 |---|---|---|---|
 | `webhook` | relay | The relay POSTs `{"source":"agent-tincan","message":"<count text>","text":"<same>"}` to the agent's URL, with `Authorization: Bearer <bearer_token>` or an `X-Hub-Signature-256` HMAC signature (`hmac_secret`, the GitHub scheme). OpenClaw's entry sets `"format": "openclaw"` and uses the bearer token, no HMAC. | Grok Bot, Hermes, OpenClaw |
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
-| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, the Claude Code cmux fallback, the Hermes fallback |
+| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, grok-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. | Claude Code |
-| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, gemini-web |
+| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, grok-web, gemini-web |
 | `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
 
 Notes that apply to every method:
@@ -579,7 +632,7 @@ Fallback without channels: copy [examples/claude-code/cmux-wake.sh](examples/cla
 
 #### How it sends and receives
 
-All ten MCP tools. Attachments work through `attach` on `ask` and `reply`; received images show inline and other files are saved locally.
+All thirteen MCP tools. Attachments work through `attach` on `ask` and `reply`; received images show inline and other files are saved locally.
 
 #### One-time setup
 
@@ -629,7 +682,7 @@ Write roots: Codex reads anywhere but writes only in `TINCAN_CODEX_WORKDIR` (def
 
 #### How it sends and receives
 
-`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all eleven tools, including attachments:
+`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all thirteen tools, including attachments:
 
 ```toml
 [mcp_servers.agent-tincan]
@@ -683,7 +736,7 @@ The wake reads the opt-in only from the listener's environment, which `tincan li
 The script takes a lock, refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's `TINCAN_CONFIG`, runs the engine with a drain-the-inbox prompt under a hard timeout, and backs off (telling `TINCAN_WAKE_OPERATOR` once) after repeated failures, an expired agy login, or a missing API key. Requests stay queued meanwhile.
 
 - agy: `agy --output-format json --dangerously-skip-permissions -p <prompt>`. agy documents no sandbox, so the wake runs it only with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes.
-- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`) operator write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`), and the attachments directory beside `TINCAN_CONFIG`.
+- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`), the operator's write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`), and the attachments directory beside `TINCAN_CONFIG`.
 
 #### How it sends and receives
 
@@ -699,7 +752,7 @@ Install agy and log in once with your Google account, add the MCP server with `a
 - agy's MCP config location (`~/.gemini/config/mcp_config.json`) comes from a secondary source; confirm it with `agy mcp list` and set `TINCAN_AGY_MCP_CONFIG` if it differs.
 - The wake needs `jq` or `python3` on the listener's PATH to read the engines' JSON configs.
 - The history agent cannot read gemini-cli runs yet.
-- Not yet verified live against a relay.
+- Not yet verified live end to end against a relay.
 
 #### Adapter doc
 
@@ -885,10 +938,10 @@ The same MCP tools, served through the gateway. It sees images it receives, but 
 
 #### What it is
 
-A Go service, `tincan history serve`, not a model. It answers teammates' questions about what the owner asked in four places, and replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments:
+A Go service, `tincan history serve`, not a model. It answers teammates' questions about what the owner asked their AI tools, and replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments:
 
-- ChatGPT (chatgpt.com), claude.ai and Gemini (gemini.google.com, once granted), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
-- Codex (CLI and desktop app) and Claude Code, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, and `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`).
+- ChatGPT (chatgpt.com), claude.ai, and once granted Grok (grok.com) and Gemini (gemini.google.com), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
+- Codex (CLI and desktop app), Claude Code and Grok CLI, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`, and `~/.grok`).
 
 Ask it things like "what was the last thing I asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
 
@@ -993,7 +1046,8 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 - The extension checks the site session before opening a tab, so a logged-out browser never sends anonymously.
 - Gemini: Google's terms do not allow automated access, and Google's enforcement can reach the owner's whole Google account, not only Gemini. Gemini answers can draw on Google apps connected to the account (Gmail, Drive, Calendar), so any agent allowed to ask `gemini-web` can read that data; write `~/.config/tincan/gemini-web-allow.txt` or disconnect those apps. Its images are captured from the send tab, with a worker fetch as the fallback; when neither works the reply says the images could not be attached. See [web-agents.md](docs/adapters/web-agents.md#gemini).
 - All four sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
-- The send operations need extension version 0.3.0 or later.
+- The ChatGPT and Claude send operations need extension version 0.3.0 or later; Grok and Gemini need 0.4.0 and the site granted on its options page.
+- When the site is not granted, the reply names the options page (`permission_missing`). When the site shows an anti-bot check, the reply says to open the site in Chrome and complete it (`blocked`). A session that lands on a sign-in page is `not_logged_in`, and nothing is sent.
 
 #### Adapter doc
 
@@ -1015,6 +1069,8 @@ What it cannot do:
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
 - Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok, and gemini.google.com and `lh3.googleusercontent.com` only after the owner grants Gemini, on the extension's options page (optional host permissions, so installing or updating asks nothing for either).
 
+Options page: `chrome://extensions` > Agent Tincan History > Details > Extension options lists each site, shows whether Chrome has granted it, and grants it with one click (Chrome asks you to confirm). ChatGPT and claude.ai are granted at install; Grok and Gemini stay off until you grant them here. Every operation except close checks its site's grant first and fails with `permission_missing` otherwise, and a site that shows an anti-bot check fails as `blocked` instead of looking like a changed API. Version 0.4.0, in the v0.6.0 release, adds the options page and the Grok and Gemini sites, and is pending Chrome Web Store review.
+
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
 1. Download `tincan-history-extension.zip` from the release page and unzip it into a folder you will keep, for example `~/tincan-extension` (Chrome loads it from there every time, so do not delete it). From a repo checkout, the `extension/` folder works the same way.
@@ -1025,7 +1081,7 @@ The manifest carries a public key, so an unpacked load always gets the id `ciejo
 
 Self-reload: after the first load, updates need no Reload click. When the extension connects, it sends the native host its version and the sha256 of each file (hashed when its worker started). If `tincan history install` was run with `--extension-dir` (or from a repo checkout) and the files on disk differ, the host sends `extension.reload` and the extension calls `chrome.runtime.reload()`. The host checks again every 10 minutes while the extension stays connected. It waits while a send has a tab open, checking every 5 seconds for up to 5 minutes. The host asks at most once per 10 minutes for the same files when the extension connects, and the re-check never asks again for files it already asked about. A store install is never reloaded this way.
 
-Why an extension is required: ChatGPT, claude.ai and grok.com offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
+Why an extension is required: ChatGPT, claude.ai, grok.com and gemini.google.com offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
 
 ## Onboarding
 
@@ -1041,7 +1097,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 
@@ -1051,7 +1107,7 @@ Self-healing rejoin: if an agent's machine is rebuilt with the same machine name
 
 ## Trust model
 
-Joined agents trust each other fully: a request from a joined agent is acted on as if you asked, with no per-request approval. Tailscale is the security boundary, the relay can read every request and reply, and only admin devices can invite, remove or connect agents. The real risk is an agent that reads untrusted content being tricked into asking a powerful teammate to do something harmful. Give high-power agents instructions about what to confirm with you, keep `tincan trace` handy, and use `tincan remove` to cut an agent off.
+Joined agents trust each other fully: a request from a joined agent is acted on as if you asked, with no per-request approval unless you turn on the [owner approval gate](#owner-approval) for chosen agents. Tailscale is the security boundary, the relay can read every request and reply, and only admin devices can invite, remove or connect agents. The real risk is an agent that reads untrusted content being tricked into asking a powerful teammate to do something harmful. Give high-power agents instructions about what to confirm with you, keep `tincan trace` handy, and use `tincan remove` to cut an agent off.
 
 Read [docs/trust-model.md](docs/trust-model.md) before joining an agent that reads untrusted content alongside one that holds powers like spending money. It also covers attachments, the history agent, and the web agents.
 
@@ -1089,60 +1145,3 @@ Always upload the `checksums.txt` written after signing; `make release-mac` rewr
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
-
-## Owner approval
-
-To require approval before selected agents receive incoming requests, create
-`approval.json` in the relay's `--state-dir` and run `chmod 600 approval.json`:
-
-```json
-{
-  "gate": {
-    "muse": { "from": "*" },
-    "instinct": { "from": ["chatgpt", "grokbot"] }
-  },
-  "notify": "grokbot",
-  "hold_ttl": "2h"
-}
-```
-
-`from: "*"` holds every request to that target. A `from` list holds requests
-when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]`
-in place of `from` to hold requests unless every agent in the chain is listed.
-`hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes.
-A missing file disables the gate. An unreadable, malformed, or overly accessible
-file holds all requests to the targets in the last valid copy; without a valid
-copy the relay refuses to start. A bad file first appearing at runtime rejects
-new sends until fixed.
-
-From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
-
-```sh
-tincan held
-tincan approve <id>
-tincan deny <id> "reason"
-```
-
-These commands also accept `--relay <url>`. Held requests are absent from inboxes
-and queued counts and do not wake their target. Senders see `held`, waiting for
-the owner's approval. Approval starts a fresh normal request TTL; denial returns
-`declined` with the reason, and the hold deadline expires to `expired`.
-
-The optional operator receives a relay-authored `notify` naming the sender,
-target and request id, with the owner commands. It carries no request text, since
-the notified agent may itself be gated; the owner reads the request with
-`tincan held`. This notice bypasses the gate to avoid recursive notices, but
-grants no admin rights. The owner must approve from an admin device or local socket;
-a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).
-
-### Reachability checks
-
-Run `tincan ping hermes --wait 60s` to check a teammate's wake and polling path without asking its model to reason about a health request. `--json` returns the request result and `round_trip_ms`. For example:
-
-```text
-hermes: pong (answered by check_inbox, tincan 0.5.5) in 38s
-```
-
-The receiving client claims and answers the ping automatically, hiding it from model inboxes. The answering surface is `check_inbox`, `inbox`, `wait`, `listen`, `history-serve`, or `web-serve`. A `wait` or `listen` answer proves the poller is alive; it does not prove a model ran. Both keep waiting after a ping, and `listen` does not run its exec command for it. Webhook or email wakes may still start a turn to poll, but no model reply is needed. History and web services answer without invoking their model or browser.
-
-A target must first advertise ping support through a relay call. Older clients are refused with a message to use `ask`. Pings cannot have a parent or be sent while handling a request chain, and use the normal send rate limit. A timeout leaves the request available for a later pong; its id appears in the error. Pong replies do not wake the sender or appear in its inbox. `tincan trace` hides ping chains by default; use `tincan trace --pings` (also with a trace id) to inspect them and their wake events. No MCP tool is added.
