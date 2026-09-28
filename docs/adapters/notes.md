@@ -69,7 +69,7 @@ If an add does expire on the relay, the asker gets the `expired` status. It may 
 
 ## Install
 
-Upgrade the relay to this release first, so adds wait 30 days. Then, on an admin device and the Agent Notes Mac:
+Upgrade the relay to this release first (`tincan relay-upgrade`, see the [quick start](../quickstart.md)), so adds wait 30 days. Then, on an admin device and the Agent Notes Mac:
 
 ```bash
 tincan invite notes --kind notes                                           # on an admin device

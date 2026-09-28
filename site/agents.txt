@@ -350,8 +350,10 @@ days and is saved when the Mac returns. It needs an Agent Notes build whose
 helper supports `create --idempotency-key`; `tincan notes doctor` says
 helper_too_old for an older one.
 
-D1. Upgrade the relay to this release first: on the relay host, run the
-    install line above again, then restart the relay service. An older relay
+D1. Upgrade the relay to this release first. From an admin device, run
+    `tincan relay-upgrade --relay http://tincan-relay` (add `--from-github
+    <tag>` when the relay has `--release-url`), or on the relay host run the
+    install line above again and restart the relay service. An older relay
     drops requests to notes after 24 hours.
 D2. On the relay host or an admin device, get an invite code for the agent
     named notes (the service refuses any other name):
