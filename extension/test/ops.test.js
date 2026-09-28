@@ -379,7 +379,7 @@ test('worker code has no dynamic code execution', () => {
   const injected = [...send.matchAll(/inject\((?:tab\.id|entry\[0\]), (\w+),/g)].map((m) => m[1]);
   assert.equal(injected.length, [...send.matchAll(/await inject\(/g)].length, 'every injection is listed');
   for (const f of injected) {
-    assert.ok(['pageProbe', 'pageFill', 'pageSubmit', 'pageFetchImage'].includes(f), f);
+    assert.ok(['pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage'].includes(f), f);
   }
 });
 

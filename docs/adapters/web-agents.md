@@ -142,15 +142,16 @@ On every site, a send tab the site sends to another host is not typed into: Goog
 
 | Role | www.perplexity.ai |
 | --- | --- |
-| message box | `div#ask-input[contenteditable="true"]` (seen live), `#ask-input[contenteditable="true"]`, `textarea#ask-input` |
-| send button (appears once there is text) | `button[aria-label="Submit"]`, `button[data-testid="submit-button"]`, `button[aria-label*="Submit" i]` (else Enter) |
+| message box | `div#ask-input[contenteditable="true"]` (checked live; text lands only through `insertText`, not synthetic key events), `#ask-input[contenteditable="true"]`, `textarea#ask-input` |
+| send button (appears once there is text) | `button[aria-label="Submit"]` (checked live; a visible match is preferred), `button[data-testid="submit-button"]`, `button[aria-label*="Submit" i]` (else Enter) |
+| startup dialogs (closed before typing) | "Maybe later" inside `[role="dialog"]` or `[role="alertdialog"]` (the promo); "Decline optional" inside a dialog, `[role="region"]` or a cookie or consent container (the cookie banner). Only these exact button texts are clicked, never "Get started" or "Got it". |
 | answering | `button[aria-label*="Stop" i]`, `button[data-testid="stop-generating-response-button"]` |
 | assistant messages | `[id^="markdown-content-"]` |
 | user messages | `[data-testid="user-query"]`, `h1[class*="query"]` |
 | logged out | `a[href^="/auth/signin"]`, `a[href^="/login"]`, `button[data-testid="login-button"]`, paths `/auth/signin`, `/auth/signup`, `/login` |
 | anti-bot page | as grok.com |
 
-Only the message box was seen live so far; the other Perplexity selectors are unconfirmed until a live round trip. A new chat's send is confirmed by the address gaining `/search/<slug>`, which does not depend on them.
+A live send in the owner's tab confirmed the message box, `insertText`, the Submit button and the new address `https://www.perplexity.ai/search/<uuid>`. The stop, user, assistant and login selectors are still unconfirmed; a new chat's send is confirmed by the address gaining `/search/<slug>`, which does not depend on them.
 
 The text is entered by typing (`document.execCommand('insertText')`), then a paste event, then setting it directly, and checked after each attempt. Before each click the page is probed again, and an existing conversation's address is checked again. The send counts as taken when, compared with that probe, a new chat's address gains a conversation id, or a new user or assistant message or an answering marker appears. The page is never used to decide that an answer is finished.
 

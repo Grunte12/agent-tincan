@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { SELECTORS, SITES, createSender, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
+import { SELECTORS, SITES, createSender, pageDismiss, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
 import { createRunner, errorFrame, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
 // ---- A fake DOM, just enough for the page functions.
@@ -43,7 +43,7 @@ class El {
     return this.text;
   }
   set textContent(v) {
-    if (!this.page.opts.readOnly) this.text = String(v);
+    if (!this.page.opts.readOnly && !this.page.trapped()) this.text = String(v);
   }
   focus() {
     this.page.doc.activeElement = this;
@@ -98,6 +98,32 @@ class FakeSite {
     this.sendBtn = new El(this, 'BUTTON');
     this.sendBtn.onclick = () => this.submit();
     if (this.opts.sendDisabled) this.sendBtn.disabled = true;
+    // hiddenSubmit: a hidden button matching the send selector comes first
+    // in the DOM; clicking it does nothing.
+    this.hiddenClicks = 0;
+    this.hiddenBtn = new El(this, 'BUTTON');
+    this.hiddenBtn.checkVisibility = () => false;
+    this.hiddenBtn.onclick = () => this.hiddenClicks++;
+    // dialogs: [{within, buttons}] overlays open on load; each is found by
+    // its within selector, and clicking any of its buttons closes it.
+    // While one is open the composer takes no text (a focus trap).
+    this.clicks = [];
+    this.dialogs = (this.opts.dialogs || []).map((d) => {
+      const box = { within: d.within, open: true, el: new El(this, 'DIV') };
+      const btns = d.buttons.map((t) => {
+        const b = new El(this, 'BUTTON', t);
+        b.onclick = () => {
+          this.clicks.push(t);
+          box.open = false;
+        };
+        return b;
+      });
+      box.el.querySelectorAll = (q) => (q === 'button' ? btns : []);
+      return box;
+    });
+  }
+  trapped() {
+    return Boolean(this.dialogs) && this.dialogs.some((d) => d.open);
   }
   get location() {
     const u = new URL(this.href);
@@ -116,6 +142,7 @@ class FakeSite {
         // sendAfterText: the button exists only while there is text
         // (grok.com).
         if (this.opts.sendAfterText && !this.composer.text) break;
+        if (this.opts.hiddenSubmit) els.push(this.hiddenBtn);
         if (!this.opts.noSendButton) els.push(this.sendBtn);
         break;
       case 'stop':
@@ -142,6 +169,8 @@ class FakeSite {
     return s[r] && s[r][this.match[r]] ? els : [];
   }
   lookup(sel) {
+    const open = this.dialogs.filter((d) => d.open && d.within === sel).map((d) => d.el);
+    if (open.length) return open;
     for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked']) {
       if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
@@ -154,7 +183,7 @@ class FakeSite {
       querySelector: (s) => page.lookup(s)[0] || null,
       querySelectorAll: (s) => page.lookup(s),
       execCommand(cmd, _ui, val) {
-        if (!page.opts.execWorks || page.opts.readOnly) return false;
+        if (!page.opts.execWorks || page.opts.readOnly || page.trapped()) return false;
         const t = this.activeElement;
         if (t !== page.composer) return false;
         if (cmd === 'insertText') {
@@ -299,7 +328,7 @@ function sender(fc, extra = {}) {
 // world, with the message only ever as an argument.
 function assertOnlyFixedScripts(log) {
   for (const inj of log.scripts) {
-    assert.ok([pageProbe, pageFill, pageSubmit].includes(inj.func), 'unknown injected function');
+    assert.ok([pageProbe, pageDismiss, pageFill, pageSubmit].includes(inj.func), 'unknown injected function');
     assert.equal(inj.world, 'ISOLATED');
     assert.equal(inj.code, undefined);
     assert.equal(inj.files, undefined);
@@ -977,6 +1006,67 @@ test('perplexity new chat: opens www.perplexity.ai in a background tab, types in
   assert.deepEqual(await s.close('grok', r.conversation_id), { closed: 0 }, 'close is per site');
   assert.deepEqual(await s.close('perplexity', r.conversation_id), { closed: 1 });
   assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('perplexity startup dialogs: Maybe later on the promo and Decline optional on the cookie banner, before typing; nothing else clicked', async () => {
+  const dialogs = [
+    { within: '[role="dialog"]', buttons: ['Get started', 'Maybe later'] },
+    { within: '[class*="cookie" i]', buttons: ['Got it', 'Decline optional'] },
+  ];
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { dialogs, sendAfterText: true, neverFinish: true })));
+  const r = await sender(fc).send('perplexity', { message: 'What is the capital of France?', new_chat: true });
+  assert.deepEqual(page.clicks, ['Maybe later', 'Decline optional']);
+  assert.deepEqual(page.submitted, ['What is the capital of France?']);
+  assert.equal(r.conversation_id, page.newID);
+  assertOnlyFixedScripts(fc.log);
+  const order = fc.log.scripts.map((x) => x.func);
+  assert.ok(order.indexOf(pageDismiss) < order.indexOf(pageFill), 'dialogs close before typing');
+  // Two passes at most here: one clicked, the next found nothing.
+  assert.equal(order.filter((f) => f === pageDismiss).length, 2);
+
+  // A dialog with neither button is left alone; the trapped composer then
+  // fails the send before any click.
+  let page2;
+  const fc2 = fakeChrome((url) => (page2 = new FakeSite('perplexity', url, { dialogs: [{ within: '[role="dialog"]', buttons: ['Get started', 'Close'] }] })));
+  await assert.rejects(sender(fc2).send('perplexity', { message: 'x' }), (e) => e.code === 'send_failed');
+  assert.deepEqual(page2.clicks, []);
+  assert.deepEqual(page2.submitted, []);
+
+  // Other sites have no dismiss list, so pageDismiss is never injected.
+  const fc3 = fakeChrome((url) => new FakeSite('chatgpt', url, { neverFinish: true }));
+  await sender(fc3).send('chatgpt', { message: 'hi' });
+  assert.equal(fc3.log.scripts.filter((x) => x.func === pageDismiss).length, 0);
+});
+
+test('pageDismiss clicks only exact button texts inside the listed containers', () => {
+  const clicks = [];
+  const btn = (t, disabled = false) => ({ innerText: t, disabled, click: () => clicks.push(t) });
+  const box = (btns) => ({ querySelectorAll: () => btns });
+  const doc = {
+    '[role="dialog"]': [box([btn('Get started'), btn('Maybe later now'), btn(' Maybe later ', true)])],
+    '[role="region"]': [box([btn('Got it'), btn('Decline optional')])],
+    body: [box([btn('Maybe later')])],
+  };
+  const saved = globalThis.document;
+  globalThis.document = { querySelectorAll: (q) => doc[q] || [] };
+  try {
+    assert.deepEqual(pageDismiss(SELECTORS.perplexity), { clicked: ['Decline optional'] });
+    assert.deepEqual(clicks, ['Decline optional']);
+    assert.deepEqual(pageDismiss({}), { clicked: [] });
+  } finally {
+    globalThis.document = saved;
+  }
+});
+
+test('perplexity clicks the visible Submit button, not a hidden one that matches first', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { hiddenSubmit: true, neverFinish: true })));
+  const r = await sender(fc).send('perplexity', { message: 'visible only' });
+  assert.equal(page.hiddenClicks, 0);
+  assert.deepEqual(page.submitted, ['visible only']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(SELECTORS.perplexity.send[0], 'button[aria-label="Submit"]');
 });
 
 test('perplexity continues /search/<slug>; with no submit button it presses Enter', async () => {
