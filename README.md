@@ -1153,27 +1153,38 @@ make vet              # go vet ./...
 make extension-test   # node --test for the extension worker code (no dependencies)
 make extension        # dist/tincan-history-extension.zip
 make dist             # every release asset in dist/ (see below)
+make release VERSION=x.y.z NOTES=<file>   # the whole release (see below)
 ```
 
 `make build` builds one binary, for the machine you run it on. CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64, darwin/arm64 and darwin/amd64.
 
 Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm64`, `tincan_darwin_amd64` (Intel Mac), `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` (sha256 of the four binaries) and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
 
-Releases are cut by hand; CI does not publish them. From a clean checkout of the commit to release:
+Releases are cut on the maintainer's Mac; CI does not publish them. One command does the whole release from a clean checkout of `main`:
 
 ```bash
-git tag v0.7.0 && git push origin v0.7.0
-make release-mac # make dist (four static binaries, checksums.txt, extension zip in dist/), then sign and notarize the macOS binaries
-gh release create v0.7.0 --title v0.7.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
+make release VERSION=0.8.0 NOTES=release-notes.md DRY_RUN=1   # print every step, run none
+make release VERSION=0.8.0 NOTES=release-notes.md
 ```
 
-`make dist` stamps the version from `git describe`, so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
+It first checks that `VERSION` is `x.y.z` (or `x.y.z-rc1`, released as a prerelease), the notes file exists, the working tree is clean, `HEAD` is `main` on the remote, and the tag exists neither locally nor on the remote. Then, in order:
+
+1. `git tag -a vX -m vX`, locally only;
+2. `make dist`, `make sign-mac notarize-mac`, `make checksums`, `shasum -a 256 -c checksums.txt` in `dist/`, and `make store`;
+3. `tincan release-tools cws-upload --dry-run`, which checks the Chrome Web Store credentials and version before anything is public;
+4. `git push <remote> refs/tags/vX`;
+5. `gh release create vX --verify-tag --notes-file <notes>` with `checksums.txt`, the extension zip and the four binaries;
+6. `tincan release-tools cws-upload --publish` with the store zip ([docs/chrome-web-store.md](docs/chrome-web-store.md#updating-through-the-api)).
+
+If a step fails before the push, the local tag is deleted, so a rerun starts clean. The extension is versioned apart from tincan, so the store upload is skipped, and the release still succeeds, when `extension/manifest.json` is not newer than the store's version. Settings: `RELEASE_REMOTE` (default `origin`; a URL works, for a clone whose `origin` cannot push), `RELEASE_BRANCH` (default `main`; empty releases any commit), `SIGN=0` to skip macOS signing, `CWS=0` to skip the store.
+
+The steps also work one at a time. `make dist` stamps the version from `git describe` (or `VERSION=`), so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
 
 - `make sign-mac` signs each `dist/tincan_darwin_*` with `codesign --force --options runtime --timestamp` using `TINCAN_SIGN_IDENTITY` (default: the maintainer's Developer ID Application identity), then rewrites `checksums.txt`, since signing changes the bytes.
 - `make notarize-mac` zips each signed binary, submits it with `xcrun notarytool submit --keychain-profile "$TINCAN_NOTARY_PROFILE" --wait` (default profile `agentcookie-notary`), requires `Accepted`, and checks `spctl -a -vv -t install` reports `Notarized Developer ID`. A bare Mach-O binary cannot be stapled; Gatekeeper looks the ticket up online at first launch.
 - One-time notary setup: `xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>` with an app-specific password. The credentials live in the login keychain, never in the repo.
 
-Always upload the `checksums.txt` written after signing; `make release-mac` rewrites it last and checks it.
+Always upload the `checksums.txt` written after signing; `make release` and `make release-mac` rewrite it last and check it.
 
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
