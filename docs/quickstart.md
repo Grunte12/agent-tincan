@@ -148,7 +148,7 @@ On the relay host, keep a dist directory and start the relay with it:
 tincan relay --admin my-laptop --dist ~/tincan-dist
 ```
 
-For each release, the relay operator drops the raw binaries into that directory, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
+For each release, either run `tincan relay-upgrade --from-github v0.8.0` from your admin device (see below; the relay needs `--release-url`), which has the relay fetch the release into that directory itself, or drop the raw binaries into it by hand, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
 
 On each agent's machine:
 
@@ -160,3 +160,16 @@ tincan upgrade           # download, verify sha256, replace the binary
 `tincan upgrade` picks the build for its own platform, checks its sha256 against the relay's manifest, writes it next to the running binary, and renames it into place (a new file, so macOS never kills a signed binary rewritten in place). If the relay has no build for the platform or the checksum does not match, it stops with an error and leaves the old binary as it was. Afterwards, restart any long-running tincan processes (`tincan wait` or `tincan listen` loops, `tincan mcp` servers); they keep running the old build until then. `tincan upgrade` names each running `tincan mcp` still on the old build with its app's reload step (see [Upgrades](../README.md#upgrades)), and a running `tincan mcp` tells the agent in its next tool result once its binary has been replaced.
 
 `tincan upgrade` trusts the relay host. The checksum and the binary both come from the same relay, so the check protects against a corrupted or truncated download, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into `--dist`.
+
+### Upgrading the relay
+
+The relay upgrades itself from an admin device, so nobody needs a shell on the relay host:
+
+```bash
+tincan relay-upgrade --relay http://tincan-relay --from-github v0.8.0   # fetch the release into --dist, then install it
+tincan relay-upgrade --relay http://tincan-relay                        # install what is already in --dist
+```
+
+`--from-github` needs the relay started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it the relay makes no outbound download. The relay then downloads that release's four binaries and `checksums.txt` from there, checks each binary against that `checksums.txt`, and moves them into `--dist`, `VERSION` last. Then, either way, it checks its own platform's build against the dist `checksums.txt`, writes it next to its running binary, keeps the old one as `<binary>.<old version>`, renames the new one into place, replies with both versions, and restarts. By default it re-executes itself with the same arguments. If a supervisor restarts it, start the relay with `--upgrade-exit` and it exits with status 75 instead (with systemd, use `Restart=on-failure` or `Restart=always`). `tincan relay-upgrade` waits up to a minute for the relay to answer on the new build; `tincan agents` also names the relay's build on its first line.
+
+It refuses a release that is not newer (`--force` reinstalls), a missing build, a checksum mismatch, and a binary the relay user cannot replace, and changes nothing when it does. Self-upgrade needs the relay user to own its binary and the directory it is in; if you keep the binary root-owned, upgrade the relay by hand. Only admin devices and the relay's own admin socket can run it; agents get 403.

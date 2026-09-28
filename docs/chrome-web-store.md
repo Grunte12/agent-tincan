@@ -14,6 +14,27 @@ This writes `dist/tincan-history-extension-store.zip` and prints its sha256. It 
 
 The listing was submitted on September 24, 2026 as item `goldflchpojcjmifnljlfkgoahjgeajn` (publisher MVH). Each store upload needs a higher `version` in the manifest than the last one published. The v0.7.0 release uploads version 0.5.0, which adds `https://www.perplexity.ai/*`, `https://copilot.com/*` and `https://copilot.microsoft.com/*` as optional hosts (justifications below); like the other optional sites, they are granted from the options page, so the update asks users for nothing new.
 
+## Updating through the API
+
+After the first submission, `make release` uploads and publishes each new extension version through the Chrome Web Store API (v1.1): `GET items/<id>?projection=DRAFT` for the store's version, `PUT upload/chromewebstore/v1.1/items/<id>` with the store zip, then `POST items/<id>/publish`, each with the `x-goog-api-version: 2` header. A hidden release command does the calls:
+
+```bash
+go run ./cmd/tincan release-tools cws-upload dist/tincan-history-extension-store.zip --dry-run    # credentials and versions only
+go run ./cmd/tincan release-tools cws-upload dist/tincan-history-extension-store.zip --publish
+```
+
+The extension has its own version (`extension/manifest.json`), separate from tincan's. When the zip's version is not higher than the store's, cws-upload uploads and publishes nothing, says so and exits 0, so a release that did not touch the extension goes on. Bump the manifest version to ship an extension change. When the store reports the published version and the draft already holds the zip's version unpublished (a publish that failed earlier), cws-upload publishes that draft instead, after waiting for its upload to finish; a draft whose upload failed is uploaded again. A failed published-version lookup (other than the API not supporting it) stops the command rather than skip a draft that may be unpublished. `cws-upload --publish-only` publishes the current draft without uploading, for when the store does not report the published version.
+
+These are the only Google calls in tincan. The command is hidden and maintainer-only: no user-facing command reaches it, and it runs only when the maintainer runs it.
+
+One-time setup:
+
+1. In the Google Cloud console, in a project owned by the publisher account, enable the Chrome Web Store API and create an OAuth client of type Desktop app. Add the publisher account as a test user on the OAuth consent screen.
+2. Write `~/.config/tincan-release/cws-oauth.json` (or point `TINCAN_CWS_CREDENTIALS` elsewhere) with `client_id`, `client_secret` and `item_id` (`goldflchpojcjmifnljlfkgoahjgeajn`), `chmod 600` the file and `chmod 700` its directory. The tools refuse a file that anyone but you can read or write, or a directory others can open. It lives outside the repo; never commit it.
+3. Run `go run ./cmd/tincan release-tools cws-auth`. It prints and opens Google's consent page for the `chromewebstore` scope, catches the answer on `http://127.0.0.1:8765` (`--port` changes it), and saves the refresh token into the same file. Neither command prints the client secret, the refresh token or an access token.
+
+While the OAuth consent screen is in testing mode, Google's refresh tokens can expire after 7 days. When cws-upload reports `invalid_grant`, rerun cws-auth. `make release` runs the `--dry-run` check before it pushes the tag, so an expired token stops the release before anything is public.
+
 ## 2. Create the item
 
 1. Open the Chrome Web Store developer dashboard: https://chrome.google.com/webstore/devconsole (sign in with the publisher Google account; the one-time developer registration fee applies if the account is new).

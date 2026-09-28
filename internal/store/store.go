@@ -671,6 +671,26 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+// AgentsWithQueuedRequests returns every agent that has a live request
+// still waiting to be delivered.
+func (s *Store) AgentsWithQueuedRequests(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT to_agent FROM requests WHERE status = ? AND expires_at > ? ORDER BY to_agent`,
+		string(envelope.StatusQueued), s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // CountUrgentQueued returns how many of agent's queued requests are urgent.
 func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
 	var n int

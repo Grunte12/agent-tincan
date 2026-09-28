@@ -227,6 +227,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 - `--admin` lists the machine names allowed to invite and remove agents. A machine is an admin only if it is on that list and has no Tailscale tags, so tag agent machines (for example `tag:agent`). `--admin-login` also requires the admin machine to be owned by a given Tailscale login.
 - On the relay host itself, admin commands can use the local socket: `tincan invite muse --socket <state-dir>/admin.sock`. The relay prints the path at startup. The default state dir is `~/.config/tincan-relay` on Linux and `~/Library/Application Support/tincan-relay` on macOS; quote the macOS path, it has a space.
 - State (the database, `wake.json`, attachments, the audit log) lives in `--state-dir`. Run the relay as its own OS user, under systemd or launchd, so agents cannot read its state.
+- To restart or upgrade the relay, stop it with SIGTERM or SIGINT (`systemctl restart`, `launchctl kickstart -k`, `kill`, or Ctrl-C). Held long polls and get-reply waits answer "nothing yet" at once, so agents simply poll again once it is back. Calls still in flight get up to 10 seconds to finish, then the relay closes the store and exits; a relay still stuck 20 seconds after the signal logs the step it was on and exits anyway. A second SIGTERM or SIGINT exits at once. No SIGKILL is needed. Wakes scheduled but not yet sent are dropped on the way down, and the restarted relay schedules them again for every webhook or email agent that still has queued requests or unseen replies.
 
 The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway (see [ChatGPT](#chatgpt-through-the-oauth-mcp-gateway)).
 
@@ -413,6 +414,17 @@ tincan upgrade                                                  # agent: downloa
 ```
 
 The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
+
+The relay upgrades itself the same way, from an admin device, with no shell on the relay host:
+
+```bash
+tincan relay-upgrade --relay http://tincan-relay                       # install the release already in --dist
+tincan relay-upgrade --relay http://tincan-relay --from-github v0.8.0  # download that release into --dist first
+```
+
+The relay picks its own platform's build from `--dist`, checks its sha256 against the dist `checksums.txt`, writes it next to its running binary, keeps the old one as `<binary>.<old version>`, and renames the new one into place. It replies with the old and new versions, then restarts: it drains its connections, closes its store, and re-executes itself with the same arguments. Started with `--upgrade-exit`, it exits with status 75 instead, for systemd (`Restart=on-failure` or `always`) or a keep-alive loop to start the new build. `tincan relay-upgrade` then waits up to `--wait` (a minute) for the relay to answer on the new build. A release that is not newer is refused unless `--force`; a missing build, a checksum mismatch, or a binary the relay user cannot replace is refused with nothing changed. Only admin devices and the relay's local admin socket may run it, and each upgrade is audited as `relay_upgraded` with the two versions.
+
+`--from-github <tag>` works only on a relay started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`: the relay makes no outbound download otherwise, and the caller can never choose the source. It downloads that release's binaries and `checksums.txt` from `<release-url>/<tag>/`, checks every binary against that `checksums.txt`, and moves them into `--dist` with `VERSION` last, putting every file back if a move fails, so agents are offered the release only once all of it is there. Self-upgrade needs the relay user to own its binary and the directory holding it. If you keep the binary root-owned, upgrade the relay by hand as before. See [docs/trust-model.md](docs/trust-model.md) for what the checksums do and do not prove.
 
 A `tincan mcp` server keeps running the build it started with, because the app that launched it owns the process; tincan never restarts it mid-session. Each app reloads it its own way:
 
@@ -1158,27 +1170,38 @@ make vet              # go vet ./...
 make extension-test   # node --test for the extension worker code (no dependencies)
 make extension        # dist/tincan-history-extension.zip
 make dist             # every release asset in dist/ (see below)
+make release VERSION=x.y.z NOTES=<file>   # the whole release (see below)
 ```
 
 `make build` builds one binary, for the machine you run it on. CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64, darwin/arm64 and darwin/amd64.
 
 Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm64`, `tincan_darwin_amd64` (Intel Mac), `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` (sha256 of the four binaries) and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
 
-Releases are cut by hand; CI does not publish them. From a clean checkout of the commit to release:
+Releases are cut on the maintainer's Mac; CI does not publish them. One command does the whole release from a clean checkout of `main`:
 
 ```bash
-git tag v0.7.0 && git push origin v0.7.0
-make release-mac # make dist (four static binaries, checksums.txt, extension zip in dist/), then sign and notarize the macOS binaries
-gh release create v0.7.0 --title v0.7.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
+make release VERSION=0.8.0 NOTES=release-notes.md DRY_RUN=1   # print every step, run none
+make release VERSION=0.8.0 NOTES=release-notes.md
 ```
 
-`make dist` stamps the version from `git describe`, so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
+It first checks that `VERSION` is `x.y.z` (or `x.y.z-rc1`, released as a prerelease), the notes file exists, the working tree is clean, `HEAD` is `main` on the remote, and the tag exists neither locally nor on the remote. Then, in order:
+
+1. `git tag -a vX -m vX`, locally only;
+2. `make dist`, `make sign-mac notarize-mac`, `make checksums`, `shasum -a 256 -c checksums.txt` in `dist/`, and `make store`;
+3. `tincan release-tools cws-upload --dry-run`, which checks the Chrome Web Store credentials and version before anything is public;
+4. `git push <remote> refs/tags/vX`;
+5. `gh release create vX --verify-tag --notes-file <notes>` with `checksums.txt`, the extension zip and the four binaries;
+6. `tincan release-tools cws-upload --publish` with the store zip ([docs/chrome-web-store.md](docs/chrome-web-store.md#updating-through-the-api)).
+
+If a step fails before the push, the local tag is deleted, so a rerun starts clean. The extension is versioned apart from tincan, so the store upload is skipped, and the release still succeeds, when `extension/manifest.json` is not newer than the store's version. Settings: `RELEASE_REMOTE` (default `origin`; a URL works, for a clone whose `origin` cannot push), `RELEASE_BRANCH` (default `main`; empty releases any commit), `SIGN=0` to skip macOS signing, `CWS=0` to skip the store.
+
+The steps also work one at a time. `make dist` stamps the version from `git describe` (or `VERSION=`), so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
 
 - `make sign-mac` signs each `dist/tincan_darwin_*` with `codesign --force --options runtime --timestamp` using `TINCAN_SIGN_IDENTITY` (default: the maintainer's Developer ID Application identity), then rewrites `checksums.txt`, since signing changes the bytes.
 - `make notarize-mac` zips each signed binary, submits it with `xcrun notarytool submit --keychain-profile "$TINCAN_NOTARY_PROFILE" --wait` (default profile `agentcookie-notary`), requires `Accepted`, and checks `spctl -a -vv -t install` reports `Notarized Developer ID`. A bare Mach-O binary cannot be stapled; Gatekeeper looks the ticket up online at first launch.
 - One-time notary setup: `xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>` with an app-specific password. The credentials live in the login keychain, never in the repo.
 
-Always upload the `checksums.txt` written after signing; `make release-mac` rewrites it last and checks it.
+Always upload the `checksums.txt` written after signing; `make release` and `make release-mac` rewrite it last and check it.
 
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
