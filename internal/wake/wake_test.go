@@ -416,3 +416,17 @@ func TestRequestsWaitingCountsAtFireTime(t *testing.T) {
 		t.Fatalf("woke %d times for requests already taken", rc.count())
 	}
 }
+
+// A request queued while a re-armed wake is pending does not hide the older
+// backlog: the nudge names every request still waiting.
+func TestRequestsWaitingCountsWholeBacklog(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{Debounce: 50 * time.Millisecond, Queued: func(string) int { return 3 }})
+	w.RequestsWaiting("grokbot")
+	queued(w, "grokbot", 1)
+	w.Flush()
+	if rc.count() != 1 || !strings.Contains(rc.bodies[0], "3 requests") {
+		t.Fatalf("wakes = %q, want one naming all 3 requests", rc.bodies)
+	}
+}

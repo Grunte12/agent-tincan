@@ -424,8 +424,12 @@ func (w *Waker) fire(agent string) {
 	if p == nil {
 		return
 	}
-	if p.recheck && p.requests == 0 && w.opts.Queued != nil {
-		p.requests = w.opts.Queued(agent) // zero when a poller took them
+	if p.recheck && w.opts.Queued != nil {
+		// Count what is still waiting: zero when a poller took it, and
+		// the whole backlog when requests arrived after the recheck was set.
+		if n := w.opts.Queued(agent); p.requests == 0 || n > p.requests {
+			p.requests = n
+		}
 	}
 	replies := p.replies
 	if w.opts.UnseenReplies != nil {
@@ -623,12 +627,18 @@ func (w *Waker) do(req *http.Request) error {
 	return nil
 }
 
+// auditTimeout bounds one wake audit write.
+const auditTimeout = 10 * time.Second
+
 func (w *Waker) record(ctx context.Context, event, agent, detail string) {
 	if w.audit == nil {
 		return
 	}
-	// The audit write outlives a nudge cut short by Stop.
-	if err := w.audit.Audit(context.WithoutCancel(ctx), store.AuditEvent{Event: event, Actor: agent, Detail: detail}); err != nil {
+	// The audit write outlives a nudge cut short by Stop, within its own
+	// bound so it cannot hold Stop up.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := w.audit.Audit(ctx, store.AuditEvent{Event: event, Actor: agent, Detail: detail}); err != nil {
 		log.Printf("audit %s: %v", event, err)
 	}
 }
