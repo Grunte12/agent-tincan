@@ -189,7 +189,7 @@ func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attach
 		return Result{}, err
 	}
 	if wait <= 0 {
-		return Result{Request: req, Status: envelope.StatusQueued}, nil
+		return Result{Request: req, Status: sentStatus(req)}, nil
 	}
 	return r.Get(ctx, req.ID, wait)
 }

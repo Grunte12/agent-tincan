@@ -58,6 +58,7 @@ const (
 type Status string
 
 const (
+	StatusHeld      Status = "held"
 	StatusQueued    Status = "queued"
 	StatusDelivered Status = "delivered"
 	StatusClaimed   Status = "claimed"
@@ -93,6 +94,23 @@ type Request struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
+
+	// Status is set on held sends; omitted for ordinary requests.
+	Status Status `json:"status,omitempty"`
+	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
+	HoldTTL        time.Duration `json:"-"`
+	ApprovalNotify string        `json:"-"`
+	// WasHeld and Approved are persisted relay-only approval history.
+	WasHeld  bool `json:"-"`
+	Approved bool `json:"-"`
+}
+
+// RedactFor hides content that the owner has never released to other agents.
+func (r *Request) RedactFor(agent string) {
+	if r.WasHeld && !r.Approved && r.From != agent {
+		r.Body = "waiting for the owner's approval"
+		r.Attachments = nil
+	}
 }
 
 // GroupMember identifies a request without fetching its result or marking replies seen.

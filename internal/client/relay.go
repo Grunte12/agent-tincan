@@ -131,6 +131,15 @@ func (a AgentInfo) Backlog(now time.Time) string {
 	return strings.Join(parts, ", ")
 }
 
+// sentStatus is a fresh send's status: held when the relay is holding it for
+// the owner's approval, queued otherwise.
+func sentStatus(req envelope.Request) envelope.Status {
+	if req.Status == envelope.StatusHeld {
+		return envelope.StatusHeld
+	}
+	return envelope.StatusQueued
+}
+
 // DistManifest lists the release binaries a relay serves for tincan upgrade.
 type DistManifest struct {
 	Version string     `json:"version"`
@@ -286,7 +295,7 @@ func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Dura
 		return Result{}, err
 	}
 	if wait <= 0 {
-		return Result{Request: req, Status: envelope.StatusQueued}, nil
+		return Result{Request: req, Status: sentStatus(req)}, nil
 	}
 	return r.Get(ctx, req.ID, wait)
 }
@@ -710,7 +719,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req = sent
 			}
 		}
-		res := Result{Request: req, Status: envelope.StatusQueued}
+		res := Result{Request: req, Status: sentStatus(req)}
 		if err != nil {
 			res.Status = envelope.StatusFailed
 			res.Reply = &envelope.Reply{From: target, Status: envelope.StatusFailed, Body: err.Error()}

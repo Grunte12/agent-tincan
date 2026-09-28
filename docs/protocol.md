@@ -32,7 +32,7 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 
 ## Request states
 
-`queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled`, or `expired`. A claimed request whose lease expires goes back to `queued`.
+Optional `held`, then `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled`, or `expired`. A claimed request whose lease expires goes back to `queued`.
 
 ## Progress notes
 
@@ -101,6 +101,49 @@ To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]
 Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
+
+### Owner approval
+
+With an owner-configured `approval.json`, sends can enter non-terminal `held`.
+A held send response has an optional `status: "held"` field; ordinary send
+responses remain unchanged. Get-reply and trace report `held` in their existing
+status field. Older clients can decode this unknown string and keep waiting.
+Held requests are excluded from poll, peek, queued counts, claim, reply and
+wake delivery. The sender can get or cancel them. Other agents, including the target, see
+the placeholder body and no attachments in get and trace. This restriction
+persists until approval, as specified below. Admin devices can inspect them.
+
+Admin devices and the local admin socket have these endpoints; agent callers
+receive 403:
+
+- `GET /v1/admin/held`: array of request envelopes, with bodies truncated to
+  200 Unicode characters, including sender, chain and target.
+- `POST /v1/admin/requests/{id}/approve`: returns the queued request. A fresh
+  normal TTL starts; the original `created_at` is kept. Normal wake follows.
+- `POST /v1/admin/requests/{id}/deny`: optional `{"reason":"..."}` body;
+  returns `{"status":"declined"}`. The reply is attributed to `relay` and contains
+  the reason. Missing reason means an empty reply body.
+
+Approval and denial require an unexpired held request; other states return 409.
+The sweep expires overdue holds and logs `hold_expired`. Holds survive restarts
+with their original deadline. Policy changes apply only to future sends.
+A `ping` is never held: it has no body and runs no model work. Search results
+leave out a held, never-approved request for every caller but its sender and admins.
+The other transitions are audited as `held`, `approved`, and `denied`.
+An optional relay-authored operator `notify` bypasses the gate and is logged
+as `approval_notified`; it never grants the notified agent admin access.
+
+Requests retain whether they were ever held and whether the owner approved them.
+For every request that was held and never approved, only its sender and admins
+may read its body or attachments, regardless of its current status (including
+declined, expired and cancelled). Other callers, including the target, see
+`waiting for the owner's approval` and no attachment metadata wherever the
+request is otherwise visible: get, trace, search-like listings, poll and peek
+pending entries. Attachment downloads by those callers return 404. Held requests
+remain excluded from delivery; pending entries carry only ids and senders.
+An approved request follows the ordinary body and attachment access rules,
+even after it reaches a terminal state. Approval history survives relay restarts;
+upgrades backfill existing holds and decisions from request state and audit events.
 
 ## Request groups
 

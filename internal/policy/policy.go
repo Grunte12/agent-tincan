@@ -28,6 +28,7 @@ var (
 
 // Config tunes the policy.
 type Config struct {
+	Approval      *Approval
 	UrgentPerHour int // max urgent requests per sender per hour; default 5
 	HopLimit      int // longest allowed chain; default 4
 	PerMinute     int // max new requests per sender per minute; default 30
@@ -90,6 +91,19 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	// Stamp the request with the slot it took, so Refund gives back this
 	// send's slot and not a concurrent one's. Enqueue sets the real time.
 	req.CreatedAt = at
+	// A ping does no work and carries no body, so the gate never holds it.
+	if req.Kind == envelope.KindPing {
+		return nil
+	}
+	held, err := p.cfg.Approval.Held(req)
+	if held {
+		req.Status = envelope.StatusHeld
+		return nil
+	}
+	if err != nil {
+		p.Refund(*req)
+		return reject(http.StatusServiceUnavailable, err)
+	}
 	return nil
 }
 
