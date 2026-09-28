@@ -214,6 +214,9 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
 		log.Printf("reschedule reply wakes: %v", err) // replies stay unseen for the agent's next check
 	}
+	if err := resumeRequestWakes(ctx, st, waker); err != nil {
+		log.Printf("reschedule request wakes: %v", err) // requests stay queued for the agent's next check
+	}
 	runCtx, stopRun := context.WithCancel(ctx)
 	defer stopRun()
 	ran := make(chan struct{})
@@ -408,6 +411,22 @@ func resumeReplyWakes(ctx context.Context, st *store.Store, w *wake.Waker) error
 	}
 	for _, a := range agents {
 		w.ReplyWaiting(a)
+	}
+	return nil
+}
+
+// resumeRequestWakes schedules a request wake for every agent that still has
+// queued requests. A nudge scheduled before a restart lived only in the old
+// process, so without this a webhook or email agent sent a request just
+// before the relay stopped would never be woken for it. Each wake counts the
+// queued requests when it fires and is dropped if a poller took them.
+func resumeRequestWakes(ctx context.Context, st *store.Store, w *wake.Waker) error {
+	agents, err := st.AgentsWithQueuedRequests(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range agents {
+		w.RequestsWaiting(a)
 	}
 	return nil
 }
