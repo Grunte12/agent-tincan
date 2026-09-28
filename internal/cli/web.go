@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -30,7 +29,7 @@ func webCmd() *cobra.Command {
 
 func webSiteFlag(site string) (history.Source, error) {
 	if site == "" {
-		return "", errors.New("--site is required (chatgpt or claude-ai)")
+		return "", fmt.Errorf("--site is required (%s)", history.WebSiteNames())
 	}
 	return history.ParseWebSite(site)
 }
@@ -135,8 +134,8 @@ func webServeCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&site, "site", "", "chatgpt or claude-ai")
-	cmd.Flags().StringVar(&name, "name", "", "this agent's name (default chatgpt-web or claude-web)")
+	cmd.Flags().StringVar(&site, "site", "", history.WebSiteNames())
+	cmd.Flags().StringVar(&name, "name", "", "this agent's name (default "+history.WebAgentNames()+")")
 	cmd.Flags().StringVar(&configPath, "config", "", "the agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
@@ -185,7 +184,7 @@ func webInstallCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&site, "site", "", "chatgpt or claude-ai")
+	cmd.Flags().StringVar(&site, "site", "", history.WebSiteNames())
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
 	return cmd
 }

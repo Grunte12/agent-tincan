@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -110,7 +113,7 @@ func TestAttachCLIMissingFile(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	m.Server.SetAttachmentDir(t.TempDir())
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
-	req, _ := m.Client(t, "muse").Send(context.Background(), "grokbot", "send it", envelope.KindAsk, "")
+	req, _ := m.Client(t, "muse").Send(context.Background(), "grokbot", "send it", envelope.KindAsk, "", false)
 	_, err := run(t, replyCmd(), req.ID, "here", "--attach", filepath.Join(t.TempDir(), "gone.txt"))
 	if err == nil || !strings.Contains(err.Error(), "gone.txt") {
 		t.Fatalf("err = %v", err)
@@ -132,6 +135,89 @@ func TestAttachmentDirIsPerAgent(t *testing.T) {
 		got := client.AttachmentDir(client.Config{Agent: bad})
 		if filepath.Dir(got) != filepath.Join(base, "attachments") {
 			t.Fatalf("agent %q gave dir %s", bad, got)
+		}
+	}
+}
+
+func TestUrgentCLIAndChannel(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Server.SetAttachmentDir(t.TempDir())
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := run(t, askCmd(), "muse", "routine", "--wait", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, askCmd(), "muse", "urgent", "--urgent", "--attach", tempFile(t, "pic.png", cliPNG), "--wait", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := m.Store.PendingRequests(t.Context(), "muse", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := announcer{}
+	n, ok := a.next(client.Waiting{Total: 2, Queued: 2, Pending: pending}, time.Now())
+	if !ok || !strings.Contains(n.content, "1 urgent request waiting") {
+		t.Fatalf("notice = %+v", n)
+	}
+	in, err := m.Client(t, "muse").Poll(t.Context(), 0)
+	if err != nil || len(in.Requests) != 2 || !in.Requests[0].Urgent || in.Requests[1].Urgent || len(in.Requests[0].Attachments) != 1 {
+		t.Fatalf("inbox = %+v, %v", in, err)
+	}
+}
+
+func TestUrgentNoticeCountsPastThePendingList(t *testing.T) {
+	a := announcer{}
+	pending := make([]envelope.Pending, 50)
+	for i := range pending {
+		pending[i] = envelope.Pending{ID: fmt.Sprintf("r%d", i), From: "grokbot", Urgent: true}
+	}
+	n, ok := a.next(client.Waiting{Total: 60, Queued: 60, Urgent: 60, Pending: pending}, time.Now())
+	if !ok || !strings.Contains(n.content, "60 urgent requests waiting") {
+		t.Fatalf("notice = %+v", n)
+	}
+}
+
+func TestNewUrgentPastThePendingListIsAnnouncedAtOnce(t *testing.T) {
+	a := announcer{}
+	pending := make([]envelope.Pending, 50)
+	for i := range pending {
+		pending[i] = envelope.Pending{ID: fmt.Sprintf("r%d", i), From: "grokbot", Urgent: true}
+	}
+	now := time.Now()
+	n, ok := a.next(client.Waiting{Total: 50, Queued: 50, Urgent: 50, Pending: pending}, now)
+	if !ok {
+		t.Fatal("first peek not announced")
+	}
+	a.pushed(n, now)
+	// A 51st urgent request lands past the capped pending list: same ids, one
+	// more urgent. It must be announced at once, not after reannounceAfter.
+	w := client.Waiting{Total: 51, Queued: 51, Urgent: 51, Pending: pending}
+	n, ok = a.next(w, now.Add(time.Second))
+	if !ok || !strings.Contains(n.content, "51 urgent requests waiting") {
+		t.Fatalf("new urgent request not announced: %v %q", ok, n.content)
+	}
+	a.pushed(n, now.Add(time.Second))
+	if _, ok := a.next(w, now.Add(2*time.Second)); ok {
+		t.Fatal("same urgent count announced twice")
+	}
+	// Some taken, then one more: a rise from the lower count is new again.
+	w = client.Waiting{Total: 50, Queued: 50, Urgent: 50, Pending: pending}
+	if _, ok := a.next(w, now.Add(3*time.Second)); ok {
+		t.Fatal("a drop in urgent announced")
+	}
+	w = client.Waiting{Total: 51, Queued: 51, Urgent: 51, Pending: pending}
+	if _, ok := a.next(w, now.Add(4*time.Second)); !ok {
+		t.Fatal("urgent rise after a drop not announced")
+	}
+}
+
+func TestRelayRejectsNonPositiveUrgentLimit(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		cmd := relayCmd()
+		cmd.SetArgs([]string{"--urgent-per-hour", v, "--state-dir", t.TempDir()})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), "--urgent-per-hour") {
+			t.Fatalf("urgent-per-hour %s: %v", v, err)
 		}
 	}
 }

@@ -16,6 +16,9 @@ import (
 // DefaultMaxBody caps a request or reply body.
 const DefaultMaxBody = 256 << 10
 
+// MaxProgressNote caps a progress note in bytes.
+const MaxProgressNote = 1024
+
 // MaxAttachments caps how many attachments one request or reply carries.
 const MaxAttachments = 8
 
@@ -45,6 +48,8 @@ type Kind string
 const (
 	// KindAsk expects a reply.
 	KindAsk Kind = "ask"
+	// KindPing is answered automatically by the receiving client.
+	KindPing Kind = "ping"
 	// KindNotify is fire-and-forget; the target may still reply.
 	KindNotify Kind = "notify"
 )
@@ -71,6 +76,7 @@ func (s Status) Terminal() bool {
 // Request is one agent asking another to do something.
 type Request struct {
 	Group    string   `json:"group,omitempty"`
+	Urgent   bool     `json:"urgent,omitempty"`
 	ID       string   `json:"id,omitempty"`
 	From     string   `json:"from,omitempty"`
 	To       string   `json:"to"`
@@ -85,6 +91,8 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// Progress is store metadata; the wire exposes it on Result.
+	Progress *Progress `json:"-"`
 }
 
 // GroupMember identifies a request without fetching its result or marking replies seen.
@@ -95,8 +103,10 @@ type GroupMember struct {
 
 // Pending names a queued request without its body, as a peek reports it.
 type Pending struct {
-	ID   string `json:"id"`
-	From string `json:"from"`
+	Kind   Kind   `json:"kind,omitempty"`
+	Urgent bool   `json:"urgent,omitempty"`
+	ID     string `json:"id"`
+	From   string `json:"from"`
 }
 
 // Reply is the target's answer to a request.
@@ -109,12 +119,20 @@ type Reply struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 }
 
+// Progress is the latest note from the agent handling a request.
+type Progress struct {
+	Note string    `json:"note"`
+	At   time.Time `json:"at"`
+	By   string    `json:"by"`
+}
+
 // Result is a request with its current status and reply, if any. The relay
 // returns it for get-reply and for each step of a trace.
 type Result struct {
-	Request Request `json:"request"`
-	Status  Status  `json:"status"`
-	Reply   *Reply  `json:"reply,omitempty"`
+	Progress *Progress `json:"progress,omitempty"`
+	Request  Request   `json:"request"`
+	Status   Status    `json:"status"`
+	Reply    *Reply    `json:"reply,omitempty"`
 	// Parent is set on an unseen reply whose request was asked while the
 	// asker was handling another request addressed to it, so a fresh session
 	// woken by the reply knows which request to finish.
@@ -138,6 +156,7 @@ func (r Result) Done() bool {
 // sendInput is the only part of a send the relay accepts from a client.
 type sendInput struct {
 	Group       string       `json:"group"`
+	Urgent      bool         `json:"urgent"`
 	To          string       `json:"to"`
 	Body        string       `json:"body"`
 	Kind        Kind         `json:"kind"`
@@ -162,7 +181,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 		return Request{}, errors.New("send: to is required")
 	case in.To == sender:
 		return Request{}, errors.New("send: an agent cannot send to itself")
-	case in.Body == "" && len(in.Attachments) == 0:
+	case in.Kind != KindPing && in.Body == "" && len(in.Attachments) == 0:
 		return Request{}, errors.New("send: body is required")
 	case len(in.Body) > maxBody:
 		return Request{}, fmt.Errorf("send: %w (%d > %d bytes)", ErrBodyTooLarge, len(in.Body), maxBody)
@@ -170,6 +189,11 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	switch in.Kind {
 	case "":
 		in.Kind = KindAsk
+	case KindPing:
+		if len(in.Body) > 4 || in.ParentID != "" || len(in.Attachments) != 0 {
+			return Request{}, errors.New("send: ping requires no parent or attachments and at most 4 body bytes")
+		}
+		in.Body = ""
 	case KindAsk, KindNotify:
 	default:
 		return Request{}, fmt.Errorf("send: unknown kind %q", in.Kind)
@@ -178,7 +202,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{Group: in.Group, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
+	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
 }
 
 // attachmentIDs keeps only the ids a client names, checking the count and

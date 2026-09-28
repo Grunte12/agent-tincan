@@ -240,7 +240,7 @@ func DescribeWindow(path string, w Window, err error) string {
 	a := w.orDefault()
 	desc := fmt.Sprintf("the last %d conversations, up to %s", a.Max, daysText(a.MaxAge))
 	if a.Max > MaxListCount {
-		desc += fmt.Sprintf(" (ChatGPT and claude.ai read at most %d)", MaxListCount)
+		desc += fmt.Sprintf(" (%s read at most %d)", LiveSourcesLabel(), MaxListCount)
 	}
 	if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) {
 		return fmt.Sprintf("window: %s (default, no file at %s)", desc, path)
@@ -353,12 +353,12 @@ func runPolling(ctx context.Context, pollOnce func(context.Context) (int, error)
 // PollOnce waits up to Hold for requests, then handles each one serially.
 // It returns how many requests it handled.
 func (s *Service) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, s.Relay, s.Hold, s.handleSafely)
+	return pollAndHandle(ctx, s.Relay, s.Hold, "history-serve", s.handleSafely)
 }
 
 // pollAndHandle waits up to hold (client.DefaultPollHold when zero) for
 // requests, then handles each one serially.
-func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, handle func(context.Context, envelope.Request)) (int, error) {
+func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, surface string, handle func(context.Context, envelope.Request)) (int, error) {
 	if hold == 0 {
 		hold = client.DefaultPollHold
 	}
@@ -366,11 +366,13 @@ func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration,
 	if err != nil {
 		return 0, err
 	}
+	in, retry, _ := client.AnswerPings(ctx, relay, in, surface)
 	n := 0
 	for _, req := range in.Requests {
 		handle(ctx, req)
 		n++
 	}
+	go client.RetryPongs(ctx, retry)
 	return n, nil
 }
 
@@ -602,11 +604,10 @@ func readFailure(q Query, err error) string {
 }
 
 func sourceLabel(s Source) string {
+	if site := siteFor(s); site != nil {
+		return site.label
+	}
 	switch s {
-	case SourceChatGPT:
-		return "ChatGPT"
-	case SourceClaudeAI:
-		return "claude.ai"
 	case SourceCodex:
 		return "Codex"
 	case SourceClaudeCode:

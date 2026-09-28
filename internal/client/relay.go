@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,13 @@ const AgentHeader = "X-Tincan-Agent"
 // VersionHeader carries the tincan build the client runs on every relay
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
+
+// FeaturesHeader advertises capabilities supported by this client.
+const FeaturesHeader = "X-Tincan-Features"
+
+// PlatformHeader carries the client's os_arch (for example darwin_arm64), so
+// the relay only announces a release it holds a binary for.
+const PlatformHeader = "X-Tincan-Platform"
 
 // Version is the tincan build this process runs, sent as VersionHeader by
 // every relay client made after it is set. main sets it from the link-time
@@ -43,9 +51,10 @@ func ClampWait(d time.Duration) time.Duration { return min(max(d, 0), MaxInlineW
 
 // AgentInfo is one joined agent as the relay reports it.
 type AgentInfo struct {
-	Name     string    `json:"name"`
-	Online   bool      `json:"online"`
-	LastPoll time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
+	UpgradeAvailable string    `json:"upgrade_available,omitempty"`
+	Name             string    `json:"name"`
+	Online           bool      `json:"online"`
+	LastPoll         time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
 	// LastActive is the agent's last call of any kind (send, reply, get,
 	// poll), kept across relay restarts.
 	LastActive time.Time `json:"last_active,omitzero"`
@@ -54,7 +63,10 @@ type AgentInfo struct {
 	// Version is the tincan build the agent last called the relay with,
 	// empty when it has not called since the relay learned to record it,
 	// or runs a client that predates the version header.
-	Version string `json:"version,omitempty"`
+	Version      string    `json:"version,omitempty"`
+	Queued       int       `json:"queued,omitempty"`
+	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
+	Claimed      int       `json:"claimed,omitempty"`
 }
 
 // Roster is the relay's agent list with what the relay says about itself.
@@ -95,6 +107,28 @@ func (a AgentInfo) LastSeen(now time.Time) string {
 		return fmt.Sprintf("last seen %dh ago", int(d/time.Hour))
 	}
 	return fmt.Sprintf("last seen %dd ago", int(d/(24*time.Hour)))
+}
+
+func (a AgentInfo) Backlog(now time.Time) string {
+	var parts []string
+	if a.Queued > 0 {
+		queued := fmt.Sprintf("%d queued", a.Queued)
+		if !a.OldestQueued.IsZero() {
+			d := max(now.Sub(a.OldestQueued), 0)
+			age := fmt.Sprintf("%dm", int(d/time.Minute))
+			if d >= 48*time.Hour {
+				age = fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+			} else if d >= time.Hour {
+				age = fmt.Sprintf("%dh", int(d/time.Hour))
+			}
+			queued += " (oldest " + age + ")"
+		}
+		parts = append(parts, queued)
+	}
+	if a.Claimed > 0 {
+		parts = append(parts, fmt.Sprintf("%d claimed", a.Claimed))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // DistManifest lists the release binaries a relay serves for tincan upgrade.
@@ -226,9 +260,10 @@ func (r *Relay) Base() string {
 }
 
 // Send queues a request. parent is the request this one continues, or "".
-func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error) {
+// The urgent flag prioritizes time-critical requests.
+func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent bool) (envelope.Request, error) {
 	var out envelope.Request
-	err := r.call(ctx, r.api, "POST", "/v1/send", map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent}, &out)
+	err := r.call(ctx, r.api, "POST", "/v1/send", map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent}, &out)
 	return out, err
 }
 
@@ -245,8 +280,8 @@ func (r *Relay) Get(ctx context.Context, id string, wait time.Duration) (Result,
 
 // Ask sends a request and waits up to wait for the reply. If the reply is not
 // in yet, the returned Result has the request id and a non-final status.
-func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Duration) (Result, error) {
-	req, err := r.Send(ctx, to, body, envelope.KindAsk, parent)
+func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent bool) (Result, error) {
+	req, err := r.Send(ctx, to, body, envelope.KindAsk, parent, urgent)
 	if err != nil {
 		return Result{}, err
 	}
@@ -269,8 +304,9 @@ const (
 // Inbox is what one poll picked up: requests addressed to this agent, and
 // replies to requests it sent that it has not seen yet.
 type Inbox struct {
-	Requests []envelope.Request `json:"requests"`
-	Replies  []Result           `json:"replies,omitempty"`
+	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
+	Requests         []envelope.Request `json:"requests"`
+	Replies          []Result           `json:"replies,omitempty"`
 	// RepliesRemaining counts unseen replies left out of this poll to keep
 	// the response small. They come with a later poll once these are acked.
 	RepliesRemaining int `json:"replies_remaining,omitempty"`
@@ -291,8 +327,13 @@ func (in Inbox) ReplyIDs() []string {
 
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
-	Total   int      `json:"waiting"` // queued requests plus unseen replies
-	Queued  int      `json:"queued"`
+	Pings            int    `json:"pings,omitempty"`
+	UpgradeAvailable string `json:"upgrade_available,omitempty"`
+	Total            int    `json:"waiting"` // queued requests plus unseen replies
+	Queued           int    `json:"queued"`
+	// Urgent counts the queued requests marked urgent, beyond the ones
+	// Pending can list. A relay that predates it leaves it zero.
+	Urgent  int      `json:"urgent,omitempty"`
 	Replies []Result `json:"replies,omitempty"`
 	// Pending names the oldest queued requests (id and sender, no body).
 	// A relay that predates it leaves it empty.
@@ -341,6 +382,18 @@ func (r *Relay) Claim(ctx context.Context, id string) (envelope.Request, error) 
 	var out envelope.Request
 	err := r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/claim", nil, &out)
 	return out, err
+}
+
+// Progress posts a note and renews this agent's claim lease.
+func (r *Relay) Progress(ctx context.Context, id, note string) error {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.Progress {
+		return errors.New("this relay does not support progress notes (upgrade the relay)")
+	}
+	return r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/progress", map[string]string{"note": note}, nil)
 }
 
 // Reply answers a request.
@@ -510,9 +563,11 @@ func (r *Relay) headers(req *http.Request) {
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
+	req.Header.Set(FeaturesHeader, "ping")
 	if r.version != "" {
 		req.Header.Set(VersionHeader, r.version)
 	}
+	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
 }
 
 // IsStatus reports whether err is a relay error with the given HTTP code.

@@ -34,6 +34,7 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
 	Groups             bool  `json:"groups,omitempty"`
+	Progress           bool  `json:"progress,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
@@ -170,8 +171,8 @@ func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) 
 // relay supports attachments and returns ErrAttachmentsUnsupported without
 // sending if not, since an older relay would deliver the request without
 // them.
-func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string) (envelope.Request, error) {
-	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent}
+func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent bool) (envelope.Request, error) {
+	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
 		return envelope.Request{}, err
 	}
@@ -181,8 +182,8 @@ func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope
 }
 
 // AskAttached is Ask with attachments; see SendAttached.
-func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration) (Result, error) {
-	req, err := r.SendAttached(ctx, to, body, envelope.KindAsk, parent, attachments)
+func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent bool) (Result, error) {
+	req, err := r.SendAttached(ctx, to, body, envelope.KindAsk, parent, attachments, urgent)
 	if err != nil {
 		return Result{}, err
 	}

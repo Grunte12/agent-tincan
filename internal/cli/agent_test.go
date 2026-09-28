@@ -54,7 +54,7 @@ func TestSecondAgentJoinKeepsFirstConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "")
+		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "", false)
 		if err != nil || req.From != want {
 			t.Fatalf("config %s sent as %q, %v; want %s", filepath.Base(path), req.From, err, want)
 		}
@@ -232,5 +232,35 @@ func TestAskGroupCLI(t *testing.T) {
 	err = cmd.ExecuteContext(t.Context())
 	if !errors.As(err, &exit) || exit.Code != 2 {
 		t.Fatalf("%v: %s", err, out.String())
+	}
+}
+
+func TestFormatAgentsBacklog(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		info client.AgentInfo
+		want string
+	}{
+		{"idle", client.AgentInfo{}, ""},
+		{"queued", client.AgentInfo{Queued: 2, OldestQueued: now.Add(-14 * time.Minute)}, "2 queued (oldest 14m)"},
+		{"claimed", client.AgentInfo{Claimed: 1}, "1 claimed"},
+		{"both", client.AgentInfo{Queued: 2, OldestQueued: now.Add(-time.Hour), Claimed: 1}, "2 queued (oldest 1h), 1 claimed"},
+		{"days", client.AgentInfo{Queued: 1, OldestQueued: now.Add(-72 * time.Hour)}, "1 queued (oldest 3d)"},
+		{"future", client.AgentInfo{Queued: 1, OldestQueued: now.Add(time.Minute)}, "1 queued (oldest 0m)"},
+		{"missing time", client.AgentInfo{Queued: 1}, "1 queued"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.Backlog(now); got != tc.want {
+				t.Fatalf("Backlog = %q, want %q", got, tc.want)
+			}
+			got := formatAgents([]client.AgentInfo{tc.info}, now)
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("roster = %q", got)
+			}
+			if tc.want == "" && got != "               offline  wake= never seen\n" {
+				t.Fatalf("idle roster = %q", got)
+			}
+		})
 	}
 }

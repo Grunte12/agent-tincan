@@ -36,24 +36,25 @@ const webClockSkew = 2 * time.Minute
 // limit for the footer and notes.
 const maxWebReplyBytes = 64 << 10
 
-// WebSites are the sites a web agent can front.
-var WebSites = []Source{SourceChatGPT, SourceClaudeAI}
+// WebSites are the sites a web agent can front, in the site table's order.
+var WebSites = siteSources()
 
-// WebAgentName is the default agent name for a site's web agent.
+// WebAgentName is the default agent name for a site's web agent ("" for a
+// site outside the table).
 func WebAgentName(site Source) string {
-	if site == SourceClaudeAI {
-		return "claude-web"
+	if s := siteFor(site); s != nil {
+		return s.agent
 	}
-	return "chatgpt-web"
+	return ""
 }
 
 // ParseWebSite maps a --site value to its source.
 func ParseWebSite(s string) (Source, error) {
-	switch Source(s) {
-	case SourceChatGPT, SourceClaudeAI:
-		return Source(s), nil
+	site, err := lookupSite(Source(s))
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("unknown site %q (want chatgpt or claude-ai)", s)
+	return site.source, nil
 }
 
 // DefaultWebAllowlistPath is a web agent's allowlist file.
@@ -67,11 +68,13 @@ func DefaultWebJournalPath(agent string) string { return configPath("", agent+"-
 // conversation.
 func DefaultWebStatePath(agent string) string { return configPath("", agent+"-state.json") }
 
+// siteLabel names a site in replies and logs (the source name for a site
+// outside the table).
 func siteLabel(s Source) string {
-	if s == SourceClaudeAI {
-		return "claude.ai"
+	if site := siteFor(s); site != nil {
+		return site.label
 	}
-	return "ChatGPT"
+	return string(s)
 }
 
 // WebAgent is the web agent service: it polls the relay as its own
@@ -80,7 +83,8 @@ func siteLabel(s Source) string {
 // assistant's answer and its images. Requests run one at a time.
 type WebAgent struct {
 	Relay *client.Relay
-	// Site is SourceChatGPT or SourceClaudeAI.
+	// Site is one of WebSites; requests to an agent with any other site
+	// fail.
 	Site Source
 	// Name is this agent's name, used in replies and logs.
 	Name   string
@@ -110,10 +114,11 @@ type WebAgent struct {
 	// interval while waiting for the reply instead of on
 	// DefaultWebPollSchedule (tests use it).
 	PollInterval time.Duration
-	// ClaudeStablePolls and ClaudeStableFor say when a claude.ai reply
-	// with no stop_reason counts as finished: the same text on this many
-	// consecutive polls, spanning at least this long
-	// (DefaultClaudeStablePolls and DefaultClaudeStableFor when zero).
+	// ClaudeStablePolls and ClaudeStableFor override the site's
+	// text-stability rule (only claude.ai has one, DefaultClaudeStablePolls
+	// and DefaultClaudeStableFor): a reply with no stop_reason counts as
+	// finished once the same text is read on this many consecutive polls,
+	// spanning at least this long. Zero keeps the site's rule.
 	ClaudeStablePolls int
 	ClaudeStableFor   time.Duration
 	// PresenceInterval is how often the agent refreshes its relay presence
@@ -141,7 +146,7 @@ func (w *WebAgent) Run(ctx context.Context) error { return runPolling(ctx, w.Pol
 
 // PollOnce waits up to Hold for requests and handles each one serially.
 func (w *WebAgent) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, w.Relay, w.Hold, w.handleSafely)
+	return pollAndHandle(ctx, w.Relay, w.Hold, "web-serve", w.handleSafely)
 }
 
 func (w *WebAgent) handleSafely(ctx context.Context, req envelope.Request) {
@@ -210,19 +215,25 @@ func parseWebRequest(body string) (webRequest, error) {
 	return r, nil
 }
 
+// conversationRef reads a conversation id, or a conversation URL on any
+// site in the table.
 func conversationRef(ref string) (string, bool) {
 	if validNativeID(ref) {
 		return ref, true
 	}
 	u, err := url.Parse(ref)
-	if err != nil || u.Scheme != "https" || (u.Host != "chatgpt.com" && u.Host != "claude.ai") {
+	if err != nil || u.Scheme != "https" {
 		return "", false
 	}
-	m := convURLPattern.FindStringSubmatch(u.Path)
-	if m == nil {
-		return "", false
+	for _, s := range webSites {
+		if u.Host != s.host {
+			continue
+		}
+		if m := s.convPath.FindStringSubmatch(u.Path); m != nil {
+			return m[1], true
+		}
 	}
-	return m[1], true
+	return "", false
 }
 
 // webState is the state file: each asker's last conversation id. It holds
@@ -283,6 +294,11 @@ func (w *WebAgent) saveState(st webState) {
 func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	if _, err := w.Relay.Claim(ctx, req.ID); err != nil {
 		w.logf("request %s from %s: claim failed: %v", req.ID, req.From, err)
+		return
+	}
+	if _, err := lookupSite(w.Site); err != nil {
+		w.logf("request %s from %s: %v", req.ID, req.From, err)
+		w.reply(ctx, req, fmt.Sprintf("The %s agent is not set up for a known site: %v.", w.Name, err), envelope.StatusFailed, nil)
 		return
 	}
 	label := siteLabel(w.Site)
@@ -455,12 +471,11 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	return fmt.Sprintf("Sending to %s failed.", label)
 }
 
-func (w *WebAgent) live() *live {
-	if w.Site == SourceClaudeAI {
-		return NewClaudeAI(w.Native).live()
-	}
-	return NewChatGPT(w.Native).live()
-}
+// site is the agent's table entry, nil for a site outside the table
+// (Handle fails those requests before anything reads it).
+func (w *WebAgent) site() *webSite { return siteFor(w.Site) }
+
+func (w *WebAgent) live() *live { return w.site().reader(w.Native, nil).live() }
 
 // closeTab asks the extension to close the tab the send left open for
 // convID. It runs on a fresh context so it also happens after a timeout.
@@ -608,12 +623,7 @@ type replyProgress struct {
 	sig string
 }
 
-func (w *WebAgent) nodes(raw json.RawMessage) ([]webNode, error) {
-	if w.Site == SourceClaudeAI {
-		return claudeNodes(raw)
-	}
-	return chatgptNodes(raw)
-}
+func (w *WebAgent) nodes(raw json.RawMessage) ([]webNode, error) { return w.site().nodes(raw) }
 
 func (w *WebAgent) progress(raw json.RawMessage, a replyAnchor) (replyProgress, error) {
 	nodes, err := w.nodes(raw)

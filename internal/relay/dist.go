@@ -75,9 +75,7 @@ func (s *Server) handleDistManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	d := s.dist
 	m := client.DistManifest{Files: []client.DistFile{}}
-	if raw, err := os.ReadFile(filepath.Join(d.dir, "VERSION")); err == nil {
-		m.Version = strings.TrimSpace(string(raw))
-	}
+	m.Version = d.release()
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -159,4 +157,39 @@ func (d *dist) sum(name string) (string, error) {
 	d.sums[name] = c
 	d.mu.Unlock()
 	return c.sum, nil
+}
+
+// release is the dist VERSION, read on every call: the file is a few bytes,
+// and reading it each time means an in-place edit is never missed.
+func (d *dist) release() string {
+	raw, err := os.ReadFile(filepath.Join(d.dir, "VERSION"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// installable reports whether the dist holds the release binary for
+// platform (os_arch), so a notice never sends an agent to a failing
+// tincan upgrade.
+func (d *dist) installable(platform string) bool {
+	name := "tincan_" + platform
+	if !distBinary.MatchString(name) {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(d.dir, name))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// upgradeFor returns the newer release the caller should install, or "".
+// It needs the caller's build and platform headers, and the platform's
+// binary in the dist; clients that send no platform get no notice.
+func (s *Server) upgradeFor(r *http.Request) string {
+	if s.dist != nil {
+		available := s.dist.release()
+		if client.Newer(available, r.Header.Get(client.VersionHeader)) && s.dist.installable(r.Header.Get(client.PlatformHeader)) {
+			return strings.TrimPrefix(available, "v")
+		}
+	}
+	return ""
 }

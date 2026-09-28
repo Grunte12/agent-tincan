@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -14,7 +15,13 @@ import (
 // the agent to handle them as it would a request from the owner, while keeping the
 // sender and chain visible.
 func FormatRequest(req envelope.Request) string {
+	if req.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
+	if req.Urgent {
+		b.WriteString("URGENT ")
+	}
 	fmt.Fprintf(&b, "Request %s from %s (your teammate), via Agent Tincan.\n", req.ID, req.From)
 	if len(req.Chain) > 1 {
 		fmt.Fprintf(&b, "Chain so far: %s (hop %d).\n", strings.Join(req.Chain, " -> "), req.Hop)
@@ -32,6 +39,8 @@ func FormatResult(r Result) string {
 	switch {
 	case r.Reply != nil:
 		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body) + FormatAttachments(r.Reply.Attachments)
+	case r.Status == envelope.StatusClaimed && r.Progress != nil:
+		return fmt.Sprintf("Request %s: %s. Check later with get_reply or `tincan get %s`.\n", r.Request.ID, FormatProgress(r.Progress), r.Request.ID)
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
@@ -40,12 +49,23 @@ func FormatResult(r Result) string {
 	}
 }
 
+// FormatProgress renders the latest note with its author and age, on one
+// line: a note with newlines must not pass for another request or event in
+// a trace.
+func FormatProgress(p *envelope.Progress) string {
+	note := strings.Join(strings.Fields(p.Note), " ")
+	return fmt.Sprintf("claimed by %s, %s ago: %s", p.By, max(time.Duration(0), time.Since(p.At)).Truncate(time.Second), note)
+}
+
 // RepliesHeading introduces replies to the agent's own requests in an inbox.
 const RepliesHeading = "Replies to your requests:\n"
 
 // FormatReply renders a reply to a request this agent sent, with what it
 // asked, since a fresh session may not remember.
 func FormatReply(r Result) string {
+	if r.Request.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
 	from, status, body := r.Request.To, r.Status, ""
 	var atts []envelope.Attachment
@@ -100,10 +120,10 @@ type Claimer interface {
 // through c so no one else handles it. The caller acknowledges the replies
 // (AckReplies) once the text has reached its agent.
 func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
-	if in.Empty() {
-		return "No requests waiting.\n"
-	}
 	var b strings.Builder
+	if in.Empty() {
+		b.WriteString("No requests waiting.\n")
+	}
 	if len(in.Replies) > 0 {
 		b.WriteString(RepliesHeading)
 		for _, r := range in.Replies {
@@ -118,12 +138,16 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		}
 	}
 	for _, req := range in.Requests {
+		if req.Kind == envelope.KindPing {
+			continue
+		}
 		if _, err := c.Claim(ctx, req.ID); err != nil {
 			fmt.Fprintf(&b, "(could not claim %s: %v)\n", req.ID, err)
 			continue
 		}
 		b.WriteString(FormatRequest(req))
 	}
+	b.WriteString(UpgradeNotice(in.UpgradeAvailable))
 	return b.String()
 }
 
