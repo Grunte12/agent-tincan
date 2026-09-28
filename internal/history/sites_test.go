@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpGrokSend: SourceGrok, OpGrokClose: SourceGrok,
 		OpGeminiList: SourceGemini, OpGeminiDetail: SourceGemini, OpGeminiFile: SourceGemini,
 		OpGeminiSend: SourceGemini, OpGeminiClose: SourceGemini,
+		OpPerplexityDetail: SourcePerplexity, OpPerplexitySend: SourcePerplexity, OpPerplexityClose: SourcePerplexity,
 		OpCopilotList: SourceCopilot, OpCopilotDetail: SourceCopilot,
 		OpCopilotSend: SourceCopilot, OpCopilotClose: SourceCopilot,
 	}
@@ -35,7 +37,7 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 // An op with an unknown prefix, or an unknown verb on a known prefix, is
 // not attributed to ChatGPT, and the client refuses it without sending.
 func TestUnknownOpIsRejectedNotChatGPT(t *testing.T) {
-	for _, op := range []Op{"perplexity.list", "chatgpt.delete", "list", "", OpExtensionReload} {
+	for _, op := range []Op{"bard.list", "perplexity.list", "perplexity.file", "chatgpt.delete", "list", "", OpExtensionReload} {
 		if got := op.source(); got != "" {
 			t.Errorf("%q: source %q, want none", op, got)
 		}
@@ -45,7 +47,7 @@ func TestUnknownOpIsRejectedNotChatGPT(t *testing.T) {
 		sent++
 		return nil
 	}), Cooldown: &SiteCooldown{}}
-	_, err := c.Request(context.Background(), "perplexity.list", OpArgs{Count: 1})
+	_, err := c.Request(context.Background(), "bard.list", OpArgs{Count: 1})
 	if !errors.Is(err, ErrRejected) || strings.Contains(err.Error(), "chatgpt") {
 		t.Fatalf("err = %v, want a rejection not attributed to chatgpt", err)
 	}
@@ -65,10 +67,10 @@ func TestSendAndCloseUnknownSiteFail(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}), Cooldown: &SiteCooldown{}}
-	if _, err := c.Send(context.Background(), "perplexity", "hi", "", true); err == nil {
+	if _, err := c.Send(context.Background(), "bard", "hi", "", true); err == nil {
 		t.Fatal("send to an unknown site succeeded")
 	}
-	if err := c.Close(context.Background(), "perplexity", "abc-1"); err == nil {
+	if err := c.Close(context.Background(), "bard", "abc-1"); err == nil {
 		t.Fatal("close on an unknown site succeeded")
 	}
 	if len(ops) != 0 {
@@ -82,8 +84,8 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 			t.Fatalf("ParseWebSite(%q) = %q, %v", s, got, err)
 		}
 	}
-	_, err := ParseWebSite("perplexity")
-	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai, grok, gemini or copilot)` {
+	_, err := ParseWebSite("bard")
+	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity or copilot)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -111,9 +113,9 @@ func TestCooldownsAreIndependentPerSite(t *testing.T) {
 // acting as ChatGPT, and sends nothing.
 func TestWebAgentUnknownSiteFails(t *testing.T) {
 	rig := newWebRig(t)
-	rig.agent.Site = "perplexity"
+	rig.agent.Site = "bard"
 	res := rig.ask(t, "codex", "hello")
-	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `unknown site "perplexity"`) {
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `unknown site "bard"`) {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
 	}
 	if n := rig.browser.exchanges(); n != 0 {
@@ -145,7 +147,7 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini or copilot" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web or copilot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity or copilot" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web or copilot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
 	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli" {
@@ -170,7 +172,10 @@ func TestSiteTableNames(t *testing.T) {
 			t.Fatalf("%s reader: %v %v", src, r, ok)
 		}
 	}
-	for _, src := range []Source{SourceCodex, SourceClaudeCode, "perplexity"} {
+	if got := [3]string{WebAgentName(SourcePerplexity), siteLabel(SourcePerplexity), siteOf(SourcePerplexity)}; got != [3]string{"perplexity-web", "Perplexity", "www.perplexity.ai"} {
+		t.Fatalf("perplexity: %v", got)
+	}
+	for _, src := range []Source{SourceCodex, SourceClaudeCode, "bard"} {
 		if IsLiveSource(src) || WebAgentName(src) != "" {
 			t.Fatalf("%s treated as a live site", src)
 		}
@@ -186,19 +191,59 @@ func TestSiteTableNames(t *testing.T) {
 // Conversation URLs are read on every site's host and no other.
 func TestConversationRefHosts(t *testing.T) {
 	for ref, want := range map[string]string{
-		"https://chatgpt.com/c/abc-1":                             "abc-1",
-		"https://chatgpt.com/g/g-x/c/abc-2":                       "abc-2",
-		"https://claude.ai/chat/abc-3":                            "abc-3",
-		"https://example.com/c/abc-4":                             "",
-		"http://chatgpt.com/c/abc-5":                              "",
-		"https://claude.ai.example.com/chat/x":                    "",
-		"https://grok.com/c/0e1d0000-0000-4000-8000-000000000001": "0e1d0000-0000-4000-8000-000000000001",
-		"https://grok.com/chat/abc-6":                             "",
-		"https://grok.com.example.com/c/abc-7":                    "",
+		"https://chatgpt.com/c/abc-1":                                           "abc-1",
+		"https://chatgpt.com/g/g-x/c/abc-2":                                     "abc-2",
+		"https://claude.ai/chat/abc-3":                                          "abc-3",
+		"https://example.com/c/abc-4":                                           "",
+		"http://chatgpt.com/c/abc-5":                                            "",
+		"https://claude.ai.example.com/chat/x":                                  "",
+		"https://grok.com/c/0e1d0000-0000-4000-8000-000000000001":               "0e1d0000-0000-4000-8000-000000000001",
+		"https://grok.com/chat/abc-6":                                           "",
+		"https://grok.com.example.com/c/abc-7":                                  "",
+		"https://www.perplexity.ai/search/0e1d0000-0000-4000-8000-0000000000a1": "0e1d0000-0000-4000-8000-0000000000a1",
+		"https://perplexity.ai/search/abc-8":                                    "",
+		"https://www.perplexity.ai/c/abc-9":                                     "",
 	} {
 		got, ok := conversationRef(ref)
 		if ok != (want != "") || got != want {
 			t.Errorf("%s: %q %v, want %q", ref, got, ok, want)
 		}
+	}
+}
+
+// Perplexity fronts a web agent only: it is not a history source, has no
+// list or file operation, and the history prose leaves it out.
+func TestPerplexityIsNotAHistorySource(t *testing.T) {
+	want := []Source{SourceChatGPT, SourceClaudeAI, SourceGrok, SourceGemini, SourceCopilot, SourceCodex, SourceClaudeCode, SourceGrokCLI}
+	if len(Sources) != len(want) {
+		t.Fatalf("Sources = %v", Sources)
+	}
+	for i := range want {
+		if Sources[i] != want[i] {
+			t.Fatalf("Sources = %v", Sources)
+		}
+	}
+	if IsLiveSource(SourcePerplexity) {
+		t.Fatal("perplexity is a live history source")
+	}
+	if _, ok := NewLiveReader(SourcePerplexity, &Client{}, nil); ok {
+		t.Fatal("perplexity has a history reader")
+	}
+	if err := (Query{Source: SourcePerplexity, Mode: ModeLatest}).Validate(); err == nil {
+		t.Fatal("a perplexity history query validates")
+	}
+	if strings.Contains(SourceNames(), "perplexity") || strings.Contains(LiveSourcesLabel(), "Perplexity") {
+		t.Fatalf("history names list perplexity: %q, %q", SourceNames(), LiveSourcesLabel())
+	}
+	if !slices.Contains(WebSites, SourcePerplexity) {
+		t.Fatalf("perplexity is not a web site: %v", WebSites)
+	}
+	for _, op := range []Op{"perplexity.list", "perplexity.file"} {
+		if err := ValidateOp(op, OpArgs{Count: 1}); err == nil {
+			t.Errorf("%s validates", op)
+		}
+	}
+	if err := ValidateOp(OpPerplexityDetail, OpArgs{ID: "0e1d0000-0000-4000-8000-0000000000a1"}); err != nil {
+		t.Fatalf("perplexity.detail: %v", err)
 	}
 }

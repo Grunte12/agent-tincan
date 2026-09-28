@@ -1,9 +1,9 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send, grok.send, gemini.send, copilot.send) and the matching
-// close operations (chatgpt.close, claudeai.close, grok.close,
-// gemini.close, copilot.close), plus the in-page image capture gemini.file
-// asks for (capture) and the Copilot chat list read copilot.list asks for
-// (readList).
+// claudeai.send, grok.send, gemini.send, perplexity.send, copilot.send) and
+// the matching close operations (chatgpt.close, claudeai.close,
+// grok.close, gemini.close, perplexity.close, copilot.close), plus the
+// in-page image capture gemini.file asks for (capture) and the Copilot
+// chat list read copilot.list asks for (readList).
 //
 // ChatGPT, claude.ai and grok.com guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
@@ -12,6 +12,7 @@
 //   1. open https://chatgpt.com/ (or /c/<id>), https://claude.ai/new (or
 //      /chat/<id>), https://grok.com/ (or /c/<id>) or
 //      https://gemini.google.com/app (or /app/<id>) or
+//      https://www.perplexity.ai/ (or /search/<slug>) or
 //      https://copilot.com/chat (or /chat/conversation/<id>) with
 //      chrome.tabs.create({active: false});
 //   2. inject the fixed page functions below with chrome.scripting
@@ -63,7 +64,9 @@ export const READ_GAP_MS = 3000;
 // means the page is an anti-bot check. stop and streaming refuse a send
 // into a conversation that is still answering, and with assistant and user
 // they help confirm that the page took the message. None of them is ever
-// used to decide that a reply is finished.
+// used to decide that a reply is finished. dismiss, where a site has it,
+// lists the only buttons a send may click besides send: each is found by
+// its exact text inside one of the within containers (pageDismiss).
 export const SELECTORS = Object.freeze({
   chatgpt: Object.freeze({
     composer: ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'textarea[data-id="root"]', 'form div[contenteditable="true"]'],
@@ -111,6 +114,30 @@ export const SELECTORS = Object.freeze({
     user: ['user-query'],
     login: ['a[href*="accounts.google.com/ServiceLogin"]', 'a[href*="accounts.google.com/v3/signin"]'],
     loginPaths: [],
+  }),
+  // Perplexity's composer is the contenteditable #ask-input; text lands
+  // through execCommand insertText (synthetic key events do not), and a
+  // visible Submit button then appears enabled (both checked live). Enter
+  // submits when no button is found. A signed-out page still offers
+  // anonymous asks, so the session probe in ops.js runs before any tab
+  // opens; login here is the second gate. On load the page can cover the
+  // composer with a promo dialog ("Maybe later" closes it; "Get started"
+  // is never clicked) and a cookie banner ("Decline optional" keeps
+  // optional cookies off).
+  perplexity: Object.freeze({
+    composer: ['div#ask-input[contenteditable="true"]', '#ask-input[contenteditable="true"]', 'textarea#ask-input'],
+    send: ['button[aria-label="Submit"]', 'button[data-testid="submit-button"]', 'button[aria-label*="Submit" i]'],
+    stop: ['button[aria-label*="Stop" i]', 'button[data-testid="stop-generating-response-button"]'],
+    streaming: [],
+    assistant: ['[id^="markdown-content-"]'],
+    user: ['[data-testid="user-query"]', 'h1[class*="query"]'],
+    login: ['a[href^="/auth/signin"]', 'a[href^="/login"]', 'button[data-testid="login-button"]'],
+    loginPaths: ['/auth/signin', '/auth/signup', '/login'],
+    blocked: ['#challenge-form', 'iframe[src*="challenges.cloudflare.com"]', '#cf-challenge-running'],
+    dismiss: [
+      Object.freeze({ text: 'Maybe later', within: ['[role="dialog"]', '[role="alertdialog"]'] }),
+      Object.freeze({ text: 'Decline optional', within: ['[role="dialog"]', '[role="alertdialog"]', '[role="region"]', '[aria-label*="cookie" i]', '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]'] }),
+    ],
   }),
   // copilot.com (where copilot.microsoft.com sends a personal Microsoft
   // account): the composer is a contenteditable span that takes
@@ -169,6 +196,13 @@ export const SITES = Object.freeze({
     convURL: (id) => `https://gemini.google.com/app/${encodeURIComponent(id)}`,
     idFrom: /^https:\/\/gemini\.google\.com\/(?:u\/\d{1,2}\/)?(?:app|gem\/[A-Za-z0-9_-]{1,128})\/([0-9a-f]{8,64})(?:[/?#]|$)/,
   }),
+  // A Perplexity thread is /search/<slug>; new threads' slugs are
+  // uuid-shaped.
+  perplexity: Object.freeze({
+    newURL: 'https://www.perplexity.ai/',
+    convURL: (id) => `https://www.perplexity.ai/search/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/www\.perplexity\.ai\/search\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
+  }),
   // A Copilot id is the conversation's UUID. hiddenIsAway: a loaded tab
   // whose address Chrome hides is on a host the extension has no access
   // to (a Microsoft sign-in or terms page), so it is off the site.
@@ -226,6 +260,41 @@ export function pageProbe(sel) {
     assistantCount: qa(sel.assistant).length,
     userCount: qa(sel.user).length,
   };
+}
+
+// pageDismiss closes the dialogs a site can put over its composer on load.
+// For each of sel.dismiss it clicks at most one enabled button whose text
+// is exactly rule.text inside one of rule.within; nothing else is clicked.
+// It returns the texts it clicked.
+export function pageDismiss(sel) {
+  const rules = Array.isArray(sel.dismiss) ? sel.dismiss : [];
+  const clicked = [];
+  for (const rule of rules) {
+    const scopes = [];
+    for (const s of rule.within) {
+      try {
+        scopes.push(...document.querySelectorAll(s));
+      } catch {
+        // Skipped.
+      }
+    }
+    let btn = null;
+    for (const scope of scopes) {
+      let btns = [];
+      try {
+        btns = Array.from(scope.querySelectorAll('button'));
+      } catch {
+        // Skipped.
+      }
+      btn = btns.find((b) => String(b.innerText ?? b.textContent ?? '').trim() === rule.text && b.disabled !== true) || null;
+      if (btn) break;
+    }
+    if (btn) {
+      btn.click();
+      clicked.push(rule.text);
+    }
+  }
+  return { clicked };
 }
 
 // pageFill puts message into the composer and checks that it landed. It
@@ -304,7 +373,8 @@ export function pageFill(sel, message) {
 }
 
 // pageSubmit clicks the send button, or presses Enter in the composer when
-// no send button exists. A disabled button is reported so the caller can
+// no send button exists. A visible button is preferred over a hidden one
+// that matches first. A disabled button is reported so the caller can
 // retry.
 export function pageSubmit(sel) {
   const q = (list) => {
@@ -318,7 +388,28 @@ export function pageSubmit(sel) {
     }
     return null;
   };
-  const btn = q(sel.send);
+  const shown = (el) => {
+    if (typeof el.checkVisibility === 'function') return el.checkVisibility() !== false;
+    if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
+    return true;
+  };
+  const pick = () => {
+    let first = null;
+    for (const s of sel.send) {
+      let els = [];
+      try {
+        els = Array.from(document.querySelectorAll(s));
+      } catch {
+        // Skipped.
+      }
+      for (const el of els) {
+        if (!first) first = el;
+        if (shown(el)) return el;
+      }
+    }
+    return first;
+  };
+  const btn = pick();
   if (btn) {
     const disabled = btn.disabled === true || (btn.getAttribute && btn.getAttribute('aria-disabled') === 'true');
     if (disabled) return { ok: false, code: 'disabled' };
@@ -676,7 +767,16 @@ export function createSender({
       const answering = () => new OpError('send_failed', 'the conversation is still answering an earlier message');
       if (page.generating) throw answering();
 
-      // 2. Fill and verify.
+      // 2. Close any startup dialog over the composer (a bounded number of
+      // passes, fixed buttons only), then fill and verify.
+      if (Array.isArray(sel.dismiss)) {
+        for (let i = 0; i < 3; i++) {
+          const d = await inject(tab.id, pageDismiss, [sel]);
+          if (!d || !Array.isArray(d.clicked) || d.clicked.length === 0) break;
+          await sleep(pollMs);
+          await onSite(tab.id, cfg);
+        }
+      }
       const fill = await inject(tab.id, pageFill, [sel, args.message]);
       if (!fill || fill.ok !== true) {
         const code = fill && fill.code === 'composer_not_found' ? 'composer_not_found' : 'send_failed';

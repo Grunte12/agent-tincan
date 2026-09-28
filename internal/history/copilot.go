@@ -148,11 +148,18 @@ type copilotDetail struct {
 }
 
 type copilotMessage struct {
-	ID        string      `json:"id"`
-	Author    string      `json:"author"`
-	Text      string      `json:"text"`
-	CreatedAt copilotTime `json:"createdAt"`
-	Sources   []webSource `json:"sources"`
+	ID        string          `json:"id"`
+	Author    string          `json:"author"`
+	Text      string          `json:"text"`
+	CreatedAt copilotTime     `json:"createdAt"`
+	Sources   []copilotSource `json:"sources"`
+}
+
+// copilotSource is one source link the extension read for a Copilot
+// answer.
+type copilotSource struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
 }
 
 func decodeCopilotDetail(raw json.RawMessage) (copilotDetail, error) {
@@ -205,7 +212,9 @@ func parseCopilotDetail(id string, raw json.RawMessage) (thread, error) {
 				cur.reply.Text += m.Text
 				cur.reply.Time = at
 			}
-			cur.sources = append(cur.sources, m.Sources...)
+			for _, src := range m.Sources {
+				cur.replySources = append(cur.replySources, webSource{title: src.Title, url: src.URL})
+			}
 		default:
 			continue
 		}

@@ -129,7 +129,7 @@ test('the options page lists sites, shows grants, and grants from the click', as
   const page = renderOptions({ document: doc, permissions: perms });
   await page.ready;
   let r = rows(doc);
-  assert.deepEqual(r.map((x) => [x.site, x.text, x.status]), [['chatgpt', 'ChatGPT', 'Not granted'], ['claudeai', 'claude.ai', 'Granted'], ['grok', 'Grok', 'Not granted'], ['gemini', 'Gemini', 'Not granted'], ['copilot', 'Copilot', 'Not granted']]);
+  assert.deepEqual(r.map((x) => [x.site, x.text, x.status]), [['chatgpt', 'ChatGPT', 'Not granted'], ['claudeai', 'claude.ai', 'Granted'], ['grok', 'Grok', 'Not granted'], ['gemini', 'Gemini', 'Not granted'], ['perplexity', 'Perplexity', 'Not granted'], ['copilot', 'Copilot', 'Not granted']]);
   assert.equal(r[0].button.hidden, false);
   assert.equal(r[1].button.hidden, true, 'no grant button for a granted site');
 
@@ -180,13 +180,22 @@ test('the options page lists sites, shows grants, and grants from the click', as
   await settle();
   assert.equal(rows(doc)[3].status, 'Granted');
 
+  // Perplexity: one origin, www.perplexity.ai.
+  perms.answer = true;
+  perms.inGesture = true;
+  rows(doc)[4].button.click();
+  perms.inGesture = false;
+  assert.deepEqual(perms.requests.at(-1), { origins: ['https://www.perplexity.ai/*'], inGesture: true });
+  await settle();
+  assert.equal(rows(doc)[4].status, 'Granted');
+
   // Copilot's grant covers copilot.microsoft.com, where it starts, too.
   perms.inGesture = true;
-  r[4].button.click();
+  rows(doc)[5].button.click();
   perms.inGesture = false;
   assert.deepEqual(perms.requests.at(-1), { origins: ['https://copilot.com/*', 'https://copilot.microsoft.com/*'], inGesture: true });
   await settle();
-  assert.equal(rows(doc)[4].status, 'Granted');
+  assert.equal(rows(doc)[5].status, 'Granted');
 });
 
 test('the options page is CSP-safe: no inline script, no main-world code', () => {

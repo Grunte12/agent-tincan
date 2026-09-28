@@ -18,7 +18,7 @@ TINCAN_CONFIG like the fresh-session kinds, their blocks have no standing
 instructions, and their config path is always ~/.config/tincan/<kind>.json:
 history.json (the history service's default config), or the one tincan web
 install's service definition sets for the web agents (chatgpt-web,
-claude-web, grok-web, gemini-web, copilot-web).
+claude-web, grok-web, gemini-web, perplexity-web, copilot-web).
 */ -}}
 
 {{- define "cfgpath"}}~/.config/tincan/{{if .Service}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
@@ -118,16 +118,17 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
-{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else if eq .Kind "copilot-web"}}Microsoft Copilot (copilot.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
-{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else if eq .Kind "copilot-web"}}copilot{{else}}chatgpt{{end}}{{end -}}
+{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else if eq .Kind "perplexity-web"}}Perplexity (www.perplexity.ai){{else if eq .Kind "copilot-web"}}Microsoft Copilot (copilot.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
+{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else if eq .Kind "perplexity-web"}}perplexity{{else if eq .Kind "copilot-web"}}copilot{{else}}chatgpt{{end}}{{end -}}
 
 {{- define "instructions.web" -}}
-{{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer and any generated images attached. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer{{if eq .Kind "perplexity-web"}} followed by its source links (title and URL){{else}} and any generated images attached{{end}}. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 {{- define "instructions.chatgpt-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.claude-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.grok-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.gemini-web"}}{{template "instructions.web" .}}{{end -}}
+{{- define "instructions.perplexity-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.copilot-web"}}{{template "instructions.web" .}} Copilot's replies end with a "Sources:" list of the answer's links.{{end -}}
 
 {{- define "instructions.generic" -}}
@@ -264,7 +265,7 @@ Threading: a first line "new chat" starts a new conversation, "conversation: <id
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
 Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
-{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else if eq .Kind "gemini-web"}}gemini.google.com{{else if eq .Kind "copilot-web"}}copilot.com (Microsoft Copilot, where copilot.microsoft.com leads){{else}}chatgpt.com{{end}}{{end -}}
+{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else if eq .Kind "gemini-web"}}gemini.google.com{{else if eq .Kind "perplexity-web"}}www.perplexity.ai{{else if eq .Kind "copilot-web"}}copilot.com (Microsoft Copilot, where copilot.microsoft.com leads){{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.claude-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.grok-web"}}{{template "setup.web" .}}{{end -}}
@@ -273,6 +274,12 @@ Gemini is an optional site in the extension: grant it once on the extension's op
 Account risk: Google's terms do not allow automated access to Gemini. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Google enforcement is not limited to Gemini and can reach the whole Google account. Decide whether that risk is acceptable before starting it.
 Data reach: Gemini answers can draw on the Google apps connected to {{.OwnerPoss}} account (Gmail, Drive and Calendar among them), so any agent allowed to ask {{.Name}} can read that data through it. Create ~/.config/tincan/{{.Kind}}-allow.txt listing only the agents that should, or disconnect those apps in Gemini's settings.
 It uses the first Google account signed in to Chrome (gemini.google.com/app, not /u/1/); conversations of another signed-in account are not found.
+{{- end -}}
+{{- define "setup.perplexity-web"}}{{template "setup.web" .}}
+Perplexity is an optional site in the extension: grant it once on the extension's options page (chrome://extensions > Agent Tincan History > Details > Extension options > Grant next to Perplexity; it grants www.perplexity.ai). Until then tincan web serve --site perplexity waits while the extension is connected, checking again every minute, and starts serving as soon as the grant appears; requests get a reply naming the options page.
+Sign in: Perplexity answers signed-out visitors too, so {{.Name}} checks for a signed-in account before it opens a tab and refuses to send anonymously; a request while {{.Owner}} is signed out gets a not logged in reply.
+Account risk: Perplexity's terms do not allow using the service by automated means. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Perplexity can still limit or suspend the account. Decide whether that risk is acceptable before starting it.
+Replies carry the answer text, then "Sources:" and up to 10 source links numbered as the answer's [n] markers number them. Perplexity is not a history source: tincan history does not read Perplexity threads.
 {{- end -}}
 {{- define "setup.copilot-web"}}{{template "setup.web" .}}
 It needs a personal Microsoft account: open https://copilot.microsoft.com in Chrome once, sign in, and finish any sign-in or terms prompt Microsoft shows; it lands on copilot.com/chat. A work or school (Microsoft 365) account is not supported, and GitHub Copilot is a different product.
@@ -305,5 +312,6 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.gemini-web"}}Gemini (gemini.google.com) as a teammate, through your logged-in browser{{end -}}
+{{- define "title.perplexity-web"}}Perplexity (www.perplexity.ai) as a teammate, with source links, through your logged-in browser{{end -}}
 {{- define "title.copilot-web"}}Microsoft Copilot (copilot.com, personal account) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

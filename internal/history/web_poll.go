@@ -177,6 +177,9 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			limited, failures = 0, 0
 			delay = w.pollDelay(reads)
 			p, perr := w.progress(raw, a)
+			if errors.Is(perr, errThreadTooLong) {
+				return nil, a.bound, perr
+			}
 			if perr != nil {
 				return nil, a.bound, unavailable(w.Site, ErrEndpointChanged, "unexpected conversation shape")
 			}

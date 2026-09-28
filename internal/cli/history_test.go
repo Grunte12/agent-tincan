@@ -186,6 +186,15 @@ func TestHistoryBadArgs(t *testing.T) {
 	}
 }
 
+// Perplexity fronts a web agent only: it is not a history source.
+func TestHistoryPerplexityIsUnknownSource(t *testing.T) {
+	historyEnv(t)
+	_, err := run(t, Root(), "history", "perplexity")
+	if err == nil || !strings.Contains(err.Error(), `unknown history source "perplexity"`) || strings.Contains(err.Error(), "perplexity or") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // ageMascot makes the fixture's "Old mascot" Codex thread 60 days old.
 func ageMascot(t *testing.T, codexHome string) {
 	t.Helper()

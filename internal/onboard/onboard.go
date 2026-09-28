@@ -24,27 +24,28 @@ var tmpl = template.Must(template.New("onboard").Funcs(template.FuncMap{
 
 // Kinds an agent block or recipe can be tailored to.
 const (
-	KindVMWebhook    = "vm-webhook"
-	KindE2BEmail     = "e2b-email"
-	KindProxySandbox = "proxy-sandbox"
-	KindClaudeCode   = "claude-code"
-	KindChatGPT      = "chatgpt"
-	KindHermes       = "hermes"
-	KindOpenClaw     = "openclaw"
-	KindCodex        = "codex"
-	KindGeminiCLI    = "gemini-cli"
-	KindGrokCLI      = "grok-cli"
-	KindHistory      = "history"
-	KindChatGPTWeb   = "chatgpt-web"
-	KindClaudeWeb    = "claude-web"
-	KindGrokWeb      = "grok-web"
-	KindGeminiWeb    = "gemini-web"
-	KindCopilotWeb   = "copilot-web"
-	KindGeneric      = "generic"
+	KindVMWebhook     = "vm-webhook"
+	KindE2BEmail      = "e2b-email"
+	KindProxySandbox  = "proxy-sandbox"
+	KindClaudeCode    = "claude-code"
+	KindChatGPT       = "chatgpt"
+	KindHermes        = "hermes"
+	KindOpenClaw      = "openclaw"
+	KindCodex         = "codex"
+	KindGeminiCLI     = "gemini-cli"
+	KindGrokCLI       = "grok-cli"
+	KindHistory       = "history"
+	KindChatGPTWeb    = "chatgpt-web"
+	KindClaudeWeb     = "claude-web"
+	KindGrokWeb       = "grok-web"
+	KindGeminiWeb     = "gemini-web"
+	KindPerplexityWeb = "perplexity-web"
+	KindCopilotWeb    = "copilot-web"
+	KindGeneric       = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindCopilotWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -62,40 +63,42 @@ var Sections = []string{"operator", "agents", "recipes", "all"}
 // product runtimes and product agents (history) belong here, never anyone's
 // personal agent names.
 var runtimeNames = map[string]string{
-	"claude-code": KindClaudeCode,
-	"chatgpt":     KindChatGPT,
-	"hermes":      KindHermes,
-	"openclaw":    KindOpenClaw,
-	"codex":       KindCodex,
-	"gemini-cli":  KindGeminiCLI,
-	"grok-cli":    KindGrokCLI,
-	"history":     KindHistory,
-	"chatgpt-web": KindChatGPTWeb,
-	"claude-web":  KindClaudeWeb,
-	"grok-web":    KindGrokWeb,
-	"gemini-web":  KindGeminiWeb,
-	"copilot-web": KindCopilotWeb,
+	"claude-code":    KindClaudeCode,
+	"chatgpt":        KindChatGPT,
+	"hermes":         KindHermes,
+	"openclaw":       KindOpenClaw,
+	"codex":          KindCodex,
+	"gemini-cli":     KindGeminiCLI,
+	"grok-cli":       KindGrokCLI,
+	"history":        KindHistory,
+	"chatgpt-web":    KindChatGPTWeb,
+	"claude-web":     KindClaudeWeb,
+	"grok-web":       KindGrokWeb,
+	"gemini-web":     KindGeminiWeb,
+	"perplexity-web": KindPerplexityWeb,
+	"copilot-web":    KindCopilotWeb,
 }
 
 // defaultWake is the wake method a kind normally uses.
 var defaultWake = map[string]string{
-	KindVMWebhook:    "webhook",
-	KindE2BEmail:     "email",
-	KindProxySandbox: "wait",
-	KindClaudeCode:   "channel",
-	KindChatGPT:      "none",
-	KindHermes:       "webhook",
-	KindOpenClaw:     "webhook",
-	KindCodex:        "command",
-	KindGeminiCLI:    "command",
-	KindGrokCLI:      "command",
-	KindHistory:      "wait",
-	KindChatGPTWeb:   "wait",
-	KindClaudeWeb:    "wait",
-	KindGrokWeb:      "wait",
-	KindGeminiWeb:    "wait",
-	KindCopilotWeb:   "wait",
-	KindGeneric:      "none",
+	KindVMWebhook:     "webhook",
+	KindE2BEmail:      "email",
+	KindProxySandbox:  "wait",
+	KindClaudeCode:    "channel",
+	KindChatGPT:       "none",
+	KindHermes:        "webhook",
+	KindOpenClaw:      "webhook",
+	KindCodex:         "command",
+	KindGeminiCLI:     "command",
+	KindGrokCLI:       "command",
+	KindHistory:       "wait",
+	KindChatGPTWeb:    "wait",
+	KindClaudeWeb:     "wait",
+	KindGrokWeb:       "wait",
+	KindGeminiWeb:     "wait",
+	KindPerplexityWeb: "wait",
+	KindCopilotWeb:    "wait",
+	KindGeneric:       "none",
 }
 
 // freshSession lists the kinds whose every wake starts a fresh session with
@@ -295,7 +298,7 @@ func isService(kind string) bool {
 
 // isWebKind reports whether kind is one of the web agents.
 func isWebKind(kind string) bool {
-	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindCopilotWeb
+	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb
 }
 
 func agentBlock(d agentData) (AgentBlock, error) {

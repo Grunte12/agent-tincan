@@ -39,11 +39,14 @@ const (
 	SourceGemini     Source = "gemini"
 	SourceCopilot    Source = "copilot"
 	SourceGrokCLI    Source = "grok-cli"
+	// SourcePerplexity is www.perplexity.ai. It fronts the perplexity-web
+	// agent only and is not a history source (not in Sources).
+	SourcePerplexity Source = "perplexity"
 )
 
-// Sources lists every valid Source: the live sites, in the site table's
-// order, then the local sources.
-var Sources = append(siteSources(), SourceCodex, SourceClaudeCode, SourceGrokCLI)
+// Sources lists every valid history Source: the live sites that are
+// history sources, in the site table's order, then the local sources.
+var Sources = append(historySiteSources(), SourceCodex, SourceClaudeCode, SourceGrokCLI)
 
 // Mode is what a query asks for.
 type Mode string
@@ -566,9 +569,9 @@ type turn struct {
 	reply    Message
 	// replyImages are images the assistant generated in the reply.
 	replyImages []Image
-	// sources are the reply's source links, where the site gives them
-	// (Copilot); a web agent lists them after the answer.
-	sources []webSource
+	// replySources are the web sources the reply cites, in the site's
+	// order, on a site whose answers carry them (webSite.sources).
+	replySources []webSource
 }
 
 // hasImages reports whether t has images attached to the prompt or

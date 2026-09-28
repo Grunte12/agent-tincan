@@ -21,9 +21,9 @@ const (
 )
 
 // copilotMsg builds one message of the extension's copilot.detail result.
-func copilotMsg(id, author, text string, at time.Time, sources ...webSource) map[string]any {
+func copilotMsg(id, author, text string, at time.Time, sources ...copilotSource) map[string]any {
 	if sources == nil {
-		sources = []webSource{}
+		sources = []copilotSource{}
 	}
 	return map[string]any{"id": id, "author": author, "text": text, "createdAt": at.UTC().Format(time.RFC3339Nano), "sources": sources}
 }
@@ -128,10 +128,10 @@ func TestCopilotReadConversation(t *testing.T) {
 	if t0.prompt.Text != "How far can a tin can telephone carry a voice?" || t0.promptID != "m0000000-0000-4000-8000-000000000001" || !t0.prompt.Time.Equal(time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("turn 0 prompt %+v", t0)
 	}
-	if t0.reply.Text != "About **30 metres** with a taut string [1][2]." || len(t0.sources) != 2 || t0.sources[1] != (webSource{Title: "String Lab", URL: "https://strings.example/range"}) {
+	if t0.reply.Text != "About **30 metres** with a taut string [1][2]." || len(t0.replySources) != 2 || t0.replySources[1] != (webSource{title: "String Lab", url: "https://strings.example/range"}) {
 		t.Fatalf("turn 0 reply %+v", t0)
 	}
-	if t1.reply.Text != "Wire carries it further, a few hundred metres." || len(t1.sources) != 0 {
+	if t1.reply.Text != "Wire carries it further, a few hundred metres." || len(t1.replySources) != 0 {
 		t.Fatalf("turn 1 %+v", t1)
 	}
 
@@ -226,24 +226,27 @@ func TestCopilotListGetsTheTabReadTimeout(t *testing.T) {
 	}
 }
 
-func TestSourcesFooter(t *testing.T) {
+// Copilot gives no source numbers: the shared footer lists plain
+// "- <title> <url>" lines, drops non-http(s), credentialed and repeated
+// URLs, and counts what is over maxReplySources.
+func TestSourcesFooterUnnumbered(t *testing.T) {
 	if got := sourcesFooter(nil); got != "" {
 		t.Fatalf("no sources: %q", got)
 	}
 	var many []webSource
 	for i := range 13 {
-		many = append(many, webSource{Title: fmt.Sprintf("Source  %d\nline", i), URL: fmt.Sprintf("https://s%d.example/p", i)})
+		many = append(many, webSource{title: fmt.Sprintf("Source  %d\nline", i), url: fmt.Sprintf("https://s%d.example/p", i)})
 	}
 	many = append([]webSource{
-		{Title: "", URL: "https://first.example/a"},
-		{Title: "dup", URL: "https://first.example/a"},
-		{Title: "script", URL: "javascript:alert(1)"},
-		{Title: "creds", URL: "https://user:pw@evil.example/"},
-		{Title: "relative", URL: "/chat/pages"},
+		{title: "", url: "https://first.example/a"},
+		{title: "dup", url: "https://first.example/a"},
+		{title: "script", url: "javascript:alert(1)"},
+		{title: "creds", url: "https://user:pw@evil.example/"},
+		{title: "relative", url: "/chat/pages"},
 	}, many...)
 	got := sourcesFooter(many)
 	lines := strings.Split(got, "\n")
-	if lines[0] != "Sources:" || lines[1] != "- first.example https://first.example/a" || lines[2] != "- Source 0 line https://s0.example/p" {
+	if lines[0] != "Sources:" || lines[1] != "- https://first.example/a" || lines[2] != "- Source 0 line https://s0.example/p" {
 		t.Fatalf("footer:\n%s", got)
 	}
 	if len(lines) != 1+maxReplySources+1 || lines[len(lines)-1] != "(and 4 more)" {
@@ -271,7 +274,7 @@ type copilotBrowser struct {
 	seq     int
 	lag     int
 	grow    int
-	sources []webSource
+	sources []copilotSource
 	// sendErr fails every send with that code and message.
 	sendErr, sendMsg string
 }
@@ -370,7 +373,7 @@ func copilotRig(t *testing.T) (*webRig, *copilotBrowser) {
 func TestCopilotWebReplyWithSources(t *testing.T) {
 	rig, b := copilotRig(t)
 	b.lag, b.grow = 1, 3
-	b.sources = []webSource{{Title: "Example Physics", URL: "https://physics.example/tin-can"}, {Title: "again", URL: "https://physics.example/tin-can"}, {Title: "String Lab", URL: "https://strings.example/range"}}
+	b.sources = []copilotSource{{Title: "Example Physics", URL: "https://physics.example/tin-can"}, {Title: "again", URL: "https://physics.example/tin-can"}, {Title: "String Lab", URL: "https://strings.example/range"}}
 	res := rig.ask(t, "codex", "How far does a tin can phone carry?")
 	if res.Status != envelope.StatusAnswered {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)

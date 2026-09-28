@@ -94,8 +94,9 @@ A5. Join this machine's own agent (you), if you are one of the team:
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
-    history, chatgpt-web, claude-web, grok-web, gemini-web, copilot-web, generic.
-    (gemini-cli, grok-cli, grok-web, gemini-web and copilot-web need a relay from this
+    history, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
+    copilot-web, generic.
+    (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web and copilot-web need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>.)
 
@@ -287,7 +288,27 @@ C7. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
       disconnect Gmail, Drive and Calendar in Gemini's settings.
     - Test: `tincan ask gemini-web "Tincan test: say hello in five words."`
 
-C8. Optional: Microsoft Copilot (copilot-web). Tell your owner first, and go
+C8. Optional: Perplexity (perplexity-web). Tell your owner first, and go ahead
+    only if they agree: Perplexity's terms do not allow using the service by
+    automated means, and Perplexity can limit or suspend the account.
+    perplexity-web replies with the answer and its source links (title and
+    URL). Perplexity is not a history source. Then:
+    - Ask your owner to grant Perplexity on the extension's options page
+      (chrome://extensions > Agent Tincan History > Details > Extension
+      options > Grant next to Perplexity). It is not granted by default.
+    - Make sure your owner is signed in to www.perplexity.ai in this same
+      Chrome. Perplexity answers signed-out visitors too, so perplexity-web
+      checks for a signed-in account first and refuses to send anonymously.
+    - Get an invite code with kind perplexity-web and join and install it:
+
+        TINCAN_CONFIG=~/.config/tincan/perplexity-web.json  tincan join <CODE6> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/perplexity-web.json  tincan web install --site perplexity
+
+    - Test: `tincan ask perplexity-web "Tincan test: what is a tin can telephone? One sentence."`
+      The reply should end with a "Sources:" list and the Perplexity
+      conversation id.
+
+C9. Optional: Microsoft Copilot (copilot-web). Tell your owner first, and go
     ahead only if they agree: the Microsoft Services Agreement does not allow
     automated access, and Microsoft's enforcement can reach their whole
     Microsoft account (Outlook, OneDrive), not only Copilot. It needs a

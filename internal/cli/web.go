@@ -20,10 +20,10 @@ import (
 func webCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
-		Short: "Run ChatGPT, Claude, Grok, Gemini or Copilot as a teammate through your logged-in browser",
-		Long: "A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com or copilot.com a teammate: a request's text is typed into your logged-in\n" +
+		Short: "Run ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot as a teammate through your logged-in browser",
+		Long: "A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or copilot.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
-			"with generated images attached. It acts as you there, and the chats show up in your history.\n" +
+			"with generated images attached (and Perplexity's and Copilot's source links listed). It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",
 	}
 	cmd.AddCommand(webServeCmd(), webInstallCmd())
@@ -54,14 +54,14 @@ func webServeCmd() *cobra.Command {
 	var site, configPath, allowPath, statePath, name string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude, Grok, Gemini or Copilot in your browser",
+		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot in your browser",
 		Long: "Long-polls the relay as the web agent and handles one request at a time:\n" +
 			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
 			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. the body is the message. A first line \"new chat\" or \"conversation: <id>\" picks the conversation;\n" +
 			"     otherwise it continues the one this asker used last (remembered in a 0600 state file);\n" +
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
-			"  4. the reply text (capped) comes back with generated images as attachments.\n" +
+			"  4. the reply text (capped) comes back with generated images as attachments, and Perplexity's source links listed after it.\n" +
 			"Normally started by the service definition tincan web install writes.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

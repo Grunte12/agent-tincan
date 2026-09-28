@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { SELECTORS, SITES, createSender, pageCopilotList, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
+import { SELECTORS, SITES, createSender, pageCopilotList, pageDismiss, pageFetchImage, pageFill, pageProbe, pageSubmit } from '../send.js';
 import { parseHTML } from './minidom.js';
 import { createRunner, errorFrame, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
@@ -44,7 +44,7 @@ class El {
     return this.text;
   }
   set textContent(v) {
-    if (!this.page.opts.readOnly) this.text = String(v);
+    if (!this.page.opts.readOnly && !this.page.trapped()) this.text = String(v);
   }
   focus() {
     this.page.doc.activeElement = this;
@@ -67,7 +67,7 @@ class El {
 let convSeq = 0;
 
 // CONV_PATH matches a conversation page's address on any of the sites.
-const CONV_PATH = /\/(?:c|chat|app)\/([A-Za-z0-9_-]+)/;
+const CONV_PATH = /\/(?:c|chat|app|search)\/([A-Za-z0-9_-]+)/;
 
 // FakeSite simulates one chatgpt.com or claude.ai page. opts.match picks
 // which selector in the table the page answers to for each role, so tests
@@ -99,6 +99,32 @@ class FakeSite {
     this.sendBtn = new El(this, 'BUTTON');
     this.sendBtn.onclick = () => this.submit();
     if (this.opts.sendDisabled) this.sendBtn.disabled = true;
+    // hiddenSubmit: a hidden button matching the send selector comes first
+    // in the DOM; clicking it does nothing.
+    this.hiddenClicks = 0;
+    this.hiddenBtn = new El(this, 'BUTTON');
+    this.hiddenBtn.checkVisibility = () => false;
+    this.hiddenBtn.onclick = () => this.hiddenClicks++;
+    // dialogs: [{within, buttons}] overlays open on load; each is found by
+    // its within selector, and clicking any of its buttons closes it.
+    // While one is open the composer takes no text (a focus trap).
+    this.clicks = [];
+    this.dialogs = (this.opts.dialogs || []).map((d) => {
+      const box = { within: d.within, open: true, el: new El(this, 'DIV') };
+      const btns = d.buttons.map((t) => {
+        const b = new El(this, 'BUTTON', t);
+        b.onclick = () => {
+          this.clicks.push(t);
+          box.open = false;
+        };
+        return b;
+      });
+      box.el.querySelectorAll = (q) => (q === 'button' ? btns : []);
+      return box;
+    });
+  }
+  trapped() {
+    return Boolean(this.dialogs) && this.dialogs.some((d) => d.open);
   }
   get location() {
     const u = new URL(this.href);
@@ -120,6 +146,7 @@ class FakeSite {
         // sendAfterText: the button exists only while there is text
         // (grok.com).
         if (this.opts.sendAfterText && !this.composer.text) break;
+        if (this.opts.hiddenSubmit) els.push(this.hiddenBtn);
         if (!this.opts.noSendButton) els.push(this.sendBtn);
         break;
       case 'stop':
@@ -156,6 +183,8 @@ class FakeSite {
     return s[r] && s[r][this.match[r]] ? els : [];
   }
   lookup(sel) {
+    const open = this.dialogs.filter((d) => d.open && d.within === sel).map((d) => d.el);
+    if (open.length) return open;
     for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked', 'signedIn', 'dialog']) {
       if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
@@ -168,7 +197,7 @@ class FakeSite {
       querySelector: (s) => page.lookup(s)[0] || null,
       querySelectorAll: (s) => page.lookup(s),
       execCommand(cmd, _ui, val) {
-        if (!page.opts.execWorks || page.opts.readOnly) return false;
+        if (!page.opts.execWorks || page.opts.readOnly || page.trapped()) return false;
         const t = this.activeElement;
         if (t !== page.composer) return false;
         if (cmd === 'insertText') {
@@ -209,7 +238,7 @@ class FakeSite {
     if (!CONV_PATH.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
       const id = this.site === 'gemini' ? (++convSeq).toString(16).padStart(16, '0') : this.site === 'copilot' ? `c0b1107a-0000-4000-8000-${String(++convSeq).padStart(12, '0')}` : `new-conv-${++convSeq}`;
       this.newID = id;
-      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}`, gemini: `https://gemini.google.com/app/${id}`, copilot: `https://copilot.com/chat/conversation/${id}` }[this.site];
+      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}`, gemini: `https://gemini.google.com/app/${id}`, perplexity: `https://www.perplexity.ai/search/${id}`, copilot: `https://copilot.com/chat/conversation/${id}` }[this.site];
     }
     const last = this.messages.at(-1);
     if (last.role !== 'assistant') this.messages.push({ role: 'assistant', text: 'Part' });
@@ -319,7 +348,7 @@ function sender(fc, extra = {}) {
 // world, with the message only ever as an argument.
 function assertOnlyFixedScripts(log) {
   for (const inj of log.scripts) {
-    assert.ok([pageProbe, pageFill, pageSubmit, pageCopilotList].includes(inj.func), 'unknown injected function');
+    assert.ok([pageProbe, pageDismiss, pageFill, pageSubmit, pageCopilotList].includes(inj.func), 'unknown injected function');
     assert.equal(inj.world, 'ISOLATED');
     assert.equal(inj.code, undefined);
     assert.equal(inj.files, undefined);
@@ -980,6 +1009,111 @@ test('pageFetchImage stops reading once an image passes maxBytes, and refuses a 
   }
 });
 
+// ---- Perplexity.
+
+test('perplexity new chat: opens www.perplexity.ai in a background tab, types into #ask-input, returns the /search/<slug>', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { sendAfterText: true, neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('perplexity', { message: 'What is a tin can telephone?', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://www.perplexity.ai/');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['What is a tin can telephone?']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://www.perplexity.ai/search/${page.newID}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.equal(SELECTORS.perplexity.composer[0], 'div#ask-input[contenteditable="true"]');
+  assert.deepEqual(await s.close('grok', r.conversation_id), { closed: 0 }, 'close is per site');
+  assert.deepEqual(await s.close('perplexity', r.conversation_id), { closed: 1 });
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('perplexity startup dialogs: Maybe later on the promo and Decline optional on the cookie banner, before typing; nothing else clicked', async () => {
+  const dialogs = [
+    { within: '[role="dialog"]', buttons: ['Get started', 'Maybe later'] },
+    { within: '[class*="cookie" i]', buttons: ['Got it', 'Decline optional'] },
+  ];
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { dialogs, sendAfterText: true, neverFinish: true })));
+  const r = await sender(fc).send('perplexity', { message: 'What is the capital of France?', new_chat: true });
+  assert.deepEqual(page.clicks, ['Maybe later', 'Decline optional']);
+  assert.deepEqual(page.submitted, ['What is the capital of France?']);
+  assert.equal(r.conversation_id, page.newID);
+  assertOnlyFixedScripts(fc.log);
+  const order = fc.log.scripts.map((x) => x.func);
+  assert.ok(order.indexOf(pageDismiss) < order.indexOf(pageFill), 'dialogs close before typing');
+  // Two passes at most here: one clicked, the next found nothing.
+  assert.equal(order.filter((f) => f === pageDismiss).length, 2);
+
+  // A dialog with neither button is left alone; the trapped composer then
+  // fails the send before any click.
+  let page2;
+  const fc2 = fakeChrome((url) => (page2 = new FakeSite('perplexity', url, { dialogs: [{ within: '[role="dialog"]', buttons: ['Get started', 'Close'] }] })));
+  await assert.rejects(sender(fc2).send('perplexity', { message: 'x' }), (e) => e.code === 'send_failed');
+  assert.deepEqual(page2.clicks, []);
+  assert.deepEqual(page2.submitted, []);
+
+  // Other sites have no dismiss list, so pageDismiss is never injected.
+  const fc3 = fakeChrome((url) => new FakeSite('chatgpt', url, { neverFinish: true }));
+  await sender(fc3).send('chatgpt', { message: 'hi' });
+  assert.equal(fc3.log.scripts.filter((x) => x.func === pageDismiss).length, 0);
+});
+
+test('pageDismiss clicks only exact button texts inside the listed containers', () => {
+  const clicks = [];
+  const btn = (t, disabled = false) => ({ innerText: t, disabled, click: () => clicks.push(t) });
+  const box = (btns) => ({ querySelectorAll: () => btns });
+  const doc = {
+    '[role="dialog"]': [box([btn('Get started'), btn('Maybe later now'), btn(' Maybe later ', true)])],
+    '[role="region"]': [box([btn('Got it'), btn('Decline optional')])],
+    body: [box([btn('Maybe later')])],
+  };
+  const saved = globalThis.document;
+  globalThis.document = { querySelectorAll: (q) => doc[q] || [] };
+  try {
+    assert.deepEqual(pageDismiss(SELECTORS.perplexity), { clicked: ['Decline optional'] });
+    assert.deepEqual(clicks, ['Decline optional']);
+    assert.deepEqual(pageDismiss({}), { clicked: [] });
+  } finally {
+    globalThis.document = saved;
+  }
+});
+
+test('perplexity clicks the visible Submit button, not a hidden one that matches first', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { hiddenSubmit: true, neverFinish: true })));
+  const r = await sender(fc).send('perplexity', { message: 'visible only' });
+  assert.equal(page.hiddenClicks, 0);
+  assert.deepEqual(page.submitted, ['visible only']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(SELECTORS.perplexity.send[0], 'button[aria-label="Submit"]');
+});
+
+test('perplexity continues /search/<slug>; with no submit button it presses Enter', async () => {
+  const id = '0e1d0000-0000-4000-8000-0000000000a1';
+  const fc = fakeChrome((url) => new FakeSite('perplexity', url, { sendAfterText: true }));
+  const r = await sender(fc).send('perplexity', { message: 'and how long can the string be?', conversation_id: id });
+  assert.equal(fc.log.created[0].url, `https://www.perplexity.ai/search/${id}`);
+  assert.equal(r.conversation_id, id);
+
+  let page;
+  const fc2 = fakeChrome((url) => (page = new FakeSite('perplexity', url, { noSendButton: true })));
+  const r2 = await sender(fc2).send('perplexity', { message: 'enter please' });
+  assert.deepEqual(page.submitted, ['enter please']);
+  assert.equal(r2.conversation_id, page.newID);
+  assert.match(SITES.perplexity.idFrom.exec(`https://www.perplexity.ai/search/${id}?q=1`)[1], /^0e1d/);
+  assert.equal(SITES.perplexity.idFrom.exec(`https://perplexity.ai.example.com/search/${id}`), null);
+});
+
+test('perplexity page showing a Cloudflare challenge is blocked: nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { challenge: true })));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('perplexity', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
 // ---- Copilot.
 
 const COPILOT_CONV = 'c0b1107a-0000-4000-8000-000000000001';
@@ -1022,6 +1156,17 @@ test('a copilot page with a composer but no signed-in account is not_logged_in: 
   assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
   assert.deepEqual(page.submitted, []);
   assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('perplexity signed-out page, sign-in path or a move to another host: not_logged_in, nothing typed, tab closed', async () => {
+  for (const opts of [{ loggedOut: true }, { redirectTo: 'https://www.perplexity.ai/auth/signin?redirect=%2F' }, { redirectTo: 'https://accounts.example.com/login' }]) {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, opts)));
+    await assert.rejects(sender(fc).send('perplexity', { message: 'x' }), (e) => e.code === 'not_logged_in', JSON.stringify(opts));
+    assert.deepEqual(page.submitted, []);
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(fc.log.removed, [100]);
+  }
 });
 
 test('a copilot send tab sent to a Microsoft sign-in or terms page, or one Chrome hides, is not_logged_in with nothing typed', async () => {
@@ -1216,4 +1361,41 @@ test('runner: copilot.list reads the sidebar through the sender', async () => {
   const frames = [];
   await r.run('copilot.list', { count: 2 }, (f) => frames.push(f));
   assert.deepEqual(frames, [{ ok: true, result: { conversations: [{ id: 'c0b1107a-0000-4000-8000-000000000001', title: 'Tin can telephones' }, { id: 'c0b1107a-0000-4000-8000-000000000002', title: 'Morse code basics' }] } }]);
+});
+
+test('runner: perplexity.send checks for a signed-in user first; signed out opens no tab even though the page has a composer', async () => {
+  const SESSION_URL = 'https://www.perplexity.ai/api/auth/session';
+  for (const [name, res, code] of [
+    ['signed out {}', () => jsonResponse({}), 'not_logged_in'],
+    ['no user id', () => jsonResponse({ user: { email: 'owner@example.com' } }), 'not_logged_in'],
+    ['401', () => jsonResponse({}, 401), 'not_logged_in'],
+  ]) {
+    // The page itself would take an anonymous ask.
+    const fc = fakeChrome((url) => new FakeSite('perplexity', url));
+    const calls = [];
+    const r = createRunner({ fetch: async (u) => (calls.push(String(u)), res()), sender: sender(fc) });
+    await assert.rejects(r.run('perplexity.send', { message: 'x' }, () => {}), (e) => e.code === code, name);
+    assert.deepEqual(calls, [SESSION_URL], name);
+    assert.equal(fc.log.created.length, 0, `${name}: no tab`);
+  }
+  // Signed in per the session, but the tab shows a signed-out page: the
+  // second gate refuses before anything is typed.
+  {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { loggedOut: true })));
+    const r = createRunner({ fetch: async () => jsonResponse({ user: { id: 'dummy-user-id' } }), sender: sender(fc) });
+    await assert.rejects(r.run('perplexity.send', { message: 'x' }, () => {}), (e) => e.code === 'not_logged_in');
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(page.submitted, []);
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+  const fc = fakeChrome((url) => new FakeSite('perplexity', url, { neverFinish: true }));
+  const r = createRunner({ fetch: async () => jsonResponse({ user: { id: 'dummy-user-id' } }), sender: sender(fc) });
+  const frames = [];
+  await r.run('perplexity.send', { message: 'hi perplexity' }, (f) => frames.push(f));
+  assert.match(frames[0].result.conversation_id, /^new-conv-/);
+  const closed = [];
+  await r.run('perplexity.close', { conversation_id: frames[0].result.conversation_id }, (f) => closed.push(f));
+  assert.deepEqual(closed, [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(fc.log.removed, [100]);
 });
