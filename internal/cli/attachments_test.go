@@ -176,6 +176,40 @@ func TestUrgentNoticeCountsPastThePendingList(t *testing.T) {
 	}
 }
 
+func TestNewUrgentPastThePendingListIsAnnouncedAtOnce(t *testing.T) {
+	a := announcer{}
+	pending := make([]envelope.Pending, 50)
+	for i := range pending {
+		pending[i] = envelope.Pending{ID: fmt.Sprintf("r%d", i), From: "grokbot", Urgent: true}
+	}
+	now := time.Now()
+	n, ok := a.next(client.Waiting{Total: 50, Queued: 50, Urgent: 50, Pending: pending}, now)
+	if !ok {
+		t.Fatal("first peek not announced")
+	}
+	a.pushed(n, now)
+	// A 51st urgent request lands past the capped pending list: same ids, one
+	// more urgent. It must be announced at once, not after reannounceAfter.
+	w := client.Waiting{Total: 51, Queued: 51, Urgent: 51, Pending: pending}
+	n, ok = a.next(w, now.Add(time.Second))
+	if !ok || !strings.Contains(n.content, "51 urgent requests waiting") {
+		t.Fatalf("new urgent request not announced: %v %q", ok, n.content)
+	}
+	a.pushed(n, now.Add(time.Second))
+	if _, ok := a.next(w, now.Add(2*time.Second)); ok {
+		t.Fatal("same urgent count announced twice")
+	}
+	// Some taken, then one more: a rise from the lower count is new again.
+	w = client.Waiting{Total: 50, Queued: 50, Urgent: 50, Pending: pending}
+	if _, ok := a.next(w, now.Add(3*time.Second)); ok {
+		t.Fatal("a drop in urgent announced")
+	}
+	w = client.Waiting{Total: 51, Queued: 51, Urgent: 51, Pending: pending}
+	if _, ok := a.next(w, now.Add(4*time.Second)); !ok {
+		t.Fatal("urgent rise after a drop not announced")
+	}
+}
+
 func TestRelayRejectsNonPositiveUrgentLimit(t *testing.T) {
 	for _, v := range []string{"0", "-1"} {
 		cmd := relayCmd()

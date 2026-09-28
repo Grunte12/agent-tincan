@@ -120,16 +120,22 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 type announcer struct {
 	seen map[string]bool // item keys announced and still waiting
 	last time.Time       // last successful push
+	// urgent is the urgent count last announced, lowered as urgent requests
+	// are taken. A rise means a new urgent request even when it sits past
+	// the capped pending list, so its id is not there to be seen.
+	urgent int
 }
 
 type notice struct {
 	content string
 	meta    map[string]string
 	keys    []string
+	urgent  int
 }
 
 // next returns the notice for what w shows waiting, and whether to push it:
-// only when some item is new, or all were announced over reannounceAfter ago.
+// only when some item is new, the urgent count rose, or all were announced
+// over reannounceAfter ago.
 func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 	var keys, ids, from []string
 	urgent := 0
@@ -166,6 +172,10 @@ func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 		}
 	}
 	a.seen = still // forget items someone has since taken
+	a.urgent = min(a.urgent, urgent)
+	if urgent > a.urgent {
+		fresh = true
+	}
 	if len(keys) == 0 || (!fresh && now.Sub(a.last) < reannounceAfter) {
 		return notice{}, false
 	}
@@ -193,7 +203,8 @@ func (a *announcer) next(w client.Waiting, now time.Time) (notice, bool) {
 			"from":        strings.Join(from, ","),
 			"request_ids": strings.Join(ids, ","),
 		},
-		keys: keys,
+		keys:   keys,
+		urgent: urgent,
 	}, true
 }
 
@@ -205,6 +216,7 @@ func (a *announcer) pushed(n notice, now time.Time) {
 	for _, k := range n.keys {
 		a.seen[k] = true
 	}
+	a.urgent = n.urgent
 	a.last = now
 }
 
