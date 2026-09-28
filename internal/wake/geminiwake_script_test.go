@@ -214,6 +214,12 @@ func TestGeminiWakeAgyRefusesUnconfinedByDefault(t *testing.T) {
 	if !strings.Contains(r.stderr, "TINCAN_GEMINI_ALLOW_UNCONFINED") || !h.backoff() || h.noticeCount() != 1 {
 		t.Fatalf("refusal: backoff %v, notices %d\nstderr:\n%s", h.backoff(), h.noticeCount(), r.stderr)
 	}
+	// It says where the opt-in goes and how to clear the backoff it sets.
+	for _, want := range []string{"tincan listen --exec", "restart the listener", "/backoff", "Set up with a Google account (no API key)"} {
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("refusal does not say %q:\n%s", want, r.stderr)
+		}
+	}
 }
 
 // The Gemini CLI engine runs with an API key: yolo approval, JSON output,

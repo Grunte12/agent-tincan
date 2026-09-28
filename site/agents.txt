@@ -134,9 +134,17 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Claude Code:   claude mcp add --scope user agent-tincan -- tincan mcp --channel
     - Codex:         codex mcp add agent-tincan -- tincan mcp
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
-    - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
     - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env
-                     TINCAN_CONFIG=<full path of your config> (see docs/adapters/gemini-cli.md)
+                     TINCAN_CONFIG=<full path of your config>. This is the gemini-cli
+                     teammate's normal setup (a Google account, no API key). Its wake
+                     runs agy only when the listener is started with the opt-in on its
+                     command line, since agy has no sandbox and nothing limits its writes:
+                     TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=<your config> \
+                       tincan listen --exec ~/bin/gemini-wake.sh
+                     (see "Set up with a Google account (no API key)" in
+                     docs/adapters/gemini-cli.md)
+    - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
+                     (only with a paid Gemini API key)
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}

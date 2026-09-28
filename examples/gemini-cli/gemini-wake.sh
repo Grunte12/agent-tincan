@@ -14,7 +14,14 @@
 #   agy     the default. Antigravity CLI, logged in once interactively with a
 #           Google consumer account; no API key. agy documents no sandbox,
 #           so the wake refuses to run it unless the owner accepts an
-#           unconfined run with TINCAN_GEMINI_ALLOW_UNCONFINED=1. See
+#           unconfined run with TINCAN_GEMINI_ALLOW_UNCONFINED=1, set on
+#           the command that starts the listener:
+#
+#             TINCAN_GEMINI_ALLOW_UNCONFINED=1 \
+#             TINCAN_CONFIG=~/.config/tincan/gemini-cli.json \
+#               tincan listen --exec ~/bin/gemini-wake.sh
+#
+#           See "Set up with a Google account (no API key)" in
 #           docs/adapters/gemini-cli.md.
 #   gemini  Gemini CLI with a paid API key in GEMINI_API_KEY (Gemini CLI has
 #           not accepted consumer Google logins since 2026-06-18). It runs in
@@ -98,7 +105,7 @@ if [ "$ENGINE" = gemini ] && [ -z "${GEMINI_API_KEY:-}" ]; then
   tincan_wake_refuse "the gemini engine needs GEMINI_API_KEY in the listener's environment (Gemini CLI no longer accepts Google account logins); set it, or use TINCAN_GEMINI_ENGINE=agy"
 fi
 if [ "$ENGINE" = agy ] && [ "${TINCAN_GEMINI_ALLOW_UNCONFINED:-}" != 1 ]; then
-  tincan_wake_refuse "agy has no documented sandbox, so this wake would run it with tool approval off and nothing confining its writes; set TINCAN_GEMINI_ALLOW_UNCONFINED=1 to accept that (docs/adapters/gemini-cli.md), or use TINCAN_GEMINI_ENGINE=gemini"
+  tincan_wake_refuse "agy has no documented sandbox, so this wake would run it with tool approval off and nothing confining its writes. To accept that, set TINCAN_GEMINI_ALLOW_UNCONFINED=1 in the environment of the command that starts the listener (TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=$TINCAN_CONFIG tincan listen --exec $0), restart the listener, and remove $TINCAN_WAKE_STATE_DIR/backoff; see step 6 of \"Set up with a Google account (no API key)\" in docs/adapters/gemini-cli.md. Or use TINCAN_GEMINI_ENGINE=gemini with GEMINI_API_KEY"
 fi
 
 tincan_wake_check_binary "$BIN" "$VERSION_PATTERN"

@@ -597,6 +597,8 @@ Add the MCP entry above (see [examples/codex/config-snippet.toml](examples/codex
 
 The `gemini-cli` teammate runs Gemini as a headless coding agent, woken like Codex. It has two engines: Antigravity CLI (`agy`, the default), which uses your Google account after one interactive login, and Gemini CLI (`gemini`), which needs a paid `GEMINI_API_KEY` because Google stopped accepting Google account logins in Gemini CLI on 2026-06-18. Choose with `TINCAN_GEMINI_ENGINE=agy|gemini` in the listener's environment.
 
+Without an API key, the setup is agy with an opt-in: agy has no sandbox, so the wake runs it only when the listener is started with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`. With that set, agy runs with tool approval off and nothing limits its writes to your user's files; the wake still pins identity and times out. The adapter doc's first section, [Set up with a Google account (no API key)](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key), walks through it step by step.
+
 #### How it joins
 
 ```bash
@@ -610,8 +612,10 @@ Command, through [examples/gemini-cli/gemini-wake.sh](examples/gemini-cli/gemini
 
 ```bash
 mkdir -p ~/bin && cp examples/gemini-cli/gemini-wake.sh examples/lib/tincan-wake-lib.sh ~/bin/ && chmod +x ~/bin/gemini-wake.sh   # from a repo checkout
-TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan listen --exec ~/bin/gemini-wake.sh
+TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan listen --exec ~/bin/gemini-wake.sh
 ```
+
+The wake reads the opt-in only from the listener's environment, which `tincan listen` passes to the script, so it goes on that command (or in the environment of a launchd or systemd service you run the listener under), not in `wake.json` or a config file. Restart the listener after changing it. With the gemini engine, put `TINCAN_GEMINI_ENGINE=gemini` and `GEMINI_API_KEY` there instead.
 
 The script takes a lock, refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's `TINCAN_CONFIG`, runs the engine with a drain-the-inbox prompt under a hard timeout, and backs off (telling `TINCAN_WAKE_OPERATOR` once) after repeated failures, an expired agy login, or a missing API key. Requests stay queued meanwhile.
 
@@ -620,11 +624,11 @@ The script takes a lock, refuses to run unless the engine's MCP config holds exa
 
 #### How it sends and receives
 
-`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy, or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`--trust` spares you confirmations when you run Gemini CLI yourself; the wake's `--approval-mode=yolo` approves tincan tool calls either way).
+`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy (the normal setup), or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`--trust` spares you confirmations when you run Gemini CLI yourself; the wake's `--approval-mode=yolo` approves tincan tool calls either way).
 
 #### One-time setup
 
-Install and log in to the engine, add the MCP server, copy the wake script and library, keep the listener running under launchd, systemd or a terminal, and set `{ "gemini-cli": { "method": "command" } }` in `wake.json`.
+Install agy and log in once with your Google account, add the MCP server with `agy mcp add`, copy the wake script and library, set `{ "gemini-cli": { "method": "command" } }` in `wake.json`, start the listener with `TINCAN_GEMINI_ALLOW_UNCONFINED=1` on its command line as above, and check with `tincan doctor` and a test ask. With a Gemini API key, use Gemini CLI instead and skip the opt-in.
 
 #### Limits and gotchas
 
