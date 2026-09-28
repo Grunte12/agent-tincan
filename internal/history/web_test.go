@@ -255,7 +255,7 @@ func newWebRigWith(t *testing.T, cfg relay.Config, attachments bool) *webRig {
 func (r *webRig) ask(t *testing.T, from, body string) client.Result {
 	t.Helper()
 	c := r.mesh.Client(t, from)
-	req, err := c.Send(t.Context(), "chatgpt-web", body, envelope.KindAsk, "")
+	req, err := c.Send(t.Context(), "chatgpt-web", body, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1126,13 +1126,13 @@ func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
 	})}
 	ctx := t.Context()
 	grok := rig.mesh.Client(t, "grokbot")
-	sent, err := grok.Send(ctx, "chatgpt-web", "only once, please", envelope.KindAsk, "")
+	sent, err := grok.Send(ctx, "chatgpt-web", "only once, please", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// First delivery: the send goes through, then the agent dies before
 	// it replies (no handleSafely, so no failure reply either).
-	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, func(ctx context.Context, req envelope.Request) {
+	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, "web-serve", func(ctx context.Context, req envelope.Request) {
 		defer func() { _ = recover() }()
 		rig.agent.Handle(ctx, req)
 	})
@@ -1193,7 +1193,7 @@ func TestWebRequeuedAnsweredRequestRepliesWithoutSending(t *testing.T) {
 	rig.ask(t, "grokbot", "hello") // conv-1, user message u0
 	ctx := t.Context()
 	grok := rig.mesh.Client(t, "grokbot")
-	sent, err := grok.Send(ctx, "chatgpt-web", "hello", envelope.KindAsk, "")
+	sent, err := grok.Send(ctx, "chatgpt-web", "hello", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1277,5 +1277,25 @@ func TestWebReadReplyUnparseable(t *testing.T) {
 	msg := rig.agent.waitFailure(err, "conv-1")
 	if !strings.Contains(msg, "the reply could not be read") || !strings.Contains(msg, "conv-1") || strings.Contains(msg, "empty") {
 		t.Fatalf("%q", msg)
+	}
+}
+
+func TestWebAnswersPingWithoutHandling(t *testing.T) {
+	rig := newWebRig(t)
+	if _, err := rig.agent.Relay.Peek(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	sender := rig.mesh.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "chatgpt-web", "", envelope.KindPing, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := rig.agent.PollOnce(t.Context())
+	if err != nil || n != 0 {
+		t.Fatalf("handled ping as work: %d %v", n, err)
+	}
+	res, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || res.Reply == nil || !strings.Contains(res.Reply.Body, "web-serve") {
+		t.Fatalf("pong: %+v %v", res, err)
 	}
 }
