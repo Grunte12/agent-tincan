@@ -23,12 +23,14 @@ go run ./cmd/tincan release-tools cws-upload dist/tincan-history-extension-store
 go run ./cmd/tincan release-tools cws-upload dist/tincan-history-extension-store.zip --publish
 ```
 
-The extension has its own version (`extension/manifest.json`), separate from tincan's. When the zip's version is not higher than the store's, cws-upload uploads and publishes nothing, says so and exits 0, so a release that did not touch the extension goes on. Bump the manifest version to ship an extension change.
+The extension has its own version (`extension/manifest.json`), separate from tincan's. When the zip's version is not higher than the store's, cws-upload uploads and publishes nothing, says so and exits 0, so a release that did not touch the extension goes on. Bump the manifest version to ship an extension change. When the store reports the published version and the draft already holds the zip's version unpublished (a publish that failed earlier), cws-upload publishes that draft instead. `cws-upload --publish-only` publishes the current draft without uploading, for when the store does not report the published version.
+
+These are the only Google calls in tincan. The command is hidden and maintainer-only: no user-facing command reaches it, and it runs only when the maintainer runs it.
 
 One-time setup:
 
 1. In the Google Cloud console, in a project owned by the publisher account, enable the Chrome Web Store API and create an OAuth client of type Desktop app. Add the publisher account as a test user on the OAuth consent screen.
-2. Write `~/.config/tincan-release/cws-oauth.json` (or point `TINCAN_CWS_CREDENTIALS` elsewhere) with `client_id`, `client_secret` and `item_id` (`goldflchpojcjmifnljlfkgoahjgeajn`), and `chmod 600` it. The tools refuse a file that anyone but you can read or write. It lives outside the repo; never commit it.
+2. Write `~/.config/tincan-release/cws-oauth.json` (or point `TINCAN_CWS_CREDENTIALS` elsewhere) with `client_id`, `client_secret` and `item_id` (`goldflchpojcjmifnljlfkgoahjgeajn`), `chmod 600` the file and `chmod 700` its directory. The tools refuse a file that anyone but you can read or write, or a directory others can open. It lives outside the repo; never commit it.
 3. Run `go run ./cmd/tincan release-tools cws-auth`. It prints and opens Google's consent page for the `chromewebstore` scope, catches the answer on `http://127.0.0.1:8765` (`--port` changes it), and saves the refresh token into the same file. Neither command prints the client secret, the refresh token or an access token.
 
 While the OAuth consent screen is in testing mode, Google's refresh tokens can expire after 7 days. When cws-upload reports `invalid_grant`, rerun cws-auth. `make release` runs the `--dry-run` check before it pushes the tag, so an expired token stops the release before anything is public.

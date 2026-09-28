@@ -27,7 +27,11 @@ const (
 // writeCreds writes a credentials file with the given mode.
 func writeCreds(t *testing.T, mode os.FileMode, fields map[string]string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "cws-oauth.json")
+	dir := filepath.Join(t.TempDir(), "tincan-release")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "cws-oauth.json")
 	b, _ := json.Marshal(fields)
 	if err := os.WriteFile(p, b, 0o600); err != nil {
 		t.Fatal(err)
@@ -68,13 +72,45 @@ type cwsCall struct {
 }
 
 // fakeCWS serves the token endpoint and the Web Store API, recording each
-// store call. draftVersion is the store's crxVersion ("" leaves it out).
+// store call. draftVersion is the draft's crxVersion ("" leaves it out);
+// publishedVersion is the published one ("" answers the PUBLISHED
+// projection with an error, as an API that does not support it would).
 type fakeCWS struct {
-	mu            sync.Mutex
-	calls         []cwsCall
-	draftVersion  string
-	tokenStatus   int
-	publishStatus []string
+	mu               sync.Mutex
+	calls            []cwsCall
+	draftVersion     string
+	publishedVersion string
+	tokenStatus      int
+	publishStatus    []string
+}
+
+// summary lists the store calls as "METHOD path?query".
+func (f *fakeCWS) summary() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var s []string
+	for _, c := range f.calls {
+		line := c.Method + " " + strings.TrimPrefix(strings.TrimPrefix(c.Path, "/upload"), "/chromewebstore/v1.1/items/testitem")
+		if c.Query != "" {
+			line += "?" + c.Query
+		}
+		s = append(s, line)
+	}
+	return s
+}
+
+const (
+	getDraft     = "GET ?projection=DRAFT"
+	getPublished = "GET ?projection=PUBLISHED"
+	putUpload    = "PUT "
+	postPublish  = "POST /publish"
+)
+
+func wantCalls(t *testing.T, f *fakeCWS, want ...string) {
+	t.Helper()
+	if got := f.summary(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
 }
 
 func (f *fakeCWS) start(t *testing.T) {
@@ -111,8 +147,17 @@ func (f *fakeCWS) start(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			m := map[string]any{"id": "testitem", "uploadState": "SUCCESS"}
-			if f.draftVersion != "" {
-				m["crxVersion"] = f.draftVersion
+			v := f.draftVersion
+			if r.URL.Query().Get("projection") == "PUBLISHED" {
+				if f.publishedVersion == "" {
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, `{"error":{"message":"projection not supported"}}`)
+					return
+				}
+				v = f.publishedVersion
+			}
+			if v != "" {
+				m["crxVersion"] = v
 			}
 			json.NewEncoder(w).Encode(m)
 		case http.MethodPut:
@@ -160,65 +205,88 @@ func runReleaseTools(t *testing.T, args ...string) (string, error) {
 // cws-upload uploads, then publishes, with the bearer token and API version
 // header on every call, and prints no secret.
 func TestCWSUploadAndPublish(t *testing.T) {
-	f := &fakeCWS{draftVersion: "0.5.0"}
-	f.start(t)
-	creds := writeCreds(t, 0o600, fullCreds())
-	zipPath := storeZip(t, "0.6.0")
-	out, err := runReleaseTools(t, "cws-upload", "--credentials", creds, "--publish", zipPath)
-	if err != nil {
-		t.Fatal(out)
-	}
-	assertNoSecrets(t, out)
-	if !strings.Contains(out, "uploaded version 0.6.0") || !strings.Contains(out, "published: OK") {
-		t.Fatalf("output:\n%s", out)
-	}
-	want := []struct{ method, path string }{
-		{"GET", "/chromewebstore/v1.1/items/testitem"},
-		{"PUT", "/upload/chromewebstore/v1.1/items/testitem"},
-		{"POST", "/chromewebstore/v1.1/items/testitem/publish"},
-	}
-	if len(f.calls) != len(want) {
-		t.Fatalf("calls = %+v", f.calls)
-	}
-	for i, w := range want {
-		c := f.calls[i]
-		if c.Method != w.method || c.Path != w.path {
-			t.Fatalf("call %d = %s %s; want %s %s", i, c.Method, c.Path, w.method, w.path)
-		}
-		if c.Auth != "Bearer "+testAccessToken || c.APIVersion != "2" {
-			t.Fatalf("call %d headers: auth %q, x-goog-api-version %q", i, c.Auth, c.APIVersion)
-		}
-	}
-	if f.calls[0].Query != "projection=DRAFT" {
-		t.Fatalf("status query = %q", f.calls[0].Query)
-	}
-	if put := f.calls[1]; put.ContentType != "application/zip" || put.BodyLen == 0 {
-		t.Fatalf("upload: content type %q, %d bytes", put.ContentType, put.BodyLen)
-	}
-}
-
-// When the store already has the zip's version or a newer one, the upload
-// and publish are skipped and the command succeeds, so make release goes on.
-func TestCWSUploadSkipsVersionNotNewer(t *testing.T) {
-	for _, store := range []string{"0.5.0", "0.5.1"} {
-		t.Run(store, func(t *testing.T) {
-			f := &fakeCWS{draftVersion: store}
+	for _, published := range []string{"", "0.5.0"} {
+		t.Run("published="+published, func(t *testing.T) {
+			f := &fakeCWS{draftVersion: "0.5.0", publishedVersion: published}
 			f.start(t)
-			out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.5.0"))
+			out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0"))
 			if err != nil {
 				t.Fatal(out)
 			}
-			if !strings.Contains(out, "nothing is uploaded") {
+			assertNoSecrets(t, out)
+			if !strings.Contains(out, "uploaded version 0.6.0") || !strings.Contains(out, "published: OK") {
 				t.Fatalf("output:\n%s", out)
 			}
-			if len(f.calls) != 1 || f.calls[0].Method != "GET" {
-				t.Fatalf("calls = %+v; want only the status GET", f.calls)
+			wantCalls(t, f, getDraft, getPublished, putUpload, postPublish)
+			for i, c := range f.calls {
+				if c.Auth != "Bearer "+testAccessToken || c.APIVersion != "2" {
+					t.Fatalf("call %d headers: auth %q, x-goog-api-version %q", i, c.Auth, c.APIVersion)
+				}
+			}
+			if put := f.calls[2]; put.Path != "/upload/chromewebstore/v1.1/items/testitem" || put.ContentType != "application/zip" || put.BodyLen == 0 {
+				t.Fatalf("upload: %s, content type %q, %d bytes", put.Path, put.ContentType, put.BodyLen)
 			}
 		})
 	}
 }
 
-// --dry-run checks the token and the store version and changes nothing.
+// When the store already has the zip's version or a newer one, nothing is
+// uploaded or published and the command succeeds, so make release goes on.
+func TestCWSUploadSkipsVersionNotNewer(t *testing.T) {
+	for _, tc := range []struct{ draft, published string }{
+		{"0.5.0", ""},      // published version unknown: the draft decides
+		{"0.5.1", ""},      // a newer draft
+		{"0.5.0", "0.5.0"}, // published already
+		{"0.5.1", "0.5.1"},
+	} {
+		t.Run(tc.draft+"/"+tc.published, func(t *testing.T) {
+			f := &fakeCWS{draftVersion: tc.draft, publishedVersion: tc.published}
+			f.start(t)
+			out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.5.0"))
+			if err != nil {
+				t.Fatal(out)
+			}
+			if !strings.Contains(out, "nothing is uploaded or published") {
+				t.Fatalf("output:\n%s", out)
+			}
+			wantCalls(t, f, getDraft, getPublished)
+		})
+	}
+}
+
+// A draft of the zip's version that was uploaded but never published (a
+// failed publish) is published on the next run instead of skipped.
+func TestCWSUploadPublishesUnpublishedDraft(t *testing.T) {
+	f := &fakeCWS{draftVersion: "0.6.0", publishedVersion: "0.5.0"}
+	f.start(t)
+	out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0"))
+	if err != nil {
+		t.Fatal(out)
+	}
+	if !strings.Contains(out, "already uploaded as the draft but not published") || !strings.Contains(out, "published: OK") {
+		t.Fatalf("output:\n%s", out)
+	}
+	wantCalls(t, f, getDraft, getPublished, postPublish)
+}
+
+// --publish-only publishes the current draft and uploads nothing.
+func TestCWSPublishOnly(t *testing.T) {
+	f := &fakeCWS{publishStatus: []string{"ITEM_PENDING_REVIEW"}}
+	f.start(t)
+	out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish-only")
+	if err != nil {
+		t.Fatal(out)
+	}
+	if !strings.Contains(out, "published: ITEM_PENDING_REVIEW") {
+		t.Fatalf("output:\n%s", out)
+	}
+	wantCalls(t, f, postPublish)
+	if _, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish-only", "extra.zip"); err == nil {
+		t.Fatal("--publish-only with a zip argument was accepted")
+	}
+}
+
+// --dry-run checks the token and the store versions and changes nothing.
 func TestCWSUploadDryRun(t *testing.T) {
 	f := &fakeCWS{draftVersion: "0.5.0"}
 	f.start(t)
@@ -229,28 +297,39 @@ func TestCWSUploadDryRun(t *testing.T) {
 	if !strings.Contains(out, "dry run: would upload") {
 		t.Fatalf("output:\n%s", out)
 	}
-	if len(f.calls) != 1 || f.calls[0].Method != "GET" {
-		t.Fatalf("calls = %+v; want only the status GET", f.calls)
-	}
+	wantCalls(t, f, getDraft, getPublished)
 }
 
-// A credentials file anyone else can read or write is refused before any
-// network call.
+// A credentials file anyone else can read or write, or one in a directory
+// others can open, is refused before any network call.
 func TestCWSCredentialsPermissions(t *testing.T) {
 	f := &fakeCWS{}
 	f.start(t)
-	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o660} {
-		creds := writeCreds(t, mode, fullCreds())
+	check := func(creds, want string) {
+		t.Helper()
 		for _, args := range [][]string{
 			{"cws-upload", "--credentials", creds, storeZip(t, "0.6.0")},
+			{"cws-upload", "--credentials", creds, "--publish-only"},
 			{"cws-auth", "--credentials", creds, "--port", "0", "--timeout", "1s"},
 		} {
 			out, err := runReleaseTools(t, args...)
-			if err == nil || !strings.Contains(out, "chmod 600") {
-				t.Fatalf("%s with mode %04o: %v\n%s", args[0], mode, err, out)
+			if err == nil || !strings.Contains(out, want) {
+				t.Fatalf("%v: %v\n%s", args, err, out)
 			}
 			assertNoSecrets(t, out)
 		}
+	}
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o660} {
+		check(writeCreds(t, mode, fullCreds()), "chmod 600")
+	}
+	for _, mode := range []os.FileMode{0o755, 0o750, 0o705} {
+		creds := writeCreds(t, 0o600, fullCreds())
+		dir := filepath.Dir(creds)
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		check(creds, "chmod 700")
+		os.Chmod(dir, 0o700)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("calls = %+v", f.calls)
@@ -510,6 +589,15 @@ func TestMakeReleaseDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, "dist")); err == nil {
 		t.Fatal("dry run built dist")
+	}
+
+	// A check that would stop the release still lets the dry run print
+	// every step, but fails it.
+	os.WriteFile(filepath.Join(repo, "stray"), []byte("x"), 0o644)
+	out, err = runRelease(t, repo, env, "VERSION=0.0.0", "DRY_RUN=1", "NOTES="+notes,
+		"RELEASE_REMOTE="+remote, "RELEASE_TINCAN=faketincan")
+	if err == nil || !strings.Contains(out, "not clean") || !strings.Contains(out, "+ faketincan release-tools cws-upload --publish") {
+		t.Fatalf("blocked dry run: %v\n%s", err, out)
 	}
 }
 

@@ -79,8 +79,18 @@ type cwsCreds struct {
 }
 
 // loadCWSCreds reads the credentials file, refusing one that anyone but its
-// owner can read or write.
+// owner can read or write, or that sits in a directory others can open
+// (secret files live at 0600 in 0700 directories; cws-auth writes a new
+// refresh token there).
 func loadCWSCreds(path string) (*cwsCreds, error) {
+	dir := filepath.Dir(path)
+	di, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("chrome web store credentials: %w (see docs/chrome-web-store.md)", err)
+	}
+	if perm := di.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("the chrome web store credentials directory %s has mode %04o; it must be private to you: chmod 700 %s", dir, perm, dir)
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("chrome web store credentials: %w (see docs/chrome-web-store.md)", err)
@@ -386,24 +396,58 @@ func openBrowser(u string) error {
 
 func cwsUploadCmd() *cobra.Command {
 	var credsPath string
-	var publish, dryRun bool
+	var publish, publishOnly, dryRun bool
 	cmd := &cobra.Command{
-		Use:   "cws-upload <store zip>",
+		Use:   "cws-upload <store zip> | --publish-only",
 		Short: "Upload the store zip to the Chrome Web Store, and publish it with --publish",
 		Long: `Upload the Web Store zip (make store) to the item named by item_id in the
-credentials file, then with --publish submit it for publishing. The upload
-is skipped when the store's draft already has the zip's manifest version or
-a newer one. --dry-run checks the credentials, the access token and the
-store's version, and changes nothing.`,
-		Args: cobra.ExactArgs(1),
+credentials file, then with --publish submit it for publishing. Nothing is
+uploaded or published when the store already has the zip's manifest
+version or a newer one; a draft of that version that was uploaded but not
+published is published when the store reports the published version.
+--publish-only publishes the current draft without uploading. --dry-run
+checks the credentials, the access token and the store's versions, and
+changes nothing.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if publishOnly {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if publishOnly {
+				return cwsPublishOnly(cmd.Context(), credsPath, dryRun, cmd.OutOrStdout())
+			}
 			return cwsUpload(cmd.Context(), credsPath, args[0], publish, dryRun, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&credsPath, "credentials", defaultCWSCredentials(), "credentials file (env "+cwsCredentialsEnv+")")
 	cmd.Flags().BoolVar(&publish, "publish", false, "publish the item after the upload")
+	cmd.Flags().BoolVar(&publishOnly, "publish-only", false, "publish the store's current draft; upload nothing")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "check credentials and versions; upload and publish nothing")
 	return cmd
+}
+
+// cwsPublishOnly publishes the item's current draft, for a draft whose
+// earlier publish failed or never ran.
+func cwsPublishOnly(ctx context.Context, credsPath string, dryRun bool, out io.Writer) error {
+	creds, err := loadCWSCreds(credsPath)
+	if err != nil {
+		return err
+	}
+	if err := creds.require("client_id", "client_secret", "refresh_token", "item_id"); err != nil {
+		return err
+	}
+	token, err := cwsAccessToken(ctx, creds)
+	if err != nil {
+		return err
+	}
+	if dryRun {
+		fmt.Fprintf(out, "dry run: would publish the draft of store item %s\n", creds.ItemID)
+		return nil
+	}
+	c := &cwsClient{creds: creds, token: token}
+	return c.publish(ctx, url.PathEscape(creds.ItemID), out)
 }
 
 // cwsUpload uploads zipPath and, with publish, publishes it.
@@ -434,12 +478,36 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 	if err != nil {
 		return fmt.Errorf("store status: %w", err)
 	}
-	storeVersion, _ := status["crxVersion"].(string)
+	draftVersion, _ := status["crxVersion"].(string)
 	state, _ := status["uploadState"].(string)
-	fmt.Fprintf(out, "store item %s: draft version %s, upload state %s; zip version %s\n",
-		creds.ItemID, orUnknown(storeVersion), orUnknown(state), version)
-	if storeVersion != "" && !manifestVersionGreater(version, storeVersion) {
-		fmt.Fprintf(out, "the store already has version %s; manifest version %s is not newer, so nothing is uploaded (bump extension/manifest.json to ship the extension)\n", storeVersion, version)
+	// The published version tells an already-published zip from a draft
+	// that was uploaded but never published. The API may not report it;
+	// then it stays unknown.
+	publishedVersion := ""
+	if pub, err := c.call(ctx, http.MethodGet, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"?projection=PUBLISHED", nil, ""); err == nil {
+		publishedVersion, _ = pub["crxVersion"].(string)
+	}
+	fmt.Fprintf(out, "store item %s: draft version %s (upload state %s), published version %s; zip version %s\n",
+		creds.ItemID, orUnknown(draftVersion), orUnknown(state), orUnknown(publishedVersion), version)
+
+	switch {
+	case publishedVersion != "" && !manifestVersionGreater(version, publishedVersion):
+		fmt.Fprintf(out, "the store has published version %s; manifest version %s is not newer, so nothing is uploaded or published (bump extension/manifest.json to ship the extension)\n", publishedVersion, version)
+		return nil
+	case draftVersion != "" && draftVersion == version && publishedVersion != "":
+		// Uploaded before but not published: a publish that failed or
+		// never ran. Publish it now instead of skipping it.
+		fmt.Fprintf(out, "version %s is already uploaded as the draft but not published\n", version)
+		if !publish {
+			return nil
+		}
+		if dryRun {
+			fmt.Fprintf(out, "dry run: would publish the draft (version %s)\n", version)
+			return nil
+		}
+		return c.publish(ctx, item, out)
+	case draftVersion != "" && !manifestVersionGreater(version, draftVersion):
+		fmt.Fprintf(out, "the store's draft already has version %s; manifest version %s is not newer, so nothing is uploaded or published (bump extension/manifest.json to ship the extension). If that draft was never published, run tincan release-tools cws-upload --publish-only\n", draftVersion, version)
 		return nil
 	}
 	if dryRun {
@@ -478,7 +546,13 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 	if !publish {
 		return nil
 	}
+	return c.publish(ctx, item, out)
+}
 
+// publish submits the item's draft for publishing. OK and
+// ITEM_PENDING_REVIEW count as success.
+func (c *cwsClient) publish(ctx context.Context, item string, out io.Writer) error {
+	creds, token := c.creds, c.token
 	pub, err := c.call(ctx, http.MethodPost, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"/publish", nil, "")
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)

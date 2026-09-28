@@ -135,7 +135,8 @@ release-mac: dist sign-mac notarize-mac
 # then the GitHub release and the Chrome Web Store upload follow. The store
 # upload is skipped, not failed, when extension/manifest.json is not newer
 # than the store's version. DRY_RUN=1 runs the read-only checks, reports any
-# that would stop the release, and prints every step without running it.
+# that would stop the release, prints every step without running it, and
+# exits non-zero when a check failed.
 #
 #   RELEASE_REMOTE  where the tag goes and main is compared (default origin;
 #                   a URL works)
@@ -161,7 +162,8 @@ release:
 	v='$(VERSION)'; \
 	echo "$$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$' || { echo "make release: VERSION must be x.y.z or x.y.z-pre, without a leading v (got $$v)" >&2; exit 1; }; \
 	tag="v$$v"; \
-	fail() { if [ -n "$$dry" ]; then echo "make release: dry run, the release would stop here: $$*" >&2; else echo "make release: $$*" >&2; exit 1; fi; }; \
+	blocked=; \
+	fail() { if [ -n "$$dry" ]; then blocked=1; echo "make release: dry run, the release would stop here: $$*" >&2; else echo "make release: $$*" >&2; exit 1; fi; }; \
 	run() { echo "+ $$*"; if [ -z "$$dry" ]; then "$$@"; fi; }; \
 	[ -n "$(NOTES)" ] || fail "NOTES=<file> is required (the release notes)"; \
 	[ -z "$(NOTES)" ] || [ -f "$(NOTES)" ] || fail "notes file $(NOTES) does not exist"; \
@@ -189,4 +191,6 @@ release:
 	pushed=1; \
 	run gh release create "$$tag" --repo "$(RELEASE_REPO)" --verify-tag --title "$$tag" --notes-file "$(NOTES)" $$pre $(RELEASE_ASSETS); \
 	if [ "$(CWS)" != 0 ]; then run $(RELEASE_TINCAN) release-tools cws-upload --publish $(STORE_ZIP); fi; \
-	if [ -n "$$dry" ]; then echo "make release: dry run; nothing was run"; else echo "make release: released $$tag"; fi
+	if [ -z "$$dry" ]; then echo "make release: released $$tag"; \
+	elif [ -n "$$blocked" ]; then echo "make release: dry run; nothing was run, and a check above would stop the release" >&2; exit 1; \
+	else echo "make release: dry run; nothing was run"; fi
