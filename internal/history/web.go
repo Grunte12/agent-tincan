@@ -368,14 +368,24 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		}
 	}
 	anchor, err := w.anchorFor(ctx, convID, wr.message)
+	var note string
+	if errors.Is(err, errThreadTooLong) {
+		if !remembered {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the conversation %s is longer than tincan reads, so its reply could not be seen. Ask without a conversation: line, or with new chat, to start a new one.", label, convID), envelope.StatusFailed, nil)
+			return
+		}
+		note = fmt.Sprintf("Your previous %s conversation (id %s) is longer than tincan reads, so this went to a new chat.", label, convID)
+		delete(st.Conversations, req.From)
+		convID, newChat, err = "", true, nil
+		anchor = replyAnchor{message: wr.message}
+	}
 	if err != nil {
 		w.logf("request %s from %s: reading the conversation before the send: %v; not sending", req.ID, req.From, err)
 		w.reply(ctx, req, w.rateLimitReply(), envelope.StatusFailed, nil)
 		return
 	}
 	res, err := w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
-	var note string
-	if remembered && errors.Is(err, ErrNotFound) {
+	if remembered && convID != "" && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
@@ -488,8 +498,9 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 	w.reply(ctx, req, body, envelope.StatusAnswered, ids)
 }
 
-// capReplyTo caps the reply text at n bytes.
+// capReplyTo caps the reply text at n bytes (none when n is negative).
 func capReplyTo(s string, n int) (string, bool) {
+	n = max(n, 0)
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "(the reply was empty)", false
@@ -514,11 +525,16 @@ const maxReplySources = 10
 // maxSourceTitle caps one source's title in bytes.
 const maxSourceTitle = 200
 
+// maxSourceURL is the longest source URL listed; a longer one is left out
+// (its number still counts), so the whole list stays well inside
+// maxWebReplyBytes.
+const maxSourceURL = 2048
+
 // sourcesFooter formats an answer's sources: "Sources:", then one
 // "- <title> <url>" line per source ("- [n] <title> <url>" when the site
 // numbers them), in the site's order. Only http and https URLs are
-// listed, each once (its first occurrence, with that number); titles are
-// put on one line and capped. After maxReplySources the rest are counted.
+// listed, each once (its first occurrence, with that number), and none
+// over maxSourceURL bytes; titles are put on one line and capped. After maxReplySources the rest are counted.
 // It is "" when there is nothing to list.
 func sourcesFooter(srcs []webSource) string {
 	seen := map[string]bool{}
@@ -530,7 +546,7 @@ func sourcesFooter(srcs []webSource) string {
 			continue
 		}
 		link := u.String()
-		if seen[link] {
+		if len(link) > maxSourceURL || seen[link] {
 			continue
 		}
 		seen[link] = true
@@ -616,6 +632,8 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 	switch {
 	case errors.Is(err, errOrphaned):
 		return fmt.Sprintf("Sorry, another message was sent in the %s conversation %s before this one was answered, so there is no reply to return.", label, convID)
+	case errors.Is(err, errThreadTooLong):
+		return fmt.Sprintf("Sorry, the message was sent to %s, but the conversation %s is now longer than tincan reads, so the reply could not be read. Open the conversation to see it, and start a new chat next time.", label, convID)
 	case errors.Is(err, errReplyUnreadable):
 		return fmt.Sprintf("Sorry, the message was sent to %s (conversation %s) and it answered, but the reply could not be read.", label, convID)
 	}
@@ -646,7 +664,8 @@ type replyAnchor struct {
 // anchorFor reads the conversation's last user message before a send into
 // an existing conversation. When that read fails, prevUser stays empty and
 // the message is found by its text and time alone. A rate limit is
-// returned instead: sending now would only add to it.
+// returned instead: sending now would only add to it. So is
+// errThreadTooLong: the reply could never be seen.
 func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (replyAnchor, error) {
 	a := replyAnchor{message: message}
 	if convID == "" {
@@ -665,7 +684,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 			return a, nil
 		}
 	}
-	if _, ok := rateLimited(err); ok {
+	if _, ok := rateLimited(err); ok || errors.Is(err, errThreadTooLong) {
 		return a, err
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -916,6 +935,10 @@ var errOrphaned = errors.New("another message was sent in the conversation befor
 
 // errReplyUnreadable: the finished read could not be turned into a reply.
 var errReplyUnreadable = errors.New("the reply could not be read")
+
+// errThreadTooLong: the conversation is longer than the extension reads,
+// so its newest turns (this request's) cannot be seen.
+var errThreadTooLong = errors.New("the conversation is longer than tincan reads")
 
 // webReply is the answer read from the finished conversation: its text,
 // its fetched images (conv), how many images it had before any failed to

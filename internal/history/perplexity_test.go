@@ -2,6 +2,7 @@ package history
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,6 +134,27 @@ func TestPerplexityUnexpectedShapes(t *testing.T) {
 		if _, err := perplexityNodes(json.RawMessage(raw)); err == nil {
 			t.Errorf("%s: nodes parsed", name)
 		}
+	}
+	// COMPLETED is not enough: the answer markdown must be DONE. Without
+	// a progress marker, or still in progress, the entry is not finished
+	// (sources alone do not finish it); with no markdown block and no
+	// answer text anywhere the shape changed.
+	for name, raw := range map[string]string{
+		"no progress": `{"entries":[{"uuid":"e-1","status":"COMPLETED","query_str":"q","blocks":[{"intended_usage":"web_results","web_result_block":{"web_results":[{"name":"S","url":"https://example.com/s"}]}},{"intended_usage":"ask_text","markdown_block":{"answer":""}}]}]}`,
+		"in progress": `{"entries":[{"uuid":"e-1","status":"COMPLETED","query_str":"q","blocks":[{"intended_usage":"web_results","web_result_block":{"web_results":[{"name":"S","url":"https://example.com/s"}]}},{"intended_usage":"ask_text","markdown_block":{"progress":"IN_PROGRESS","answer":"par"}}]}]}`,
+	} {
+		nodes, err := perplexityNodes(json.RawMessage(raw))
+		if err != nil || len(nodes) != 2 || nodes[1].finished || nodes[1].endTurn {
+			t.Errorf("%s: %+v %v", name, nodes, err)
+		}
+	}
+	sourcesOnly := `{"entries":[{"uuid":"e-1","status":"COMPLETED","query_str":"q","blocks":[{"intended_usage":"web_results","web_result_block":{"web_results":[{"name":"S","url":"https://example.com/s"}]}}]}]}`
+	if _, err := perplexityNodes(json.RawMessage(sourcesOnly)); err == nil {
+		t.Error("completed with sources and no answer markdown: nodes parsed")
+	}
+	capped := `{"entries":[{"uuid":"e-1","status":"COMPLETED","query_str":"q","blocks":[{"intended_usage":"ask_text","markdown_block":{"progress":"DONE","answer":"a"}}]}],"more":true}`
+	if _, err := perplexityNodes(json.RawMessage(capped)); !errors.Is(err, errThreadTooLong) {
+		t.Errorf("capped read: %v", err)
 	}
 	// A block of an unknown kind, or a known block whose fields changed
 	// type, is skipped rather than failing the read.

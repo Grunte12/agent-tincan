@@ -74,6 +74,9 @@ func (r *Perplexity) Read(ctx context.Context, q Query, opts Options) (Page, err
 type pxDetail struct {
 	Slug    string            `json:"slug"`
 	Entries []json.RawMessage `json:"entries"`
+	// More: the extension stopped at its page cap with older-first entries
+	// still unread, so the newest ones are missing.
+	More bool `json:"more"`
 }
 
 // pxEntry is one thread entry: a question and its answer.
@@ -186,16 +189,19 @@ func (e *pxEntry) at() time.Time {
 	return time.Time{}
 }
 
-// finished: the entry's status is COMPLETED and its answer markdown, when
-// it has one, is DONE.
+// finished: the entry's status is COMPLETED and its answer markdown is
+// DONE. An entry with no answer markdown block (the older shapes, which
+// carry no progress marker) is finished only once one of them holds
+// answer text; sources alone do not finish it.
 func (e *pxEntry) finished() bool {
 	if !strings.EqualFold(e.Status, "COMPLETED") {
 		return false
 	}
-	if m := e.markdown(); m != nil && m.Progress != "" {
+	if m := e.markdown(); m != nil {
 		return strings.EqualFold(m.Progress, "DONE")
 	}
-	return true
+	text, _ := e.answer()
+	return strings.TrimSpace(text) != ""
 }
 
 // failed: the entry ended without an answer.
@@ -370,12 +376,16 @@ func pxEntries(raw json.RawMessage) (pxDetail, []pxEntry, error) {
 	return d, out, nil
 }
 
-// pxAnswer is an entry's answer, checked: a COMPLETED entry with neither
-// answer text nor sources in any known place means the shape changed.
+// pxAnswer is an entry's answer, checked. The shape changed when a
+// COMPLETED entry has no answer text and no answer markdown block (the
+// older shapes have no progress marker to wait on), or when its markdown
+// is DONE with neither answer text nor sources.
 func pxAnswer(e *pxEntry) (string, []webSource, error) {
 	text, srcs := e.answer()
-	if e.finished() && strings.TrimSpace(text) == "" && len(srcs) == 0 {
-		return "", nil, fmt.Errorf("entry %s: finished with no answer in any known place", e.id())
+	if strings.EqualFold(e.Status, "COMPLETED") && strings.TrimSpace(text) == "" {
+		if e.markdown() == nil || (e.finished() && len(srcs) == 0) {
+			return "", nil, fmt.Errorf("entry %s: completed with no answer in any known place", e.id())
+		}
 	}
 	return text, srcs, nil
 }
@@ -420,10 +430,16 @@ func parsePerplexityDetail(id string, raw json.RawMessage) (thread, error) {
 // node (its question) and a reply node (its answer). The answer is
 // finished when the entry's status is COMPLETED; a failed entry ends the
 // turn with no answer.
+//
+// A read that stopped at the extension's page cap is errThreadTooLong:
+// the entries it lacks are the newest, where this request's turn is.
 func perplexityNodes(raw json.RawMessage) ([]webNode, error) {
-	_, entries, err := pxEntries(raw)
+	d, entries, err := pxEntries(raw)
 	if err != nil {
 		return nil, err
+	}
+	if d.More {
+		return nil, errThreadTooLong
 	}
 	var out []webNode
 	for i := range entries {

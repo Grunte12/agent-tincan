@@ -33,6 +33,9 @@ type perplexityBrowser struct {
 	// read, with detailRetry as its Retry-After.
 	sendErr, detailErr string
 	detailRetry        int
+	// maxEntries, when set, is the extension's page cap: a longer thread
+	// shows only its first maxEntries entries, with more set.
+	maxEntries int
 }
 
 type pxTurn struct {
@@ -153,7 +156,11 @@ func (p *perplexityBrowser) render(slug string, turns []*pxTurn) json.RawMessage
 			},
 		})
 	}
-	b, _ := json.Marshal(map[string]any{"slug": slug, "entries": entries})
+	out := map[string]any{"slug": slug, "entries": entries}
+	if p.maxEntries > 0 && len(entries) > p.maxEntries {
+		out["entries"], out["more"] = entries[:p.maxEntries], true
+	}
+	b, _ := json.Marshal(out)
 	return b
 }
 
@@ -224,6 +231,64 @@ func TestPerplexityWebNoSources(t *testing.T) {
 	res := rig.ask(t, "codex", "hello")
 	if res.Status != envelope.StatusAnswered || strings.Contains(res.Reply.Body, "Sources:") {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+// A thread longer than the extension reads: a wait that loses sight of
+// its turn fails at once instead of timing out; a remembered long thread
+// is left for a new chat, and a named one is refused before sending.
+func TestPerplexityWebThreadTooLong(t *testing.T) {
+	rig, p := perplexityRig(t)
+	p.maxEntries = 1
+	id := "0e1d0000-0000-4000-8000-000000000101"
+	if res := rig.ask(t, "codex", "first"); res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	res := rig.ask(t, "codex", "second")
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "the message was sent to Perplexity, but the conversation "+id+" is now longer than tincan reads") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if n := p.count(OpPerplexityDetail); n > 5 {
+		t.Errorf("detail read %d times; the wait should stop at the first capped read (3 for the first ask, 1 before the send, 1 capped)", n)
+	}
+	res = rig.ask(t, "codex", "third")
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "Your previous Perplexity conversation (id "+id+") is longer than tincan reads, so this went to a new chat.") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if s := p.sent(); len(s) != 3 || s[2].ConversationID != "" || !s[2].NewChat {
+		t.Fatalf("sends = %+v", s)
+	}
+	res = rig.ask(t, "codex", "conversation: "+id+"\nfourth")
+	if res.Status != envelope.StatusFailed || !strings.HasPrefix(res.Reply.Body, "Nothing was sent to Perplexity: the conversation "+id+" is longer than tincan reads") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if n := len(p.sent()); n != 3 {
+		t.Fatalf("%d sends, want 3", n)
+	}
+}
+
+// A source list too long for the cap never panics the reply: overlong
+// URLs are left out, and a negative text budget caps the text to nothing.
+func TestPerplexityWebOversizedSources(t *testing.T) {
+	long := "https://example.com/" + strings.Repeat("a", maxSourceURL)
+	footer := sourcesFooter([]webSource{{n: 1, title: "Long", url: long}, {n: 2, title: "Short", url: "https://example.com/s"}})
+	if strings.Contains(footer, "Long") || footer != "Sources:\n- [2] Short https://example.com/s" {
+		t.Fatalf("footer %q", footer)
+	}
+	if got, cut := capReplyTo("some text", -10); got != "" || !cut {
+		t.Fatalf("negative budget: %q %v", got, cut)
+	}
+	if got := capBytes("abc", -1); got != "" {
+		t.Fatalf("capBytes(-1) = %q", got)
+	}
+	rig, p := perplexityRig(t)
+	var srcs []map[string]any
+	for i := range 12 {
+		srcs = append(srcs, map[string]any{"name": fmt.Sprintf("S%d", i), "url": fmt.Sprintf("https://example.com/%d/%s", i, strings.Repeat("b", 8000))})
+	}
+	p.sources = srcs
+	if res := rig.ask(t, "codex", "huge sources"); res.Status != envelope.StatusAnswered || strings.Contains(res.Reply.Body, "Sources:") {
+		t.Fatalf("%s %d bytes", res.Status, len(res.Reply.Body))
 	}
 }
 

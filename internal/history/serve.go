@@ -773,6 +773,9 @@ func capBytes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	if n <= 0 {
+		return ""
+	}
 	for n > 0 && !isRuneStart(s[n]) {
 		n--
 	}
