@@ -962,3 +962,38 @@ func TestAgentsListQueueStats(t *testing.T) {
 		t.Fatalf("legacy = %+v", legacy)
 	}
 }
+
+// Stop, called when the relay shuts down, answers held polls, peeks, and
+// get-reply waits at once with their usual "nothing yet" answers, and later
+// ones no longer hold.
+func TestStopEndsHeldPollsAndWaits(t *testing.T) {
+	h := newHarness(t, Config{PollHold: 20 * time.Second, MaxWait: 20 * time.Second})
+	sent := h.send(grokAddr, "instinct", "rows?")
+	var wg sync.WaitGroup
+	var res store.Result
+	start := time.Now()
+	wg.Go(func() { h.do(museAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil) })
+	wg.Go(func() { h.do(museAddr, "GET", "/v1/poll?peek=1", "", http.StatusNoContent, nil) })
+	wg.Go(func() { h.do(grokAddr, "GET", "/v1/requests/"+sent.ID+"?wait=20", "", http.StatusOK, &res) })
+	time.Sleep(100 * time.Millisecond) // let them start holding
+	h.srv.Stop()
+	h.srv.Stop() // idempotent
+	wg.Wait()
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("held calls answered %v after Stop", took)
+	}
+	if res.Request.ID != sent.ID || res.Done() {
+		t.Fatalf("held wait answered %+v, want the pending request", res)
+	}
+	start = time.Now()
+	h.do(museAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("a poll after Stop held for %v", took)
+	}
+	// Waiting requests are still delivered.
+	var got pollResult
+	h.do(instinctAddr, "GET", "/v1/poll", "", http.StatusOK, &got)
+	if len(got.Requests) != 1 || got.Requests[0].ID != sent.ID {
+		t.Fatalf("poll after Stop got %+v", got)
+	}
+}

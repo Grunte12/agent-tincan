@@ -227,6 +227,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 - `--admin` lists the machine names allowed to invite and remove agents. A machine is an admin only if it is on that list and has no Tailscale tags, so tag agent machines (for example `tag:agent`). `--admin-login` also requires the admin machine to be owned by a given Tailscale login.
 - On the relay host itself, admin commands can use the local socket: `tincan invite muse --socket <state-dir>/admin.sock`. The relay prints the path at startup. The default state dir is `~/.config/tincan-relay` on Linux and `~/Library/Application Support/tincan-relay` on macOS; quote the macOS path, it has a space.
 - State (the database, `wake.json`, attachments, the audit log) lives in `--state-dir`. Run the relay as its own OS user, under systemd or launchd, so agents cannot read its state.
+- To restart or upgrade the relay, stop it with SIGTERM or SIGINT (`systemctl restart`, `launchctl kickstart -k`, `kill`, or Ctrl-C). Held long polls and get-reply waits answer "nothing yet" at once, so agents simply poll again once it is back. Calls still in flight get up to 10 seconds to finish, then the relay closes the store and exits; a relay still stuck 20 seconds after the signal logs the step it was on and exits anyway. A second SIGTERM or SIGINT exits at once. No SIGKILL is needed.
 
 The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway (see [ChatGPT](#chatgpt-through-the-oauth-mcp-gateway)).
 

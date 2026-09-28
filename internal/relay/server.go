@@ -132,6 +132,10 @@ type Server struct {
 	// upgraded CLI) do not write to the store on every alternating call.
 	storedVersion  map[string]string
 	versionWritten map[string]time.Time
+
+	// stopping is closed by Stop, when the relay begins to shut down.
+	stopping chan struct{}
+	stopOnce sync.Once
 }
 
 // persistEvery bounds how often an agent's activity is written to the store.
@@ -156,7 +160,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}}
+		versionWritten: map[string]time.Time{}, stopping: make(chan struct{})}
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
 	states, err := st.PollFeatures(context.Background())
@@ -296,6 +300,13 @@ func limitBodies(h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
+// Stop ends every held long poll and get-reply wait at once with the answer
+// its hold deadline would give (nothing yet, poll again), and makes later
+// ones answer without holding. The relay calls it first when it shuts down,
+// so held calls do not keep the process alive. Request contexts stay live,
+// so calls already in flight finish normally. Stop is idempotent.
+func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 
 // Run sweeps expired requests and leases, and applies attachment retention
 // at start and every Attachments.SweepEvery, until ctx ends.
@@ -645,17 +656,18 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			case <-wake:
 				continue
 			case <-deadline.C:
-				if v := s.upgradeFor(r); v != "" {
-					out := map[string]any{"upgrade_available": v}
-					out["waiting"], out["queued"] = 0, 0
-					writeJSON(w, http.StatusOK, out)
-				} else {
-					w.WriteHeader(http.StatusNoContent)
-				}
-				return
+			case <-s.stopping:
 			case <-r.Context().Done():
 				return
 			}
+			if v := s.upgradeFor(r); v != "" {
+				out := map[string]any{"upgrade_available": v}
+				out["waiting"], out["queued"] = 0, 0
+				writeJSON(w, http.StatusOK, out)
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
+			return
 		}
 		reqs, err := s.store.Deliver(r.Context(), name, 20, s.cfg.DeliveryLease)
 		if err != nil {
@@ -684,19 +696,21 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-wake:
+			continue
 		case <-deadline.C:
-			s.touch(name)
-			if v := s.upgradeFor(r); v != "" {
-				out := map[string]any{"upgrade_available": v}
-				out["requests"] = []envelope.Request{}
-				writeJSON(w, http.StatusOK, out)
-			} else {
-				w.WriteHeader(http.StatusNoContent)
-			}
-			return
+		case <-s.stopping:
 		case <-r.Context().Done():
 			return
 		}
+		s.touch(name)
+		if v := s.upgradeFor(r); v != "" {
+			out := map[string]any{"upgrade_available": v}
+			out["requests"] = []envelope.Request{}
+			writeJSON(w, http.StatusOK, out)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
 	}
 }
 
@@ -905,17 +919,19 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-wake:
+			continue
 		case <-deadline.C:
-			res, err = s.store.Get(r.Context(), id, name)
-			if err != nil {
-				writeErr(w, statusFor(err), err)
-				return
-			}
-			writeJSON(w, http.StatusOK, res)
-			return
+		case <-s.stopping:
 		case <-r.Context().Done():
 			return
 		}
+		res, err = s.store.Get(r.Context(), id, name)
+		if err != nil {
+			writeErr(w, statusFor(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
 	}
 }
 

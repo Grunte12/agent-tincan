@@ -360,3 +360,35 @@ func TestUrgentPullsPendingWakeForward(t *testing.T) {
 		t.Fatalf("wakes = %d", rc.count())
 	}
 }
+
+// Stop drops scheduled nudges, cuts short one waiting to retry, and
+// schedules nothing afterwards, so a stopping relay is not held up by its
+// wakes.
+func TestStopDropsAndEndsNudges(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	cfg := Config{"grokbot": {Method: Webhook, URL: ts.URL}, "muse": {Method: Webhook, URL: ts.URL}}
+	w := New(cfg, st, Options{Debounce: time.Hour, RetryDelay: time.Hour})
+	queued(w, "grokbot", 1) // waits out the hour-long debounce
+	rc.fail.Store(1)
+	w.Queued(context.Background(), envelope.Request{ID: "ru", To: "muse", Urgent: true}) // fails, then waits an hour to retry
+	deadline := time.Now().Add(5 * time.Second)
+	for rc.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	w.Stop()
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("Stop took %v", took)
+	}
+	queued(w, "grokbot", 1)
+	w.ReplyWaiting("muse")
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("webhook calls = %d, want only the failed urgent one", rc.count())
+	}
+	if got := strings.Join(events(t, st), ","); got != "wake_failed" {
+		t.Fatalf("audit = %s, want the cut-short nudge recorded as failed", got)
+	}
+}
