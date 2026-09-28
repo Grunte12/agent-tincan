@@ -13,10 +13,13 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `trace_id` | relay | Chain id, inherited from the parent or new. |
 | `hop` | relay | Position in the chain: 1 for a new request, parent hop plus 1 otherwise. |
 | `chain` | relay | Agents the request has passed through, oldest first. |
-| `kind` | client | `ask` (expects a reply, the default) or `notify`. |
+| `urgent` | client | Optional boolean, default false. Urgent requests are delivered first, oldest first within each priority. Relay-side wakes bypass debounce and the online skip, within the hourly wake cap. |
+| `kind` | client | `ask` (expects a reply, the default), `notify`, or `ping` (automatic client reply). |
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
+| `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
+| `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
 
 ## Reply
 
@@ -24,14 +27,36 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 |---|---|---|
 | `request_id` | relay | The request this answers. |
 | `from` | relay | Replying agent, resolved from the tailnet node. |
-| `status` | client | `answered` (default), `failed`, or `declined`. |
+| `status` | client | `answered` (default), `failed`, `declined`, or non-terminal `needs_input`. |
 | `body` | client | The reply text. Capped at 256 KB. |
 | `attachments` | client names ids, relay fills the rest | As on a request. |
 | `created_at` | relay | When the relay stored it. |
 
 ## Request states
 
-`queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled`, or `expired`. A claimed request whose lease expires goes back to `queued`.
+Optional `held`, then `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled`, or `expired`. A claimed request whose lease expires goes back to `queued`.
+
+## Progress notes
+
+`POST /v1/requests/{id}/progress` accepts `{"note":"calling the restaurant now"}`. Only the current target with an active claim may post (409 otherwise). Notes must be nonblank and at most 1024 UTF-8 bytes (413 when larger). Each post replaces the previous note and renews the claim lease (30 minutes by default); a claimed notify remains lease-free.
+
+Get and trace results include optional `progress: {"note":"...","at":"<RFC3339 timestamp>","by":"muse"}` while claimed. A held get refreshes this at timeout. Requeuing clears the note. Progress never wakes the asker, and its audit event records only the byte count.
+
+`GET /v1/capabilities` advertises `"progress": true`. Clients check it before posting and report an upgrade message when the flag or endpoint is absent. Older clients ignore the optional result field.
+
+### Clarifying a request
+
+For an `ask` with a live claim, its target may `POST /v1/requests/{id}/reply` with `{"status":"needs_input","body":"Which restaurant?"}`. Only the target that claimed the request may ask; a queued, delivered, expired-lease, or already waiting request returns 409. A different agent returns 403. Notifies cannot request input.
+
+The response is a normal reply with status `needs_input` (200). This status is non-terminal. The relay appends a clarification exchange, pauses the claim lease, and marks the question unseen. The question ends a held get-reply wait and follows the same poll, acknowledgement, and reply-wake path as a final reply. While waiting, no lease can requeue it; the original request expiry still runs (24 hours by default), and removing either participant cancels it.
+
+Only the original sender may `POST /v1/requests/{id}/answer` with `{"body":"Nopa, 2 people"}`. A different agent returns 403. The request must still be `needs_input` and unexpired, otherwise 409. The relay records the answer, removes the interim reply, and returns the request (200), now `queued` with `resumed: true`. It wakes the same target through the request-wake path. The target polls and claims normally, receiving the original body and full exchange history. The id, target, parent, trace, chain, hop, creation time, and expiry are unchanged. A duplicate answer returns 409.
+
+Each question and answer must contain non-whitespace text and is capped at 16,384 UTF-8 bytes (400 for empty or oversized input). Clarifications carry text only; attachments on a `needs_input` reply return 400. At most three question/answer rounds are allowed per request; a fourth question returns 409, leaving the claim available for a final reply. A final reply uses the existing reply statuses and limits.
+
+Get-reply, unseen replies, and trace steps include an optional top-level `exchanges` list as well as the history on their `request`. On expiry or cancellation, history is retained but the question is no longer returned as a live reply or counted as unseen. Audit events `needs_input` and `answered_input` record only question or answer byte lengths in their detail, never the text. Wake messages contain counts and instructions only.
+
+Relays advertise `"needs_input": true` in `GET /v1/capabilities`. New clients refuse to send `needs_input` or an answer when this flag is missing or false (including a 404 capabilities endpoint), with an instruction to upgrade the relay. Existing ordinary replies work against older relays. An older asker can read the question as the reply body with an unfamiliar `needs_input` status; upgrade that client to answer using `tincan answer <id> "text"` or MCP `answer`. Older handlers never produce the new status. All new fields are optional.
 
 ## Replies the asker has not seen
 
@@ -51,15 +76,29 @@ Any other `replies` value is a 400.
 
 `POST /v1/replies/ack` with `{"ids": ["<request id>", ...]}` marks those replies seen and returns 204. Ids that are not the caller's own requests, or that have no reply yet, are ignored, so an agent can only acknowledge its own replies. At most 500 ids per call. `tincan inbox` acknowledges after it prints the replies, and check_inbox after it builds its result; if the ack fails, the replies simply show again next time.
 
-One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
+Replies include an additive integer `generation`, a persistent per-request counter that advances for each clarification question or final reply, even within the same millisecond (pre-upgrade replies start at generation 0). Clients acknowledge the generation they displayed with `{"ids": [], "acks": [{"id": "<request id>", "generation": 2}]}`. An `acks` entry marks a reply seen only if its generation still matches; stale entries are ignored. Plain `ids` remain supported with their original behavior (acknowledging the current reply regardless of generation). The two lists may be combined, with a total limit of 500 entries; clients should put each reply in only one list. CLI and MCP inbox clients use generation acknowledgements.
+
+One poll delivers at most 20 requests, oldest first, and stops adding requests once their bodies and clarification exchanges pass 1 MiB (it always delivers at least one); the rest come with the next poll. One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
 
 When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts. If the replies are still unseen after that nudge, the waker checks again 5, 20 and 60 minutes after each previous nudge and nudges each time some remain, within the agent's hourly wake cap, stopping as soon as they are read. The grace and follow-up timers live in memory, so a relay that restarts schedules a fresh reply nudge for every webhook or email agent that still holds unseen replies.
+
+## Search
+
+`GET /v1/search?q=<text>&limit=<n>` searches stored request and reply bodies. The relay resolves the caller from Tailscale just as for trace: agents see matches in chains where they sent or received a request at any step; admins see all chains. Search does not mark replies seen or change request state.
+
+`q` must be nonblank and at most 4096 bytes. Words are quoted as literal FTS terms, all of which must match (case-insensitively); punctuation is ignored, and operators such as `OR` have no special meaning. Punctuation-only queries return no matches. `limit` defaults to 20 and must be 1–50; invalid input returns 400.
+
+The response is `{"results": [{"request_id", "trace_id", "from", "to", "status", "created_at", "snippet", "reply_snippet", "attachment_names"}]}`, newest request first (in the order the relay stored them). `snippet` and `reply_snippet` are optional short excerpts of the request and reply bodies, respectively, with matches in square brackets; each is present only when its column matched. An agent’s search starts from its own chains: it walks the requests in chains the agent took part in, newest first, 5,000 at a time, one short query per batch, until the limit is filled or its history is exhausted. Requests it cannot see are never examined, and older visible matches are still found. An admin search covers the whole index and considers at most the newest 2,000 matches (by request rowid, which follows insertion order), so very old matches for common terms may be omitted there. `attachment_names` is optional and contains names from both the request and reply; neither names nor file contents are searched. No matches returns `{"results": []}`.
+
+The relay advertises `"search": true` in `/v1/capabilities`. Older relays without the route return 404; the client reports that the relay needs upgrading. The migration creates the index and triggers. On open, existing bodies are indexed in batches of at most 500 requests per transaction, recording a high-water rowid atomically with each batch. Backfill errors are logged and do not fail startup; search returns what is indexed so far, and backfill resumes on reopen. New requests and replies are indexed in the same transaction that stores them. Successful searches write a `search` audit event with only `{"count": <returned result count>}` in its detail, never the query or snippets.
+
+The MCP `search` tool accepts `query` and an optional `limit` and returns the same results array as `tincan search <text> --json`.
 
 ## Attachments
 
 Requests and replies can carry images and small files. The file goes to the relay first, and the message names it by id.
 
-`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
+`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8, "search": true}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
 
 `POST /v1/attachments?name=<display name>` uploads one file as the calling agent. The body is the raw file and `Content-Type` its media type; when that is missing, unparseable, or `application/octet-stream`, the relay detects the type from the first bytes. The name is display metadata only, reduced to its last path element; the relay stores the file by id. The response is `201` with `{"id", "name", "mime", "size", "sha256"}`. This is the one route not held to the relay's 1 MB body limit; it has its own 10 MB limit and a 5 minute read deadline.
 
@@ -80,3 +119,100 @@ To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]
 Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
+
+### Owner approval
+
+With an owner-configured `approval.json`, sends can enter non-terminal `held`.
+A held send response has an optional `status: "held"` field; ordinary send
+responses remain unchanged. Get-reply and trace report `held` in their existing
+status field. Older clients can decode this unknown string and keep waiting.
+Held requests are excluded from poll, peek, queued counts, claim, reply and
+wake delivery. The sender can get or cancel them. Other agents, including the target, see
+the placeholder body and no attachments in get and trace. This restriction
+persists until approval, as specified below. Admin devices can inspect them.
+
+Admin devices and the local admin socket have these endpoints; agent callers
+receive 403:
+
+- `GET /v1/admin/held`: array of request envelopes, with bodies truncated to
+  200 Unicode characters, including sender, chain and target.
+- `POST /v1/admin/requests/{id}/approve`: returns the queued request. A fresh
+  normal TTL starts; the original `created_at` is kept. Normal wake follows.
+- `POST /v1/admin/requests/{id}/deny`: optional `{"reason":"..."}` body;
+  returns `{"status":"declined"}`. The reply is attributed to `relay` and contains
+  the reason. Missing reason means an empty reply body.
+
+Approval and denial require an unexpired held request; other states return 409.
+The sweep expires overdue holds and logs `hold_expired`. Holds survive restarts
+with their original deadline. Policy changes apply only to future sends.
+A `ping` is never held: it has no body and runs no model work. Search results
+leave out a held, never-approved request for every caller but its sender and admins.
+The other transitions are audited as `held`, `approved`, and `denied`.
+An optional relay-authored operator `notify` bypasses the gate and is logged
+as `approval_notified`; it never grants the notified agent admin access.
+
+Requests retain whether they were ever held and whether the owner approved them.
+For every request that was held and never approved, only its sender and admins
+may read its body or attachments, regardless of its current status (including
+declined, expired and cancelled). Other callers, including the target, see
+`waiting for the owner's approval` and no attachment metadata wherever the
+request is otherwise visible: get, trace, search-like listings, poll and peek
+pending entries. Attachment downloads by those callers return 404. Held requests
+remain excluded from delivery; pending entries carry only ids and senders.
+An approved request follows the ordinary body and attachment access rules,
+even after it reaches a terminal state. Approval history survives relay restarts;
+upgrades backfill existing holds and decisions from request state and audit events.
+
+## Request groups
+
+A send may include an optional `group` string of 1 to 64 ASCII letters, digits,
+underscores or hyphens. The relay stores and echoes it on the request.
+Groups do not change identity, parent/chain checks, rate limits, wakes,
+allowlists, leases or attachment ownership: each target receives an ordinary
+request and requires its own uploads. An urgent group send marks every member
+urgent, and each member uses its own urgent slot.
+
+`GET /v1/groups/{id}` returns only membership: an array of `{"id": "...", "to": "..."}`
+for requests sent by the authenticated caller with that group tag. It includes
+no bodies or replies and never marks replies seen. Fetch each result through
+`GET /v1/requests/{id}`. An unknown group, or a group with no
+requests sent by the caller, returns 404. Recipients and admins do not gain
+access to another sender's group through this endpoint.
+`GET /v1/capabilities` advertises `"groups": true`.
+
+Clients generate ids prefixed with `group-`, deduplicate targets and cap fan-out
+at 8. Older relays ignore the optional field. Clients retain the individual ids
+in memory so combined polling still works in the original client instance;
+across client restarts, use individual ids or upgrade the relay. Failed sends
+are local result entries and are not stored as requests on the relay.
+Per-target polling failures appear as `error` text on the combined result entry,
+preserving its request id and last known status alongside successful results.
+The relay accepts at most 8 requests per sender and group tag; further sends
+return HTTP 400. Membership lookups return at most 8 ids and targets.
+Clients reconcile relay membership with local send errors, recovering requests
+whose send response was lost while retaining errors for targets absent from the
+relay. Concurrent group polls preserve the most advanced cached status and replies.
+A multi-target MCP notification returns a tool error if any upload or send fails,
+with the per-target results included in its content.
+
+Group text output includes the group id and every accepted request id.
+
+Urgent sends have a separate per-sender rolling hourly limit (default 5, configured by `tincan relay --urgent-per-hour`). Exceeding it returns HTTP 429: `urgent limit reached; send without --urgent`. Ordinary sender limits still apply. Sender limits are in memory and reset on relay restart. The optional `urgent` field is also returned on pending request summaries, and a peek carries `"urgent": <n>`, the count of all queued urgent requests (left out when zero), so a channel notice counts them past the 50 that `pending` lists. A send the relay fails to queue (a bad attachment, for example) does not use up an urgent slot. The relay refuses to start with `--urgent-per-hour` below 1. Old clients and relays can ignore this additive field.
+
+### Available client upgrades
+
+`GET /v1/whoami` and both full and `peek=1` responses from `GET /v1/poll` may include `"upgrade_available": "0.5.5"`. This is the release served by the relay's `--dist` VERSION file, distinct from the relay executable's `relay_version`. It is included only when newer than the caller's `X-Tincan-Version` and the dist holds the binary for the caller's `X-Tincan-Platform` (`<os>_<arch>`, for example `darwin_arm64`, sent by every client), so an agent is never told to run a `tincan upgrade` that would fail. The relay reads `VERSION` on each check, so an in-place edit takes effect at once. Missing or invalid versions, development builds, and relays without dist produce no field. Prerelease clients are skipped unless dist itself is a prerelease; comparisons ignore build metadata and accept an optional leading `v`.
+
+A poll with no messages holds until its normal deadline, then returns HTTP 200 with the upgrade field and empty `requests` (or zero `waiting` and `queued` for peek), instead of 204. Populated polls carry the same optional field. `tincan wait` continues waiting on empty polls with an upgrade; it prints the notice when a request or reply ends the wait. The relay repeats it on every response; clients display the actionable notice at most once per process per available version. Unknown fields are safe for older clients to ignore. Notices neither claim requests nor acknowledge replies, and no client upgrades automatically.
+
+## Agent roster
+
+`GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry and terminal requests are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
+
+## Ping capability
+
+Clients advertise `X-Tincan-Features: ping` on every call, but only polls (`GET /v1/poll`, full or peek) count: they come from the processes that receive requests. The relay admits a ping to a target once one of its polls has advertised support and none of its polls has lacked the header in the last 24 hours, so an older poller running under the same agent name keeps pings away from it. Sends, gets and replies never change this. The state is kept in memory and in the agent store. Versions remain informational, so development builds can advertise support. A `ping` send to a target that does not qualify returns HTTP 409 with an instruction to use `ask`. Older relays reject the unknown kind without delivering it.
+
+A ping has no parent or attachments; its body is empty (up to four bytes are accepted and ignored). Policy still enforces the send rate limit and refuses inferred request parents. The target claims it and replies with status `answered` and body `pong (answered by <surface>, tincan <version>)`. Clients suppress pings from model inboxes. Peek pending entries add optional `kind`, and a peek adds optional `"pings": <n>`, the count of all queued pings (left out when zero), so a listener knows exactly how much ordinary work waits even when more pings are queued than `pending` lists. Pong replies are marked seen when stored and never trigger a reply wake; get-reply and trace still return them.
+
+Polling surfaces are `check_inbox`, the MCP channel loop (`channel`), `inbox`, `wait`, `listen`, `history-serve`, and `web-serve`. The channel loop answers pings without a channel notice, so a Claude Code session pongs without a model turn. Wait and listen loops continue after automatic replies. A pong that fails is retried after the ordinary requests from the same poll have been handed on, never before. A listener answers without invoking its exec command. Such responses demonstrate the client loop is alive, not model execution. `GET /v1/trace?exclude_pings=true` filters before applying the limit; the optional parameter defaults to including all kinds. CLI trace listings omit pings unless `--pings` is supplied; stored traces retain their `ping` kind.

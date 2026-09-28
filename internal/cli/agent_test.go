@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -52,7 +54,7 @@ func TestSecondAgentJoinKeepsFirstConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "")
+		req, err := r.Send(context.Background(), "grokbot", "hi", envelope.KindAsk, "", false)
 		if err != nil || req.From != want {
 			t.Fatalf("config %s sent as %q, %v; want %s", filepath.Base(path), req.From, err, want)
 		}
@@ -192,5 +194,73 @@ func TestJoinSavesRelayKey(t *testing.T) {
 	}
 	if err := r.Raw(context.Background(), "GET", "/v1/whoami", nil, &raw); err != nil || raw.RelayKey != cfg.RelayKey {
 		t.Fatalf("saved key %q, relay's %q, %v", cfg.RelayKey, raw.RelayKey, err)
+	}
+}
+
+func TestAskGroupCLI(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("TINCAN_RELAY", "")
+	t.Setenv("TINCAN_PROXY", "")
+	if err := client.SaveConfig(client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"}); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := askCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"instinct,muse", "hello", "--wait=0", "--json"})
+	err := cmd.ExecuteContext(t.Context())
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("%v: %s", err, out.String())
+	}
+	var g client.GroupResult
+	if err := json.Unmarshal([]byte(out.String()), &g); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Results) != 2 || g.Outcome != "pending" {
+		t.Fatalf("%+v", g)
+	}
+	out.Reset()
+	cmd = getCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{g.Group, "--json"})
+	err = cmd.ExecuteContext(t.Context())
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("%v: %s", err, out.String())
+	}
+}
+
+func TestFormatAgentsBacklog(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		info client.AgentInfo
+		want string
+	}{
+		{"idle", client.AgentInfo{}, ""},
+		{"queued", client.AgentInfo{Queued: 2, OldestQueued: now.Add(-14 * time.Minute)}, "2 queued (oldest 14m)"},
+		{"claimed", client.AgentInfo{Claimed: 1}, "1 claimed"},
+		{"both", client.AgentInfo{Queued: 2, OldestQueued: now.Add(-time.Hour), Claimed: 1}, "2 queued (oldest 1h), 1 claimed"},
+		{"days", client.AgentInfo{Queued: 1, OldestQueued: now.Add(-72 * time.Hour)}, "1 queued (oldest 3d)"},
+		{"future", client.AgentInfo{Queued: 1, OldestQueued: now.Add(time.Minute)}, "1 queued (oldest 0m)"},
+		{"missing time", client.AgentInfo{Queued: 1}, "1 queued"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.Backlog(now); got != tc.want {
+				t.Fatalf("Backlog = %q, want %q", got, tc.want)
+			}
+			got := formatAgents([]client.AgentInfo{tc.info}, now)
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("roster = %q", got)
+			}
+			if tc.want == "" && got != "               offline  wake= never seen\n" {
+				t.Fatalf("idle roster = %q", got)
+			}
+		})
 	}
 }
