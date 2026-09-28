@@ -290,7 +290,8 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	}
 
 	// A redelivered add that is already spooled goes straight to the
-	// helper: the idempotency key makes that return the same note.
+	// helper: the idempotency key makes that return the same note. One
+	// already decided only resends its recorded reply.
 	if e, ok, err := s.spool.Get(req.ID); err != nil {
 		s.logf("request %s: spool entry unreadable, handling it afresh: %v", req.ID, err)
 	} else if ok {
@@ -300,7 +301,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		}
 		defer s.end(req.ID)
 		s.logf("request %s from %s: redelivered add, applying from the spool", req.ID, req.From)
-		if !s.stillAllowed(ctx, e) {
+		if _, decided := e.Outcome.status(); !decided && !s.stillAllowed(ctx, e) {
 			return
 		}
 		s.applyAdd(ctx, e, true)
@@ -469,9 +470,22 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 // applyAdd calls the helper for a spooled add and replies. The caller
 // holds the in-flight mark for the request. fresh is true when the request
 // was just claimed from the poll loop, which is when a progress note can
-// reach the asker.
+// reach the asker. An entry already decided only resends its recorded
+// reply: the relay and the allowlist are not asked again and nothing is
+// created. A saved note the owner has since trashed or archived is named
+// as such (AE3), from a read of the note.
 func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
+	if _, decided := e.Outcome.status(); decided {
+		if e.Outcome == OutcomeSaved && e.NoteID != "" {
+			if n, err := s.helper.Read(ctx, e.NoteID); err == nil && n.Summary.State != StateActive {
+				e.Reply = addedReply(CreateResult{Note: n, Existed: true})
+			}
+		}
+		s.logf("request %s from %s: resending the recorded %s reply", req.ID, req.From, e.Outcome)
+		s.sendFinal(ctx, e)
+		return
+	}
 	if !fresh && (!s.stillWanted(ctx, e) || !s.stillAllowed(ctx, e)) {
 		return
 	}
@@ -503,7 +517,7 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	if err != nil {
 		if IsPermanent(err) {
 			s.logf("request %s from %s: add rejected by the helper: %v", req.ID, req.From, err)
-			s.sendFinal(ctx, e, fmt.Sprintf("The note was not saved: the Agent Notes helper rejected it (%s). Nothing was written.", helperReason(err)), envelope.StatusFailed)
+			s.decide(ctx, e, OutcomeFailed, "", fmt.Sprintf("The note was not saved: the Agent Notes helper rejected it (%s). Nothing was written.", helperReason(err)))
 			return
 		}
 		e.Attempts++
@@ -519,15 +533,17 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		return
 	}
 	s.logf("request %s from %s: add applied as note %s (existed %v, state %s)", req.ID, req.From, res.Note.Summary.ID, res.Existed, res.Note.Summary.State)
-	s.sendFinal(ctx, e, addedReply(res), envelope.StatusAnswered)
+	s.decide(ctx, e, OutcomeSaved, res.Note.Summary.ID, addedReply(res))
 }
 
 // stillWanted asks the relay about a spooled add before a retry writes it.
 // The sender may have cancelled it while it sat in the spool (after the
 // claim lease lapsed and the relay requeued it, or through an agent
 // removal): then the entry is dropped unwritten, since a sender who
-// cancels a stuck add and resends it would otherwise get two notes. Every
-// other state is written as before, expired included (R5, R8). A request
+// cancels a stuck add and resends it would otherwise get two notes. A
+// request that already has a reply (answered, declined, failed) was
+// decided by an earlier attempt: the entry is dropped with nothing written
+// or resent. Every other state is written, expired included (R5, R8). A request
 // the relay no longer knows is written too; its reply is then dropped. If
 // the relay cannot be asked, the entry is kept and not written this round.
 func (s *Service) stillWanted(ctx context.Context, e SpoolEntry) bool {
@@ -543,6 +559,12 @@ func (s *Service) stillWanted(ctx context.Context, e SpoolEntry) bool {
 		return false
 	case res.Status == envelope.StatusCancelled:
 		s.logf("request %s from %s: the sender cancelled this add before it was saved, dropping it unwritten", id, e.Request.From)
+		if err := s.spool.Remove(id); err != nil {
+			s.logf("request %s: spool remove failed: %v", id, err)
+		}
+		return false
+	case res.Status == envelope.StatusAnswered, res.Status == envelope.StatusDeclined, res.Status == envelope.StatusFailed:
+		s.logf("request %s from %s: the request already has a reply (%s), dropping the spooled add without writing or replying", id, e.Request.From, res.Status)
 		if err := s.spool.Remove(id); err != nil {
 			s.logf("request %s: spool remove failed: %v", id, err)
 		}
@@ -566,19 +588,37 @@ func (s *Service) stillAllowed(ctx context.Context, e SpoolEntry) bool {
 	loaded := func() ([]string, error) { return names, nil }
 	if reason := history.ChainDenied(loaded, req, s.agent+" add", "add notes", s.logf); reason != "" {
 		s.logf("request %s from %s (chain %v): spooled add declined, the sender is no longer allowed to add: %s", req.ID, req.From, req.Chain, reason)
-		s.sendFinal(ctx, e, reason, envelope.StatusDeclined)
+		s.decide(ctx, e, OutcomeDeclined, "", reason)
 		return false
 	}
 	return true
 }
 
-// sendFinal sends the final reply for a spooled add and clears its entry,
-// unless the relay could not be reached: then the entry stays for a
-// retry, which calls the helper again and gets the same note. A request
-// the relay has already closed (expired, cancelled) is logged and
+// decide records the final decision on a spooled add durably, then sends
+// it. If the decision cannot be recorded, nothing is sent: the entry stays
+// undecided and a retry decides it again (a saved add gets the same note
+// from the helper's idempotency key).
+func (s *Service) decide(ctx context.Context, e SpoolEntry, o Outcome, noteID, body string) {
+	e.Outcome, e.NoteID, e.Reply = o, noteID, body
+	if err := s.spool.Put(e); err != nil {
+		s.logf("request %s: could not record the %s outcome, keeping the add spooled for the next retry: %v", e.Request.ID, o, err)
+		return
+	}
+	s.sendFinal(ctx, e)
+}
+
+// sendFinal sends the recorded reply of a decided spooled add and clears
+// its entry, unless the relay could not be reached: then the entry stays
+// for a retry, which resends the same reply. A request the relay has
+// already closed (a reply landed, expired, cancelled) is logged and
 // dropped, never retried forever.
-func (s *Service) sendFinal(ctx context.Context, e SpoolEntry, body string, status envelope.Status) {
-	err := s.replyErr(ctx, e.Request, body, status)
+func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
+	status, ok := e.Outcome.status()
+	if !ok {
+		s.logf("request %s: no recorded outcome to send", e.Request.ID)
+		return
+	}
+	err := s.replyErr(ctx, e.Request, e.Reply, status)
 	switch {
 	case err == nil:
 	case client.IsStatus(err, http.StatusConflict), client.IsStatus(err, http.StatusNotFound):

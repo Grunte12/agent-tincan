@@ -16,13 +16,42 @@ import (
 
 // SpoolEntry is one claimed add that has not been answered yet. It holds
 // the whole request and its parsed form, so a retry needs neither the
-// relay nor the extractor.
+// relay nor the extractor. Once the add is decided (saved, declined, or
+// failed), Outcome and Reply record that decision before the reply is
+// sent, and a retry only resends it. An entry without an Outcome,
+// including one written before the field existed, is undecided.
 type SpoolEntry struct {
 	Request   envelope.Request `json:"request"`
 	Note      Request          `json:"note"`
 	SpooledAt time.Time        `json:"spooled_at"`
 	Attempts  int              `json:"attempts,omitempty"`
 	LastError string           `json:"last_error,omitempty"`
+	Outcome   Outcome          `json:"outcome,omitempty"`
+	NoteID    string           `json:"note_id,omitempty"`
+	Reply     string           `json:"reply,omitempty"`
+}
+
+// Outcome is the final decision on a spooled add.
+type Outcome string
+
+const (
+	OutcomeSaved    Outcome = "saved"
+	OutcomeDeclined Outcome = "declined"
+	OutcomeFailed   Outcome = "failed"
+)
+
+// status is the reply status for o; false for an undecided or unknown
+// outcome.
+func (o Outcome) status() (envelope.Status, bool) {
+	switch o {
+	case OutcomeSaved:
+		return envelope.StatusAnswered, true
+	case OutcomeDeclined:
+		return envelope.StatusDeclined, true
+	case OutcomeFailed:
+		return envelope.StatusFailed, true
+	}
+	return "", false
 }
 
 // Spool is a directory of SpoolEntry files, one per request id. Every

@@ -84,6 +84,7 @@ type rig struct {
 	svc       *Service
 	log       *testLog
 	replyFail atomic.Bool
+	replyLose atomic.Bool
 	getFail   atomic.Bool
 }
 
@@ -104,6 +105,12 @@ func newRig(t *testing.T, rc relay.Config) *rig {
 	ps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if r.replyFail.Load() && strings.HasSuffix(req.URL.Path, "/reply") {
 			http.Error(w, `{"error":"injected reply failure"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if r.replyLose.Load() && strings.HasSuffix(req.URL.Path, "/reply") {
+			// The relay stores the reply, but its response never arrives.
+			proxy.ServeHTTP(httptest.NewRecorder(), req)
+			http.Error(w, `{"error":"injected lost response"}`, http.StatusServiceUnavailable)
 			return
 		}
 		if r.getFail.Load() && req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/requests/") {
@@ -405,8 +412,8 @@ func TestReadBodyOverCapIsTruncated(t *testing.T) {
 }
 
 // Covers AE2: the helper succeeds but the reply fails, the service
-// restarts, and the relay redelivers: the helper is called again with the
-// same key and the reply carries the same note id.
+// restarts, and the relay redelivers: the recorded reply is resent with
+// the same note id, without calling the helper again.
 func TestReplyFailureThenRedeliveryRepliesSameNoteID(t *testing.T) {
 	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
 	r.replyFail.Store(true)
@@ -433,13 +440,11 @@ func TestReplyFailureThenRedeliveryRepliesSameNoteID(t *testing.T) {
 		t.Fatalf("status %s reply %+v, want answered with %s", res.Status, res.Reply, notes[0].ID)
 	}
 	creates := r.helper.callsOf(t, "create")
-	if len(creates) != 2 {
-		t.Fatalf("creates = %d, want the redelivery to call the helper again", len(creates))
+	if len(creates) != 1 {
+		t.Fatalf("creates = %d, want the redelivery to resend the recorded reply", len(creates))
 	}
-	for _, c := range creates {
-		if key, _ := argValue(c.Args, "idempotency-key"); key != "tincan:"+req.ID {
-			t.Fatalf("key = %q", key)
-		}
+	if key, _ := argValue(creates[0].Args, "idempotency-key"); key != "tincan:"+req.ID {
+		t.Fatalf("key = %q", key)
 	}
 	if len(r.helper.notes()) != 1 {
 		t.Fatalf("a second note was created: %+v", r.helper.notes())
@@ -1286,4 +1291,142 @@ func TestIdempotencyVerifiedOnlyByCreate(t *testing.T) {
 	if h := readHealth(t, r.cfg.HealthPath); h.IdempotencyVerified || !h.IdempotencyUnsupported {
 		t.Fatalf("health after helper_too_old = %+v, want verified cleared", h)
 	}
+}
+
+// Once a spooled add is saved, its answered reply is the final decision:
+// removing the sender from the add allowlist before the reply lands does
+// not turn it into a decline, and the helper is not called again.
+func TestSavedAddReplyFailsThenSenderRemovedStillAnswered(t *testing.T) {
+	for _, via := range []string{"retry", "redelivery"} {
+		t.Run(via, func(t *testing.T) {
+			r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+			r.replyFail.Store(true)
+			req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+			r.poll(t, 1)
+			notes := r.helper.notes()
+			if len(notes) != 1 || len(r.spoolFiles(t)) != 1 {
+				t.Fatalf("notes %+v spool %v, want one saved note kept spooled", notes, r.spoolFiles(t))
+			}
+			writeFile(t, r.cfg.AddAllowlistPath, "muse\n")
+			r.replyFail.Store(false)
+			if via == "retry" {
+				r.svc.RetrySpooled(t.Context())
+			} else {
+				r.redeliver(t)
+				r.poll(t, 1)
+			}
+			res := r.get(t, "grokbot", req.ID)
+			if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, notes[0].ID) {
+				t.Fatalf("status %s reply %+v, want answered with %s", res.Status, res.Reply, notes[0].ID)
+			}
+			if n := len(r.helper.callsOf(t, "create")); n != 1 {
+				t.Fatalf("creates = %d, want the recorded reply resent without the helper", n)
+			}
+			r.assertSpoolEmpty(t)
+		})
+	}
+}
+
+// A declined spooled add stays declined: if its reply does not reach the
+// relay, or reaches it but the response is lost, restoring the sender's
+// add access later never saves the note.
+func TestDeclinedAddNeverSavedAfterAccessRestored(t *testing.T) {
+	for _, mode := range []string{"reply failed", "response lost"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+			req := r.stuckThenRequeued(t)
+			writeFile(t, r.cfg.AddAllowlistPath, "muse\n")
+			lose := &r.replyFail
+			if mode == "response lost" {
+				lose = &r.replyLose
+			}
+			lose.Store(true)
+			r.svc.RetrySpooled(t.Context())
+			if len(r.spoolFiles(t)) != 1 {
+				t.Fatalf("spool = %v, want the declined add kept until its reply lands", r.spoolFiles(t))
+			}
+			lose.Store(false)
+			writeFile(t, r.cfg.AddAllowlistPath, "grokbot\n")
+			before := len(r.helper.callsOf(t, "create"))
+			r.svc.RetrySpooled(t.Context())
+			if after := len(r.helper.callsOf(t, "create")); after != before {
+				t.Fatalf("helper create ran for a declined add: %d -> %d", before, after)
+			}
+			if len(r.helper.notes()) != 0 {
+				t.Fatalf("a declined add was saved: %+v", r.helper.notes())
+			}
+			res := r.get(t, "grokbot", req.ID)
+			if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "grokbot is not on the notes add allowlist") {
+				t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+			}
+			r.assertSpoolEmpty(t)
+		})
+	}
+}
+
+// putOldEntry writes a spool file as a build before recorded outcomes
+// did, for a request notes has claimed.
+func (r *rig) putOldEntry(t *testing.T, claimed envelope.Request) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"request":    claimed,
+		"note":       Request{Op: OpAdd, Title: "Tent", Body: "buy the blue tent"},
+		"spooled_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(r.cfg.SpoolDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(r.cfg.SpoolDir, claimed.ID+".json"), string(b))
+}
+
+// An undecided spooled add whose request the relay already shows closed
+// by a reply is dropped on retry: the helper is not called and nothing is
+// resent.
+func TestSpooledAddAlreadyRepliedIsDropped(t *testing.T) {
+	for _, status := range []envelope.Status{envelope.StatusAnswered, envelope.StatusDeclined, envelope.StatusFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			r := newRig(t, relay.Config{})
+			req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+			claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.putOldEntry(t, claimed)
+			if _, err := r.cfg.Relay.Reply(t.Context(), req.ID, "earlier reply", status); err != nil {
+				t.Fatal(err)
+			}
+			r.svc.RetrySpooled(t.Context())
+			if n := len(r.helper.callsOf(t, "create")); n != 0 {
+				t.Fatalf("creates = %d, want none for a request already replied to", n)
+			}
+			r.assertSpoolEmpty(t)
+			if res := r.get(t, "grokbot", req.ID); res.Status != status || res.Reply.Body != "earlier reply" {
+				t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+			}
+			if !strings.Contains(r.log.String(), "already has a reply") {
+				t.Fatalf("the drop was not logged:\n%s", r.log.String())
+			}
+		})
+	}
+}
+
+// A spool file written before outcomes were recorded is still applied.
+func TestOldFormatSpoolEntryIsApplied(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+	claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.putOldEntry(t, claimed)
+	r.svc.RetrySpooled(t.Context())
+	res := r.get(t, "grokbot", req.ID)
+	notes := r.helper.notes()
+	if res.Status != envelope.StatusAnswered || len(notes) != 1 || !strings.Contains(res.Reply.Body, notes[0].ID) {
+		t.Fatalf("status %s reply %+v notes %+v", res.Status, res.Reply, notes)
+	}
+	r.assertSpoolEmpty(t)
 }
