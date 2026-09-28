@@ -603,6 +603,63 @@ func TestNewInviteRetiresOlderCodeForSameName(t *testing.T) {
 	}
 }
 
+func TestGroupMigrationPreservesRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ask(t, s, "a", "b", "existing")
+	if _, err := s.db.Exec("DROP INDEX requests_group"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("ALTER TABLE requests DROP COLUMN group_id"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, _, err := s.Request(t.Context(), req.ID)
+	if err != nil || got.Body != "existing" || got.Group != "" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	req.ID, req.Group = "", "group-test"
+	if _, err := s.Enqueue(t.Context(), req, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.RequestsByGroup(t.Context(), "a", req.Group)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	rows, err = s.RequestsByGroup(t.Context(), "b", req.Group)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("%+v %v", rows, err)
+	}
+}
+
+func TestGroupMembershipOnlyReadsBoundedMetadata(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	for range MaxGroupRequests + 2 {
+		req := ask(t, s, "a", "b", "large body")
+		// Simulate legacy oversized groups and malformed payload metadata.
+		if _, err := s.db.Exec(`UPDATE requests SET group_id = 'group-old', chain = 'invalid', attachments = 'invalid' WHERE id = ?`, req.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members, err := s.RequestsByGroup(t.Context(), "a", "group-old")
+	if err != nil || len(members) != MaxGroupRequests {
+		t.Fatalf("%+v %v", members, err)
+	}
+	for _, member := range members {
+		if member.ID == "" || member.To != "b" {
+			t.Fatalf("%+v", member)
+		}
+	}
+}
+
 func TestProgressRenewsOnlyActiveClaim(t *testing.T) {
 	s, c := open(t, ":memory:")
 	ctx := context.Background()

@@ -241,6 +241,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/requests/{id}/progress", s.handleProgress)
 	mux.HandleFunc("POST /v1/requests/{id}/reply", s.handleReply)
 	mux.HandleFunc("GET /v1/requests/{id}", s.handleGet)
+	mux.HandleFunc("GET /v1/groups/{id}", s.handleGroup)
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
@@ -520,6 +521,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if rf, ok := s.prep.(Refunder); ok {
 			rf.Refund(prepared)
+		}
+		if errors.Is(err, store.ErrGroupFull) {
+			writeErr(w, http.StatusBadRequest, err)
+			return
 		}
 		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
 		return
@@ -1292,4 +1297,25 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	s.record(r.Context(), "connected", "", "", in.Name, "")
 	writeJSON(w, http.StatusOK, map[string]string{"name": in.Name, "code": code, "url": url, "expires_in": "10m0s"})
+}
+
+func (s *Server) handleGroup(w http.ResponseWriter, r *http.Request) {
+	name := s.agent(w, r)
+	if name == "" {
+		return
+	}
+	reqs, err := s.store.RequestsByGroup(r.Context(), name, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	if len(reqs) == 0 {
+		writeErr(w, http.StatusNotFound, store.ErrNotFound)
+		return
+	}
+	members := make([]envelope.GroupMember, 0, len(reqs))
+	for _, req := range reqs {
+		members = append(members, envelope.GroupMember{ID: req.ID, To: req.To})
+	}
+	writeJSON(w, http.StatusOK, members)
 }

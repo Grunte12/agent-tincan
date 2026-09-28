@@ -293,7 +293,7 @@ func askCmd() *cobra.Command {
 	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
-		Use:   "ask <agent> <message...>",
+		Use:   "ask <agent[,agent...]> <message...>",
 		Short: "Ask another agent to do something and wait briefly for the reply",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -302,6 +302,29 @@ func askCmd() *cobra.Command {
 				return err
 			}
 			body := strings.Join(args[1:], " ")
+			targets, err := client.NormalizeTargets(strings.Split(args[0], ","), "")
+			if err != nil {
+				return err
+			}
+			if len(targets) > 1 {
+				kind := envelope.KindAsk
+				if notify {
+					kind = envelope.KindNotify
+				}
+				g, err := r.SendGroup(cmd.Context(), targets, body, kind, parent, attach, urgent)
+				if err != nil {
+					return err
+				}
+				if !notify {
+					g, err = r.WaitGroup(cmd.Context(), g, client.ClampWait(wait))
+					if err != nil {
+						return err
+					}
+				}
+				return printGroup(cmd, g, asJSON, notify)
+			}
+			args[0] = targets[0]
+
 			ups, err := r.UploadFiles(cmd.Context(), attach)
 			if err != nil {
 				return err
@@ -342,13 +365,21 @@ func getCmd() *cobra.Command {
 	var wait time.Duration
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "get <request-id>",
+		Use:   "get <request-or-group-id>",
 		Short: "Check on a request you sent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, _, err := connect()
 			if err != nil {
 				return err
+			}
+
+			if strings.HasPrefix(args[0], "group-") {
+				g, err := r.GetGroup(cmd.Context(), args[0], client.ClampWait(wait))
+				if err != nil {
+					return err
+				}
+				return printGroup(cmd, g, asJSON, false)
 			}
 			res, err := r.Get(cmd.Context(), args[0], client.ClampWait(wait))
 			if err != nil {
@@ -680,4 +711,29 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 
 func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(time.Now().UnixNano()%int64(d/2+1))
+}
+
+func printGroup(cmd *cobra.Command, g client.GroupResult, asJSON, notify bool) error {
+	code := g.ExitCode()
+	if notify {
+		code = 0
+		g.Outcome = "sent"
+		for _, r := range g.Results {
+			if r.Status == envelope.StatusFailed {
+				code = 1
+				g.Outcome = "failed"
+			}
+		}
+	}
+	if asJSON {
+		if err := writeJSON(cmd.OutOrStdout(), g); err != nil {
+			return err
+		}
+	} else {
+		cmd.Print(client.FormatGroup(g))
+	}
+	if code != 0 {
+		return &ExitError{Code: code, Silent: true}
+	}
+	return nil
 }

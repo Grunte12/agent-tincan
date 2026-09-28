@@ -90,6 +90,7 @@ func LocalFiles(dir string) Option {
 var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
 
 type askIn struct {
+	Also        []string `json:"also,omitempty" jsonschema:"additional teammates to ask the same question (at most 8 total)"`
 	Urgent      bool     `json:"urgent,omitempty" jsonschema:"true only for time-critical requests; wakes immediately and comes first"`
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
 	Message     string   `json:"message" jsonschema:"what you want them to do or answer"`
@@ -104,7 +105,7 @@ type idIn struct {
 }
 
 type getIn struct {
-	RequestID   string `json:"request_id" jsonschema:"the request id returned by ask"`
+	RequestID   string `json:"request_id" jsonschema:"the request or group id returned by ask"`
 	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the reply, 0 to 20"`
 }
 
@@ -197,8 +198,48 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
 
-	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask a teammate agent to do something or answer something. Waits up to wait_seconds for the reply, otherwise returns a request id to check with get_reply."},
+	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total). Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
+			if len(in.Also) > 0 {
+				gb, ok := b.(groupBackend)
+				if !ok {
+					return fail(errors.New("this backend does not support groups"))
+				}
+				if len(in.Attach) > 0 && f.filesDir == "" {
+					return fail(errors.New("local attachments are unavailable on this server"))
+				}
+				kind := envelope.KindAsk
+				if in.Notify {
+					kind = envelope.KindNotify
+				}
+				g, err := gb.SendGroup(ctx, append([]string{in.To}, in.Also...), in.Message, kind, in.ParentID, in.Attach, in.Urgent)
+				if err != nil {
+					return fail(err)
+				}
+				if !in.Notify {
+					wait := MaxWait
+					if in.WaitSeconds != 0 {
+						wait = clamp(in.WaitSeconds)
+					}
+					g, err = gb.WaitGroup(ctx, g, wait)
+					if err != nil {
+						return fail(err)
+					}
+				}
+				if in.Notify {
+					g.Outcome = "sent"
+					for _, res := range g.Results {
+						if res.Status == envelope.StatusFailed {
+							g.Outcome = "failed"
+						}
+					}
+				}
+				result, data, err := f.groupResult(ctx, g)
+				if result != nil && in.Notify && g.Outcome == "failed" {
+					result.IsError = true
+				}
+				return result, data, err
+			}
 			if len(in.Attach) > 0 {
 				return f.askAttached(ctx, in)
 			}
@@ -222,6 +263,18 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 
 	mcp.AddTool(s, &mcp.Tool{Name: "get_reply", Description: "Check on a request you sent with ask."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in getIn) (*mcp.CallToolResult, any, error) {
+
+			if strings.HasPrefix(in.RequestID, "group-") {
+				gb, ok := b.(groupBackend)
+				if !ok {
+					return fail(errors.New("this backend does not support groups"))
+				}
+				g, err := gb.GetGroup(ctx, in.RequestID, clamp(in.WaitSeconds))
+				if err != nil {
+					return fail(err)
+				}
+				return f.groupResult(ctx, g)
+			}
 			res, err := b.Get(ctx, in.RequestID, clamp(in.WaitSeconds))
 			if err != nil {
 				return fail(err)
@@ -524,4 +577,18 @@ func text(s string) (*mcp.CallToolResult, any, error) {
 func fail(err error) (*mcp.CallToolResult, any, error) {
 	err = client.RejoinHint(err, "")
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, nil, nil
+}
+
+type groupBackend interface {
+	SendGroup(context.Context, []string, string, envelope.Kind, string, []string, bool) (client.GroupResult, error)
+	WaitGroup(context.Context, client.GroupResult, time.Duration) (client.GroupResult, error)
+	GetGroup(context.Context, string, time.Duration) (client.GroupResult, error)
+}
+
+func (f files) groupResult(ctx context.Context, g client.GroupResult) (*mcp.CallToolResult, any, error) {
+	var atts []envelope.Attachment
+	for _, r := range g.Results {
+		atts = append(atts, replyAttachments(r.Result)...)
+	}
+	return f.result(ctx, client.FormatGroup(g), atts)
 }

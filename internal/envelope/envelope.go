@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -22,6 +23,7 @@ const MaxProgressNote = 1024
 const MaxAttachments = 8
 
 var (
+	groupID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	// ErrBodyTooLarge is returned when a body exceeds the configured cap.
 	ErrBodyTooLarge = errors.New("body too large")
 	// ErrTooManyAttachments is returned when a message names more than
@@ -73,6 +75,7 @@ func (s Status) Terminal() bool {
 
 // Request is one agent asking another to do something.
 type Request struct {
+	Group    string   `json:"group,omitempty"`
 	Urgent   bool     `json:"urgent,omitempty"`
 	ID       string   `json:"id,omitempty"`
 	From     string   `json:"from,omitempty"`
@@ -90,6 +93,12 @@ type Request struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
+}
+
+// GroupMember identifies a request without fetching its result or marking replies seen.
+type GroupMember struct {
+	ID string `json:"id"`
+	To string `json:"to"`
 }
 
 // Pending names a queued request without its body, as a peek reports it.
@@ -146,6 +155,7 @@ func (r Result) Done() bool {
 
 // sendInput is the only part of a send the relay accepts from a client.
 type sendInput struct {
+	Group       string       `json:"group"`
 	Urgent      bool         `json:"urgent"`
 	To          string       `json:"to"`
 	Body        string       `json:"body"`
@@ -161,6 +171,9 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	var in sendInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Request{}, fmt.Errorf("decode send: %w", err)
+	}
+	if in.Group != "" && !groupID.MatchString(in.Group) {
+		return Request{}, errors.New("send: invalid group id")
 	}
 	in.To = strings.TrimSpace(in.To)
 	switch {
@@ -189,7 +202,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
+	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
 }
 
 // attachmentIDs keeps only the ids a client names, checking the count and

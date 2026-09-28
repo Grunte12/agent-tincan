@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -192,6 +194,44 @@ func TestJoinSavesRelayKey(t *testing.T) {
 	}
 	if err := r.Raw(context.Background(), "GET", "/v1/whoami", nil, &raw); err != nil || raw.RelayKey != cfg.RelayKey {
 		t.Fatalf("saved key %q, relay's %q, %v", cfg.RelayKey, raw.RelayKey, err)
+	}
+}
+
+func TestAskGroupCLI(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("TINCAN_RELAY", "")
+	t.Setenv("TINCAN_PROXY", "")
+	if err := client.SaveConfig(client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"}); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd := askCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"instinct,muse", "hello", "--wait=0", "--json"})
+	err := cmd.ExecuteContext(t.Context())
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("%v: %s", err, out.String())
+	}
+	var g client.GroupResult
+	if err := json.Unmarshal([]byte(out.String()), &g); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Results) != 2 || g.Outcome != "pending" {
+		t.Fatalf("%+v", g)
+	}
+	out.Reset()
+	cmd = getCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{g.Group, "--json"})
+	err = cmd.ExecuteContext(t.Context())
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("%v: %s", err, out.String())
 	}
 }
 

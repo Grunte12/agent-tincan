@@ -90,6 +90,40 @@ Retention runs when the relay starts and hourly. An upload no message carries is
 
 Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.
 
+## Request groups
+
+A send may include an optional `group` string of 1 to 64 ASCII letters, digits,
+underscores or hyphens. The relay stores and echoes it on the request.
+Groups do not change identity, parent/chain checks, rate limits, wakes,
+allowlists, leases or attachment ownership: each target receives an ordinary
+request and requires its own uploads. An urgent group send marks every member
+urgent, and each member uses its own urgent slot.
+
+`GET /v1/groups/{id}` returns only membership: an array of `{"id": "...", "to": "..."}`
+for requests sent by the authenticated caller with that group tag. It includes
+no bodies or replies and never marks replies seen. Fetch each result through
+`GET /v1/requests/{id}`. An unknown group, or a group with no
+requests sent by the caller, returns 404. Recipients and admins do not gain
+access to another sender's group through this endpoint.
+`GET /v1/capabilities` advertises `"groups": true`.
+
+Clients generate ids prefixed with `group-`, deduplicate targets and cap fan-out
+at 8. Older relays ignore the optional field. Clients retain the individual ids
+in memory so combined polling still works in the original client instance;
+across client restarts, use individual ids or upgrade the relay. Failed sends
+are local result entries and are not stored as requests on the relay.
+Per-target polling failures appear as `error` text on the combined result entry,
+preserving its request id and last known status alongside successful results.
+The relay accepts at most 8 requests per sender and group tag; further sends
+return HTTP 400. Membership lookups return at most 8 ids and targets.
+Clients reconcile relay membership with local send errors, recovering requests
+whose send response was lost while retaining errors for targets absent from the
+relay. Concurrent group polls preserve the most advanced cached status and replies.
+A multi-target MCP notification returns a tool error if any upload or send fails,
+with the per-target results included in its content.
+
+Group text output includes the group id and every accepted request id.
+
 Urgent sends have a separate per-sender rolling hourly limit (default 5, configured by `tincan relay --urgent-per-hour`). Exceeding it returns HTTP 429: `urgent limit reached; send without --urgent`. Ordinary sender limits still apply. Sender limits are in memory and reset on relay restart. The optional `urgent` field is also returned on pending request summaries, and a peek carries `"urgent": <n>`, the count of all queued urgent requests (left out when zero), so a channel notice counts them past the 50 that `pending` lists. A send the relay fails to queue (a bad attachment, for example) does not use up an urgent slot. The relay refuses to start with `--urgent-per-hour` below 1. Old clients and relays can ignore this additive field.
 
 ### Available client upgrades

@@ -878,6 +878,32 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 	}
 }
 
+func TestAskGroupAndGetReply(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	out := call(t, cs, "ask", map[string]any{"to": "instinct", "also": []string{"muse"}, "message": "hello", "wait_seconds": -1})
+	if strings.Contains(out, "ERROR:") || !strings.Contains(out, "instinct") || !strings.Contains(out, "muse") {
+		t.Fatal(out)
+	}
+	fields := strings.Fields(out)
+	if len(fields) < 2 || !strings.HasPrefix(fields[1], "group-") {
+		t.Fatal(out)
+	}
+	got := call(t, cs, "get_reply", map[string]any{"request_id": fields[1]})
+	if strings.Contains(got, "ERROR:") || !strings.Contains(got, "muse") {
+		t.Fatal(got)
+	}
+}
+
+func TestNotifyGroupSendFailureIsToolError(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	out := call(t, cs, "ask", map[string]any{"to": "instinct", "also": []string{"unknown"}, "message": "hello", "notify": true})
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "instinct") || !strings.Contains(out, "unknown") || !strings.Contains(out, "no such agent") {
+		t.Fatal(out)
+	}
+}
+
 func TestUrgentAsk(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	sender := session(t, m, "grokbot")

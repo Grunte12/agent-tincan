@@ -191,6 +191,20 @@ func TestAttachmentJSONShape(t *testing.T) {
 	}
 }
 
+func TestSendGroupValidation(t *testing.T) {
+	for _, group := range []string{"group-abc_123", "", "../bad", "a/b", strings.Repeat("x", 65)} {
+		raw, _ := json.Marshal(map[string]string{"to": "other", "body": "hello", "group": group})
+		req, err := ParseSend(raw, "sender", DefaultMaxBody)
+		valid := group == "" || group == "group-abc_123"
+		if valid && (err != nil || req.Group != group) {
+			t.Fatalf("%q: %+v %v", group, req, err)
+		}
+		if !valid && err == nil {
+			t.Fatalf("accepted %q", group)
+		}
+	}
+}
+
 func TestParseSendUrgent(t *testing.T) {
 	for _, tc := range []struct {
 		raw    string

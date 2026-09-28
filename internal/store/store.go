@@ -25,6 +25,8 @@ var (
 	ErrNotFound = errors.New("request not found")
 	// ErrForbidden means the caller is not the agent allowed to do this.
 	ErrForbidden = errors.New("not allowed for this agent")
+	// ErrGroupFull means a sender has filled this group.
+	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
 	ErrWrongState = errors.New("request is not in a state that allows this")
 )
@@ -142,6 +144,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateReplySeen(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate reply seen: %w", err)
+	}
+	if err := s.migrateGroups(); err != nil {
+		s.Close()
+		return nil, err
 	}
 	if err := s.migrateAttachments(); err != nil {
 		db.Close()
@@ -569,15 +575,24 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
+	if req.Group != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM requests WHERE from_agent = ? AND group_id = ? LIMIT ?)`, req.From, req.Group, MaxGroupRequests).Scan(&count); err != nil {
+			return envelope.Request{}, err
+		}
+		if count >= MaxGroupRequests {
+			return envelope.Request{}, ErrGroupFull
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, urgent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, group_id, urgent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.Urgent)
+		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.Group, req.Urgent)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -937,7 +952,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, urgent, progress_note, progress_at`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, group_id, urgent, progress_note, progress_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -946,7 +961,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var chain, kind, status, atts string
 	var created, progressAt int64
 	var note string
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Urgent, &note, &progressAt); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Group, &r.Urgent, &note, &progressAt); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -1002,6 +1017,41 @@ func randomID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func (s *Store) migrateGroups() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'group_id')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN group_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_group ON requests(from_agent, group_id)`)
+	return err
+}
+
+// MaxGroupRequests bounds membership per sender and group tag.
+const MaxGroupRequests = 8
+
+// RequestsByGroup lists only ids and targets sent by sender in group.
+func (s *Store) RequestsByGroup(ctx context.Context, sender, group string) ([]envelope.GroupMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, to_agent FROM requests WHERE from_agent = ? AND group_id = ? ORDER BY created_at, id LIMIT ?`, sender, group, MaxGroupRequests)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var members []envelope.GroupMember
+	for rows.Next() {
+		var member envelope.GroupMember
+		if err := rows.Scan(&member.ID, &member.To); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
 }
 
 // PollFeatures is poll-only capability state, separate from legacy advertisements.
