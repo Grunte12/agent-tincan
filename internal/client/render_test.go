@@ -157,3 +157,22 @@ func TestFormatInboxUpgradeOnce(t *testing.T) {
 		t.Fatalf("new release missing: %q", got)
 	}
 }
+
+// A tincan mcp server names its host's reload step in the notice, since
+// restarting "long-running tincan processes" means reloading the app there.
+func TestUpgradeNoticeNamesReloadStep(t *testing.T) {
+	old := client.Version
+	client.Version = "0.5.4"
+	t.Cleanup(func() { client.Version = old })
+	got := client.UpgradeNoticeReload("92.0.0", "quit Claude Code and start it again")
+	want := "tincan 92.0.0 is available from the relay (you run 0.5.4): run tincan upgrade, then quit Claude Code and start it again so this tincan mcp server runs the new build, and restart any other long-running tincan processes.\n"
+	if got != want {
+		t.Fatalf("notice = %q, want %q", got, want)
+	}
+	if again := client.UpgradeNotice("92.0.0"); again != "" {
+		t.Fatalf("the inbox surface repeated the notice: %q", again)
+	}
+	if plain := client.UpgradeNoticeReload("92.0.1", ""); !strings.HasSuffix(plain, "then restart long-running tincan processes.\n") {
+		t.Fatalf("no reload step should keep the plain notice: %q", plain)
+	}
+}

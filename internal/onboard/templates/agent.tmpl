@@ -44,8 +44,13 @@ When you ask a teammate while handling a request, pass the request id you are ha
 At the start of each turn, call check_inbox (or run tincan inbox) to pick up waiting requests.
 If a request asks you to spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first.
 When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell {{.Owner}} if you cannot.
+{{- if ne .Kind "chatgpt"}}
+Your tincan MCP server keeps running the build it started with after tincan upgrade until {{template "mcpreload" .}}. Do that when a tool result or tincan doctor says your tincan mcp runs a different build than the binary.
+{{- end}}
 {{template "instructions.selfheal" .}}
 {{- end -}}
+
+{{- define "mcpreload"}}{{if eq .Kind "claude-code"}}you quit Claude Code and start it again (or reconnect tincan from /mcp){{else if eq .Kind "codex"}}you start a new Codex session{{else}}you reload the tincan MCP server in your app's settings (or quit and reopen the app){{end}}{{end -}}
 
 {{- define "instructions.selfheal" -}}
 {{- if eq .Kind "chatgpt" -}}

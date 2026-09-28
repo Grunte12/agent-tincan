@@ -78,7 +78,8 @@ type Attacher interface {
 type Option func(*options)
 
 type options struct {
-	filesDir string // where received non-image files are saved; "" means local files are off
+	filesDir string      // where received non-image files are saved; "" means local files are off
+	watch    *BuildWatch // the binary this server runs from; nil off its own machine
 }
 
 // LocalFiles lets ask and reply attach files from this machine and saves
@@ -227,6 +228,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		opts = &o
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
+	if f.watch != nil {
+		s.AddReceivingMiddleware(watchMiddleware(f.watch))
+	}
 
 	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total). Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
@@ -313,14 +317,23 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "check_inbox", Description: "Pick up requests from teammates, and replies to requests you sent that you have not seen yet. Claims the requests so no one else handles them. Reply to each request when done."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in inboxIn) (*mcp.CallToolResult, any, error) {
+		func(ctx context.Context, req *mcp.CallToolRequest, in inboxIn) (*mcp.CallToolResult, any, error) {
 			inbox, err := b.Poll(ctx, clamp(in.WaitSeconds))
 			if err != nil {
 				return fail(err)
 			}
 			allReplyAcks := inbox.ReplyAcks()
 			inbox, retry, _ := client.AnswerPings(ctx, b, inbox, "check_inbox")
+			// A server on the agent's own machine names how its app
+			// reloads it, since that is the restart that matters here.
+			upgrade := ""
+			if f.watch != nil {
+				upgrade, inbox.UpgradeAvailable = inbox.UpgradeAvailable, ""
+			}
 			out := client.FormatInbox(ctx, b, inbox)
+			if upgrade != "" {
+				out += client.UpgradeNoticeReload(upgrade, ReloadStep(sessionHost(req.Session)))
+			}
 			var atts []envelope.Attachment
 			for _, r := range inbox.Replies {
 				atts = append(atts, replyAttachments(r)...)

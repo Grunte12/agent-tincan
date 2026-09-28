@@ -104,6 +104,14 @@ func ReportUpgrade(version string, emit func(string) error) error {
 // ReportUpgradeOn is ReportUpgrade for one surface; concurrent callers on the
 // same surface share its guard.
 func ReportUpgradeOn(surface, version string, emit func(string) error) error {
+	return ReportUpgradeReload(surface, version, "", emit)
+}
+
+// ReportUpgradeReload is ReportUpgradeOn for a tincan mcp server: reload,
+// when set, is how its app starts a fresh server (for example "quit Claude
+// Code and start it again"), and the notice names it, since that server
+// keeps the old build until then.
+func ReportUpgradeReload(surface, version, reload string, emit func(string) error) error {
 	if !Newer(version, Version) {
 		return nil
 	}
@@ -114,7 +122,11 @@ func ReportUpgradeOn(surface, version string, emit func(string) error) error {
 	if upgradeNotices.seen[key] {
 		return nil
 	}
-	line := fmt.Sprintf("tincan %s is available from the relay (you run %s): run tincan upgrade, then restart long-running tincan processes.\n", version, strings.TrimPrefix(Version, "v"))
+	restart := "restart long-running tincan processes"
+	if reload != "" {
+		restart = reload + " so this tincan mcp server runs the new build, and restart any other long-running tincan processes"
+	}
+	line := fmt.Sprintf("tincan %s is available from the relay (you run %s): run tincan upgrade, then %s.\n", version, strings.TrimPrefix(Version, "v"), restart)
 	if err := emit(line); err != nil {
 		return err
 	}
@@ -126,5 +138,13 @@ func ReportUpgradeOn(surface, version string, emit func(string) error) error {
 func UpgradeNotice(version string) string {
 	var line string
 	_ = ReportUpgrade(version, func(s string) error { line = s; return nil })
+	return line
+}
+
+// UpgradeNoticeReload is UpgradeNotice for a tincan mcp server whose app
+// reloads it with reload; it shares the inbox surface's guard.
+func UpgradeNoticeReload(version, reload string) string {
+	var line string
+	_ = ReportUpgradeReload(UpgradeSurfaceInbox, version, reload, func(s string) error { line = s; return nil })
 	return line
 }

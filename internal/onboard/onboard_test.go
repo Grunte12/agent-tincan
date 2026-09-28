@@ -556,3 +556,24 @@ func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
 		}
 	}
 }
+
+// Each kind with a local tincan mcp server is told how its app reloads it
+// after an upgrade, since the server keeps the old build until then.
+func TestInstructionsNameMCPReloadPerKind(t *testing.T) {
+	cases := map[string]string{
+		KindClaudeCode: "quit Claude Code and start it again",
+		KindCodex:      "start a new Codex session",
+		KindGeminiCLI:  "reload the tincan MCP server in your app's settings",
+		KindGeneric:    "reload the tincan MCP server in your app's settings",
+	}
+	for kind, want := range cases {
+		k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "a", Wake: "none", Kind: kind}}})
+		if got := block(t, k, "a").Instructions; !strings.Contains(got, want) || !strings.Contains(got, "different build") {
+			t.Errorf("%s instructions lack %q: %s", kind, want, got)
+		}
+	}
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "a", Wake: "none", Kind: KindChatGPT}}})
+	if got := block(t, k, "a").Instructions; strings.Contains(got, "different build") {
+		t.Errorf("chatgpt runs no local tincan mcp but was told to reload one: %s", got)
+	}
+}
