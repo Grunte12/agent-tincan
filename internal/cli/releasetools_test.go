@@ -82,6 +82,11 @@ type fakeCWS struct {
 	publishedVersion string
 	tokenStatus      int
 	publishStatus    []string
+	// draftStates are the uploadState answers to successive DRAFT status
+	// calls (SUCCESS once used up); publishedErr, when set, is the HTTP
+	// status the PUBLISHED projection fails with.
+	draftStates  []string
+	publishedErr int
 }
 
 // summary lists the store calls as "METHOD path?query".
@@ -146,9 +151,19 @@ func (f *fakeCWS) start(t *testing.T) {
 		f.mu.Unlock()
 		switch r.Method {
 		case http.MethodGet:
-			m := map[string]any{"id": "testitem", "uploadState": "SUCCESS"}
+			state := "SUCCESS"
+			f.mu.Lock()
+			if r.URL.Query().Get("projection") == "DRAFT" && len(f.draftStates) > 0 {
+				state, f.draftStates = f.draftStates[0], f.draftStates[1:]
+			}
+			f.mu.Unlock()
+			m := map[string]any{"id": "testitem", "uploadState": state}
 			v := f.draftVersion
 			if r.URL.Query().Get("projection") == "PUBLISHED" {
+				if f.publishedErr != 0 {
+					w.WriteHeader(f.publishedErr)
+					return
+				}
 				if f.publishedVersion == "" {
 					w.WriteHeader(http.StatusBadRequest)
 					io.WriteString(w, `{"error":{"message":"projection not supported"}}`)
@@ -283,6 +298,55 @@ func TestCWSPublishOnly(t *testing.T) {
 	wantCalls(t, f, postPublish)
 	if _, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish-only", "extra.zip"); err == nil {
 		t.Fatal("--publish-only with a zip argument was accepted")
+	}
+}
+
+// A published-version lookup that fails for another reason than an
+// unsupported projection stops the command instead of skipping a draft
+// that may be unpublished.
+func TestCWSUploadPublishedLookupFails(t *testing.T) {
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests} {
+		f := &fakeCWS{draftVersion: "0.6.0", publishedErr: code}
+		f.start(t)
+		out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0"))
+		if err == nil || !strings.Contains(out, "store published version") {
+			t.Fatalf("HTTP %d: %v\n%s", code, err, out)
+		}
+		wantCalls(t, f, getDraft, getPublished)
+	}
+}
+
+// An unpublished draft of the zip's version whose upload is still in
+// progress is published only once it succeeds; one whose upload failed is
+// uploaded again.
+func TestCWSUploadDraftStates(t *testing.T) {
+	old := cwsPollInterval
+	cwsPollInterval = time.Millisecond
+	t.Cleanup(func() { cwsPollInterval = old })
+
+	f := &fakeCWS{draftVersion: "0.6.0", publishedVersion: "0.5.0", draftStates: []string{"IN_PROGRESS", "IN_PROGRESS"}}
+	f.start(t)
+	out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0"))
+	if err != nil {
+		t.Fatal(out)
+	}
+	wantCalls(t, f, getDraft, getPublished, getDraft, getDraft, postPublish)
+
+	f = &fakeCWS{draftVersion: "0.6.0", publishedVersion: "0.5.0", draftStates: []string{"IN_PROGRESS", "FAILURE"}}
+	f.start(t)
+	if out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0")); err == nil || !strings.Contains(out, "state FAILURE") {
+		t.Fatalf("draft upload that failed while waiting: %v\n%s", err, out)
+	}
+	wantCalls(t, f, getDraft, getPublished, getDraft)
+
+	for _, published := range []string{"0.5.0", ""} {
+		f = &fakeCWS{draftVersion: "0.6.0", publishedVersion: published, draftStates: []string{"FAILURE"}}
+		f.start(t)
+		out, err := runReleaseTools(t, "cws-upload", "--credentials", writeCreds(t, 0o600, fullCreds()), "--publish", storeZip(t, "0.6.0"))
+		if err != nil || !strings.Contains(out, "uploaded version 0.6.0") {
+			t.Fatalf("failed draft, published %q: %v\n%s", published, err, out)
+		}
+		wantCalls(t, f, getDraft, getPublished, putUpload, postPublish)
 	}
 }
 

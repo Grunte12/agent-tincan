@@ -474,29 +474,41 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 	c := &cwsClient{creds: creds, token: token}
 	item := url.PathEscape(creds.ItemID)
 
-	status, err := c.call(ctx, http.MethodGet, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"?projection=DRAFT", nil, "")
+	draftURL := cwsAPIBase + "/chromewebstore/v1.1/items/" + item + "?projection=DRAFT"
+
+	status, err := c.call(ctx, http.MethodGet, draftURL, nil, "")
 	if err != nil {
 		return fmt.Errorf("store status: %w", err)
 	}
 	draftVersion, _ := status["crxVersion"].(string)
 	state, _ := status["uploadState"].(string)
 	// The published version tells an already-published zip from a draft
-	// that was uploaded but never published. The API may not report it;
-	// then it stays unknown.
+	// that was uploaded but never published. An API that does not support
+	// the PUBLISHED projection answers 400 or 404, and the version stays
+	// unknown; any other failure stops here rather than guess.
 	publishedVersion := ""
-	if pub, err := c.call(ctx, http.MethodGet, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"?projection=PUBLISHED", nil, ""); err == nil {
+	pub, err := c.call(ctx, http.MethodGet, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"?projection=PUBLISHED", nil, "")
+	se, _ := errors.AsType[*cwsStatusError](err)
+	switch {
+	case err == nil:
 		publishedVersion, _ = pub["crxVersion"].(string)
+	case se != nil && (se.Code == http.StatusBadRequest || se.Code == http.StatusNotFound):
+	default:
+		return fmt.Errorf("store published version: %w", err)
 	}
 	fmt.Fprintf(out, "store item %s: draft version %s (upload state %s), published version %s; zip version %s\n",
 		creds.ItemID, orUnknown(draftVersion), orUnknown(state), orUnknown(publishedVersion), version)
 
+	// A draft of this version whose upload failed is uploaded again.
+	sameDraft := draftVersion != "" && draftVersion == version && state != "FAILURE"
 	switch {
 	case publishedVersion != "" && !manifestVersionGreater(version, publishedVersion):
 		fmt.Fprintf(out, "the store has published version %s; manifest version %s is not newer, so nothing is uploaded or published (bump extension/manifest.json to ship the extension)\n", publishedVersion, version)
 		return nil
-	case draftVersion != "" && draftVersion == version && publishedVersion != "":
+	case sameDraft && publishedVersion != "":
 		// Uploaded before but not published: a publish that failed or
-		// never ran. Publish it now instead of skipping it.
+		// never ran. Publish it now instead of skipping it, once its
+		// upload has finished.
 		fmt.Fprintf(out, "version %s is already uploaded as the draft but not published\n", version)
 		if !publish {
 			return nil
@@ -505,8 +517,11 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 			fmt.Fprintf(out, "dry run: would publish the draft (version %s)\n", version)
 			return nil
 		}
+		if err := c.waitUpload(ctx, draftURL, status, out); err != nil {
+			return err
+		}
 		return c.publish(ctx, item, out)
-	case draftVersion != "" && !manifestVersionGreater(version, draftVersion):
+	case draftVersion != "" && !manifestVersionGreater(version, draftVersion) && (sameDraft || draftVersion != version):
 		fmt.Fprintf(out, "the store's draft already has version %s; manifest version %s is not newer, so nothing is uploaded or published (bump extension/manifest.json to ship the extension). If that draft was never published, run tincan release-tools cws-upload --publish-only\n", draftVersion, version)
 		return nil
 	}
@@ -523,10 +538,28 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
+	if err := c.waitUpload(ctx, draftURL, up, out); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "uploaded version %s\n", version)
+	if !publish {
+		return nil
+	}
+	return c.publish(ctx, item, out)
+}
+
+// waitUpload polls the draft while its upload is IN_PROGRESS and fails
+// unless it ends in SUCCESS. resp is the latest upload or status answer.
+func (c *cwsClient) waitUpload(ctx context.Context, draftURL string, resp map[string]any, out io.Writer) error {
 	for {
-		state, _ = up["uploadState"].(string)
-		if state != "IN_PROGRESS" {
-			break
+		state, _ := resp["uploadState"].(string)
+		switch state {
+		case "SUCCESS":
+			return nil
+		case "IN_PROGRESS":
+		default:
+			errs, _ := json.Marshal(resp["itemError"])
+			return fmt.Errorf("upload ended in state %s: %s", orUnknown(state), c.creds.redact(string(errs), c.token))
 		}
 		fmt.Fprintln(out, "upload in progress; waiting")
 		select {
@@ -534,19 +567,11 @@ func cwsUpload(ctx context.Context, credsPath, zipPath string, publish, dryRun b
 			return ctx.Err()
 		case <-time.After(cwsPollInterval):
 		}
-		if up, err = c.call(ctx, http.MethodGet, cwsAPIBase+"/chromewebstore/v1.1/items/"+item+"?projection=DRAFT", nil, ""); err != nil {
+		var err error
+		if resp, err = c.call(ctx, http.MethodGet, draftURL, nil, ""); err != nil {
 			return fmt.Errorf("store status: %w", err)
 		}
 	}
-	if state != "SUCCESS" {
-		errs, _ := json.Marshal(up["itemError"])
-		return fmt.Errorf("upload ended in state %s: %s", orUnknown(state), creds.redact(string(errs), token))
-	}
-	fmt.Fprintf(out, "uploaded version %s\n", version)
-	if !publish {
-		return nil
-	}
-	return c.publish(ctx, item, out)
 }
 
 // publish submits the item's draft for publishing. OK and
@@ -582,6 +607,15 @@ func orUnknown(s string) string {
 	return s
 }
 
+// cwsStatusError is a Web Store answer outside 2xx. Body is already
+// redacted.
+type cwsStatusError struct {
+	Code int
+	Body string
+}
+
+func (e *cwsStatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Body) }
+
 type cwsClient struct {
 	creds *cwsCreds
 	token string
@@ -605,7 +639,7 @@ func (c *cwsClient) call(ctx context.Context, method, u string, body []byte, cty
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, c.creds.redact(snippet(b), c.token))
+		return nil, &cwsStatusError{Code: resp.StatusCode, Body: c.creds.redact(snippet(b), c.token)}
 	}
 	m := map[string]any{}
 	if len(bytes.TrimSpace(b)) > 0 {
