@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ const AgentHeader = "X-Tincan-Agent"
 // VersionHeader carries the tincan build the client runs on every relay
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
+
+// PlatformHeader carries the client's os_arch (for example darwin_arm64), so
+// the relay only announces a release it holds a binary for.
+const PlatformHeader = "X-Tincan-Platform"
 
 // Version is the tincan build this process runs, sent as VersionHeader by
 // every relay client made after it is set. main sets it from the link-time
@@ -42,9 +47,10 @@ func ClampWait(d time.Duration) time.Duration { return min(max(d, 0), MaxInlineW
 
 // AgentInfo is one joined agent as the relay reports it.
 type AgentInfo struct {
-	Name     string    `json:"name"`
-	Online   bool      `json:"online"`
-	LastPoll time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
+	UpgradeAvailable string    `json:"upgrade_available,omitempty"`
+	Name             string    `json:"name"`
+	Online           bool      `json:"online"`
+	LastPoll         time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
 	// LastActive is the agent's last call of any kind (send, reply, get,
 	// poll), kept across relay restarts.
 	LastActive time.Time `json:"last_active,omitzero"`
@@ -291,8 +297,9 @@ const (
 // Inbox is what one poll picked up: requests addressed to this agent, and
 // replies to requests it sent that it has not seen yet.
 type Inbox struct {
-	Requests []envelope.Request `json:"requests"`
-	Replies  []Result           `json:"replies,omitempty"`
+	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
+	Requests         []envelope.Request `json:"requests"`
+	Replies          []Result           `json:"replies,omitempty"`
 	// RepliesRemaining counts unseen replies left out of this poll to keep
 	// the response small. They come with a later poll once these are acked.
 	RepliesRemaining int `json:"replies_remaining,omitempty"`
@@ -313,9 +320,10 @@ func (in Inbox) ReplyIDs() []string {
 
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
-	Total   int      `json:"waiting"` // queued requests plus unseen replies
-	Queued  int      `json:"queued"`
-	Replies []Result `json:"replies,omitempty"`
+	UpgradeAvailable string   `json:"upgrade_available,omitempty"`
+	Total            int      `json:"waiting"` // queued requests plus unseen replies
+	Queued           int      `json:"queued"`
+	Replies          []Result `json:"replies,omitempty"`
 	// Pending names the oldest queued requests (id and sender, no body).
 	// A relay that predates it leaves it empty.
 	Pending []envelope.Pending `json:"pending,omitempty"`
@@ -535,6 +543,7 @@ func (r *Relay) headers(req *http.Request) {
 	if r.version != "" {
 		req.Header.Set(VersionHeader, r.version)
 	}
+	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
 }
 
 // IsStatus reports whether err is a relay error with the given HTTP code.

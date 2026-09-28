@@ -25,7 +25,8 @@ func listenCmd() *cobra.Command {
 this agent's own requests, are waiting. Nothing is taken, so the agent picks
 them up itself with check_inbox or "tincan inbox". The command gets
 TINCAN_WAITING (requests plus unseen replies) in its environment and runs
-through "sh -c".
+through "sh -c". A new relay release also nudges the command, with its version
+in TINCAN_UPGRADE_AVAILABLE (empty on other nudges), even if TINCAN_WAITING is zero.
 
 Use this for agents whose runtime stays up and can be nudged by a command,
 for example opening a Claude Code session in cmux. For agents that get a new
@@ -80,11 +81,23 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 			continue
 		}
 		backoff = time.Second
-		if n == 0 {
+		nudged := false
+		err = client.ReportUpgradeOn(client.UpgradeSurfaceListen, w.UpgradeAvailable, func(string) error {
+			nudged = true
+			return nudge(ctx, r, execCmd, n, once, w.UpgradeAvailable)
+		})
+		if !nudged && n > 0 {
+			nudged = true
+			err = nudge(ctx, r, execCmd, n, once, "")
+		}
+		if err != nil {
+			if once || ctx.Err() != nil {
+				return err
+			}
 			continue
 		}
-		if err := nudge(ctx, r, execCmd, n, once); err != nil {
-			return err
+		if !nudged {
+			continue
 		}
 		if once {
 			return nil
@@ -95,28 +108,29 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 // nudge runs the command for n waiting items and then, unless once, waits
 // out the cooldown. The agent stays online throughout, up to
 // listenPresenceCap: it is busy with what it was nudged about, not gone.
-func nudge(ctx context.Context, r *client.Relay, execCmd string, n int, once bool) error {
+func nudge(ctx context.Context, r *client.Relay, execCmd string, n int, once bool, upgrade string) error {
 	defer r.KeepPresence(ctx, client.Presence{
 		Every: listenPresenceEvery,
 		Cap:   listenPresenceCap,
 		Logf:  listenLogf,
 	})()
 	c := exec.CommandContext(ctx, "sh", "-c", execCmd)
-	c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n))
+	c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n), "TINCAN_UPGRADE_AVAILABLE="+upgrade)
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
-	if err := c.Run(); err != nil {
+	err := c.Run()
+	if err != nil {
 		// A failed nudge is retried on the next loop; nothing was taken.
 		listenLogf("command failed: %v", err)
 	}
 	if once {
-		return nil
+		return err
 	}
 	// Give the agent time to pick them up before nudging again.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(listenCooldown):
-		return nil
+		return err
 	}
 }
 

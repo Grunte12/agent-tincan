@@ -401,6 +401,9 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Version != "" {
 		out["relay_version"] = s.cfg.Version
 	}
+	if v := s.upgradeFor(r); v != "" {
+		out["upgrade_available"] = v
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -518,6 +521,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 				if more > 0 {
 					out["replies_remaining"] = more
 				}
+				if v := s.upgradeFor(r); v != "" {
+					out["upgrade_available"] = v
+				}
 				writeJSON(w, http.StatusOK, out)
 				return
 			}
@@ -525,7 +531,13 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			case <-wake:
 				continue
 			case <-deadline.C:
-				w.WriteHeader(http.StatusNoContent)
+				if v := s.upgradeFor(r); v != "" {
+					out := map[string]any{"upgrade_available": v}
+					out["waiting"], out["queued"] = 0, 0
+					writeJSON(w, http.StatusOK, out)
+				} else {
+					w.WriteHeader(http.StatusNoContent)
+				}
 				return
 			case <-r.Context().Done():
 				return
@@ -547,6 +559,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			if more > 0 {
 				out["replies_remaining"] = more
 			}
+			if v := s.upgradeFor(r); v != "" {
+				out["upgrade_available"] = v
+			}
 			writeJSON(w, http.StatusOK, out)
 			return
 		}
@@ -554,7 +569,13 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		case <-wake:
 		case <-deadline.C:
 			s.touch(name)
-			w.WriteHeader(http.StatusNoContent)
+			if v := s.upgradeFor(r); v != "" {
+				out := map[string]any{"upgrade_available": v}
+				out["requests"] = []envelope.Request{}
+				writeJSON(w, http.StatusOK, out)
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
 			return
 		case <-r.Context().Done():
 			return

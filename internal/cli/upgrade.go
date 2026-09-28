@@ -90,6 +90,9 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check bool, out i
 		return nil
 	}
 	if check {
+		if client.Newer(m.Version, Version) {
+			fmt.Fprintf(out, "A newer tincan release is available: %s.\n", m.Version)
+		}
 		fmt.Fprintf(out, "Current: tincan %s at %s\nAvailable from the relay: %s (%s)\nRun tincan upgrade to install it.\n", current, exe, available, name)
 		return nil
 	}

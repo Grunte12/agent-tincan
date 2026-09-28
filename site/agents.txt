@@ -20,6 +20,14 @@ Rules for every part:
   secrets) in a chat reply unless your owner asked for that exact value there.
 - Ask your owner before anything that costs money or needs their login.
 - When something fails, run `tincan doctor` and do what its fix lines say.
+- When tincan says a newer release is available from the relay, run `tincan
+  upgrade` and restart your own long-running tincan processes (wait loop,
+  listener, MCP server). Tell your owner if you cannot. Inbox checks, waits,
+  and channel notices show this once per process per version; `inbox --json`
+  carries `upgrade_available`. A listener command receives the version in
+  TINCAN_UPGRADE_AVAILABLE on its first nudge for that release, even when
+  TINCAN_WAITING is zero. An upgrade alone does not end `tincan wait`; the
+  notice is printed when a request or reply ends the wait.
 
 ## Install tincan (every part)
 
