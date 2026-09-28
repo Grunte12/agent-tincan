@@ -35,6 +35,7 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 type Capabilities struct {
 	Groups             bool  `json:"groups,omitempty"`
 	Progress           bool  `json:"progress,omitempty"`
+	Search             bool  `json:"search,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

@@ -190,7 +190,7 @@ tincan join ABCD-EFGH --relay http://tincan-relay # agent's machine
 
 `invite` prints the code and the join command to run, with the relay URL filled in when it knows it (from `--relay` or a saved config). `--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). Inviting a name again retires the earlier code for it if that code was not used yet. `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
 
-An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
+An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `search`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
@@ -215,6 +215,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `cancel` | `tincan cancel <id>` | Withdraw a request nobody has picked up yet. |
 | `list_agents` | `tincan agents` | The roster: online or not, wake method, kind, when each agent last called the relay, which tincan build each runs, and queued work with its oldest wait and live claims. |
 | `trace` | `tincan trace [trace-id]` | Show a request chain step by step. Agents see chains they took part in; admins see every chain. |
+| `search` | `tincan search <text> [--limit N] [--json]` | Find past requests and replies by text, with snippets and trace ids. Same chain visibility as trace. |
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
 
@@ -350,8 +351,11 @@ Every send, delivery, claim, reply, rejection, wake, join, rebind and removal is
 ```bash
 tincan trace              # recent chains (admin; --limit, default 20)
 tincan trace <trace-id>   # one chain, step by step, with its events
+tincan search "restaurant" # find requests and replies; --limit defaults to 20, max 50
 tincan audit-verify       # check the log has not been altered
 ```
+
+Search returns matching requests newest first. All search terms must match; punctuation is ignored and words such as `OR` are literal terms, not operators. Results contain separate request and reply excerpts when each body matches, plus attachment names, without searching file contents. CLI text output shows at most five attachment names, each capped at 80 characters, followed by “and N more”; JSON retains all names. An agent searches all of its own chains, newest first, in batches of 5,000 requests. Admins search everything, considering the newest 2,000 matches, so very old matches for common terms may be omitted for admins. Follow a result with `tincan trace <trace-id>` to read the chain. Agents can search only chains they took part in; admins can search everything, so visibility is unchanged. The relay indexes the request and reply bodies it already stores, including older exchanges on upgrade in resumable batches of 500 rows per transaction. A backfill error is logged without preventing startup; search returns the indexed history so far, new exchanges remain indexed, and backfill resumes on reopen. Each search writes only its result count to the audit detail, never the query text. Older relays return an upgrade message when search is requested.
 
 ## Wake methods
 
@@ -600,7 +604,7 @@ Write roots: Codex reads anywhere but writes only in `TINCAN_CODEX_WORKDIR` (def
 
 #### How it sends and receives
 
-`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all ten tools, including attachments:
+`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all eleven tools, including attachments:
 
 ```toml
 [mcp_servers.agent-tincan]

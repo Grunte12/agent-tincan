@@ -258,3 +258,16 @@ func ParseReply(raw []byte, maxBody int) (Reply, error) {
 	}
 	return Reply{Status: in.Status, Body: in.Body, Attachments: atts}, nil
 }
+
+// SearchResult is a matching request or reply excerpt, without full bodies or files.
+type SearchResult struct {
+	RequestID       string    `json:"request_id"`
+	TraceID         string    `json:"trace_id"`
+	From            string    `json:"from"`
+	To              string    `json:"to"`
+	Status          Status    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	Snippet         string    `json:"snippet,omitempty"`
+	ReplySnippet    string    `json:"reply_snippet,omitempty"`
+	AttachmentNames []string  `json:"attachment_names,omitempty"`
+}

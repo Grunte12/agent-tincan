@@ -29,6 +29,7 @@ const Instructions = `You are one agent in the owner's Agent Tincan team. Other 
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from the owner, then call reply.
 - For work that takes more than a few minutes, post a progress note with progress when you start and at milestones.
+- search finds past requests and replies in chains you took part in; use trace with a returned trace_id to read the whole chain.
 - list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, and which tincan build each runs.
 ` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
@@ -47,6 +48,7 @@ var attachmentID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Backend is what the tools need from the relay client.
 type Backend interface {
+	Search(ctx context.Context, query string, limit int) ([]envelope.SearchResult, error)
 	Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent bool) (client.Result, error)
 	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent bool) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
@@ -87,7 +89,7 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
 
 type askIn struct {
 	Also        []string `json:"also,omitempty" jsonschema:"additional teammates to ask the same question (at most 8 total)"`
@@ -122,6 +124,11 @@ type replyIn struct {
 
 type attachmentIn struct {
 	ID string `json:"id" jsonschema:"the attachment id, as listed with the request or reply"`
+}
+
+type searchIn struct {
+	Query string `json:"query" jsonschema:"literal text to find in past requests and replies"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum matches, 1-50 (default 20)"`
 }
 
 type traceIn struct {
@@ -430,6 +437,19 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				}
 			}
 			return text(out.String())
+		})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "search", Description: "Find text in past requests and replies in chains you took part in. Returns newest matches first, with snippets and trace ids; admins see all chains."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in searchIn) (*mcp.CallToolResult, any, error) {
+			hits, err := b.Search(ctx, in.Query, in.Limit)
+			if err != nil {
+				return fail(err)
+			}
+			raw, err := json.Marshal(hits)
+			if err != nil {
+				return fail(err)
+			}
+			return text(string(raw))
 		})
 	return s
 }

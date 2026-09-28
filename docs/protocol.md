@@ -64,11 +64,23 @@ One poll returns at most 50 unseen replies, oldest first, and stops adding repli
 
 When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts. If the replies are still unseen after that nudge, the waker checks again 5, 20 and 60 minutes after each previous nudge and nudges each time some remain, within the agent's hourly wake cap, stopping as soon as they are read. The grace and follow-up timers live in memory, so a relay that restarts schedules a fresh reply nudge for every webhook or email agent that still holds unseen replies.
 
+## Search
+
+`GET /v1/search?q=<text>&limit=<n>` searches stored request and reply bodies. The relay resolves the caller from Tailscale just as for trace: agents see matches in chains where they sent or received a request at any step; admins see all chains. Search does not mark replies seen or change request state.
+
+`q` must be nonblank and at most 4096 bytes. Words are quoted as literal FTS terms, all of which must match (case-insensitively); punctuation is ignored, and operators such as `OR` have no special meaning. Punctuation-only queries return no matches. `limit` defaults to 20 and must be 1–50; invalid input returns 400.
+
+The response is `{"results": [{"request_id", "trace_id", "from", "to", "status", "created_at", "snippet", "reply_snippet", "attachment_names"}]}`, newest request first (in the order the relay stored them). `snippet` and `reply_snippet` are optional short excerpts of the request and reply bodies, respectively, with matches in square brackets; each is present only when its column matched. An agent’s search starts from its own chains: it walks the requests in chains the agent took part in, newest first, 5,000 at a time, one short query per batch, until the limit is filled or its history is exhausted. Requests it cannot see are never examined, and older visible matches are still found. An admin search covers the whole index and considers at most the newest 2,000 matches (by request rowid, which follows insertion order), so very old matches for common terms may be omitted there. `attachment_names` is optional and contains names from both the request and reply; neither names nor file contents are searched. No matches returns `{"results": []}`.
+
+The relay advertises `"search": true` in `/v1/capabilities`. Older relays without the route return 404; the client reports that the relay needs upgrading. The migration creates the index and triggers. On open, existing bodies are indexed in batches of at most 500 requests per transaction, recording a high-water rowid atomically with each batch. Backfill errors are logged and do not fail startup; search returns what is indexed so far, and backfill resumes on reopen. New requests and replies are indexed in the same transaction that stores them. Successful searches write a `search` audit event with only `{"count": <returned result count>}` in its detail, never the query or snippets.
+
+The MCP `search` tool accepts `query` and an optional `limit` and returns the same results array as `tincan search <text> --json`.
+
 ## Attachments
 
 Requests and replies can carry images and small files. The file goes to the relay first, and the message names it by id.
 
-`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
+`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8, "search": true}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
 
 `POST /v1/attachments?name=<display name>` uploads one file as the calling agent. The body is the raw file and `Content-Type` its media type; when that is missing, unparseable, or `application/octet-stream`, the relay detects the type from the first bytes. The name is display metadata only, reduced to its last path element; the relay stores the file by id. The response is `201` with `{"id", "name", "mime", "size", "sha256"}`. This is the one route not held to the relay's 1 MB body limit; it has its own 10 MB limit and a 5 minute read deadline.
 
