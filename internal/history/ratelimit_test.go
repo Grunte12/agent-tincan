@@ -518,55 +518,63 @@ func TestWebChatGPTImageTurnCompletes(t *testing.T) {
 
 // While connected, the native host re-checks the extension files on disk
 // every RecheckInterval, and asks for a reload once they drift from what
-// the extension loaded (once per cooldown).
+// the extension loaded (once per cooldown). The test drives each recheck
+// itself and records what the host sends synchronously, so no outcome
+// depends on a ticker racing the file write.
 func TestNativeHostRechecksExtensionFiles(t *testing.T) {
 	extDir := t.TempDir()
 	loaded := writeExtensionDir(t, extDir, "0.2.0", map[string]string{"ops.js": "same"})
 	sock := filepath.Join(shortDir(t), "n", "host.sock")
 	chromeToHostR, chromeToHostW := io.Pipe()
-	hostToChromeR, hostToChromeW := io.Pipe()
-	var logBuf lockedBuffer
-	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, Log: &logBuf, RecheckInterval: 30 * time.Millisecond}
+	var sent, logBuf lockedBuffer
+	// The interval ticker never fires during the test; recheckNow stands
+	// in for each tick.
+	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: &sent, ExtensionDir: extDir, Log: &logBuf, RecheckInterval: time.Hour}
 	go func() { _ = host.Run(context.Background()) }()
 	defer chromeToHostW.Close()
-	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
-	fromHost := make(chan NativeRequest, 8)
-	go func() {
-		for {
-			b, err := ReadMessage(hostToChromeR, MaxHostMessage)
-			if err != nil {
-				return
-			}
-			var r NativeRequest
-			_ = json.Unmarshal(b, &r)
-			fromHost <- r
-		}
-	}()
 	if err := WriteMessage(chromeToHostW, map[string]any{"id": 0, "hello": loaded}, MaxChromeMessage); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case r := <-fromHost:
-		t.Fatalf("matching files: host sent %+v", r)
-	case <-time.After(150 * time.Millisecond):
+	// The host reads frames one at a time and handles a hello before the
+	// next read, so once this frame is taken the hello has been handled.
+	if err := WriteMessage(chromeToHostW, map[string]any{"id": 999}, MaxChromeMessage); err != nil {
+		t.Fatal(err)
+	}
+	reloads := func() int {
+		t.Helper()
+		r := bytes.NewReader([]byte(sent.String()))
+		n := 0
+		for r.Len() > 0 {
+			b, err := ReadMessage(r, MaxHostMessage)
+			if err != nil {
+				t.Fatalf("host output: %v", err)
+			}
+			var req NativeRequest
+			if err := json.Unmarshal(b, &req); err != nil || req.Op != OpExtensionReload {
+				t.Fatalf("host sent %s", b)
+			}
+			n++
+		}
+		return n
+	}
+	host.recheckNow()
+	if n := reloads(); n != 0 {
+		t.Fatalf("matching files: host sent %d reloads", n)
 	}
 	// An update lands on disk while the extension stays connected.
 	if err := os.WriteFile(filepath.Join(extDir, "ops.js"), []byte("updated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case r := <-fromHost:
-		if r.Op != OpExtensionReload {
-			t.Fatalf("host sent %+v", r)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("no reload after the files changed (log: %s)", logBuf.String())
+	host.recheckNow()
+	if n := reloads(); n != 1 {
+		t.Fatalf("after the files changed: %d reloads, want 1 (log: %s)", n, logBuf.String())
 	}
 	// Later checks toward the same files respect the cooldown.
-	select {
-	case r := <-fromHost:
-		t.Fatalf("asked again inside the cooldown: %+v", r)
-	case <-time.After(200 * time.Millisecond):
+	for range 3 {
+		host.recheckNow()
+	}
+	if n := reloads(); n != 1 {
+		t.Fatalf("asked again inside the cooldown: %d reloads", n)
 	}
 }
 
