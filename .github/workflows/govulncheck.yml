@@ -10,8 +10,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to a PR cancels that PR's older scan. A manual run gets a
+# group of its own, so it is never replaced.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
