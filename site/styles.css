@@ -535,6 +535,7 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
 }
 .step h3 { font-size: 1.25rem; }
 .step p { margin: 0; color: var(--ink-soft); font-size: 1rem; }
+.how-new { margin-top: 72px; }
 
 /* Platforms */
 .platform-grid {
