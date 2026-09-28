@@ -1179,6 +1179,37 @@ test('copilot reads keep a gap between tabs and run one at a time with sends', a
   await assert.rejects(s.readList('grok', 3), (e) => e.code === 'bad_request');
 });
 
+test('copilot readList: a human check that shows while the sidebar is read is blocked, and the tab is closed', async () => {
+  const dialog = '<div role="dialog">Verification required<p>Verify you are human</p></div>';
+  const fc = fakeChrome((url) => new HtmlSite(url, SIDEBAR, { more: [chatLinks(10, 2), dialog] }));
+  await assert.rejects(sender(fc).readList('copilot', 50), (e) => e.code === 'blocked');
+  assert.deepEqual(fc.log.removed, [100]);
+  assertOnlyFixedScripts(fc.log);
+});
+
+test('copilot readList: a read that waited out its time behind a send gives up without opening a tab', async () => {
+  let n = 0;
+  const fc = fakeChrome((url) => (n++ === 0 ? new FakeSite('copilot', url, { loadTicks: 30, neverFinish: true }) : new HtmlSite(url, SIDEBAR)));
+  const s = sender(fc, { readMs: 20000 });
+  const a = s.send('copilot', { message: 'hi' });
+  const b = s.readList('copilot', 3);
+  const r = await a;
+  assert.ok(r.conversation_id);
+  await assert.rejects(b, (e) => e.code === 'timeout');
+  assert.equal(fc.log.created.length, 1, 'the late read opened no tab');
+});
+
+test('a send that waited out its time behind a tab read gives up before opening a tab, so it cannot go out after the host gave up', async () => {
+  let n = 0;
+  const fc = fakeChrome((url) => (n++ === 0 ? new HtmlSite(url, SIDEBAR, { loadTicks: 30 }) : new FakeSite('copilot', url, { neverFinish: true })));
+  const s = sender(fc, { timeoutMs: 20000 });
+  const a = s.readList('copilot', 3);
+  const b = s.send('copilot', { message: 'hi' });
+  assert.equal((await a).conversations.length, 3);
+  await assert.rejects(b, (e) => e.code === 'timeout' && !e.clicked);
+  assert.equal(fc.log.created.length, 1, 'the late send opened no tab');
+});
+
 test('runner: copilot.list reads the sidebar through the sender', async () => {
   const fc = fakeChrome((url) => new HtmlSite(url, SIDEBAR));
   const r = createRunner({ fetch: async () => { throw new Error('no fetch'); }, sender: sender(fc) });

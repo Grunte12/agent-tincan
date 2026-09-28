@@ -733,8 +733,10 @@ func (c *Client) timeout(op Op) time.Duration {
 
 // TabReadClientTimeout bounds a list read the extension makes in a tab of
 // its own (Copilot's sidebar): longer than the extension's 75 second
-// bound on such a read and its 3 second gap between reads, shorter than
-// the native host's 2 minute bound on a request.
+// bound on such a read, which counts from when the extension queued it,
+// so time spent behind a send to the same site or in the 3 second gap
+// between reads is inside it; shorter than the native host's 2 minute
+// bound on a request.
 const TabReadClientTimeout = 100 * time.Second
 
 // readsInTab reports whether op is a list read the extension makes by

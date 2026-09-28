@@ -51,8 +51,9 @@ export const ID_WAIT_MS = 60 * 1000;
 // KEEP_TAB_MS is how long a finished send's tab may stay open waiting for
 // its close operation.
 export const KEEP_TAB_MS = 10 * 60 * 1000;
-// READ_TIMEOUT_MS bounds one Copilot tab read (load, scrolling included),
-// under the Go client's wait for it; READ_GAP_MS is the least time between
+// READ_TIMEOUT_MS bounds one Copilot tab read from when it is queued
+// (waiting, load and scrolling included), under the Go client's 100 second
+// wait for it (TabReadClientTimeout); READ_GAP_MS is the least time between
 // the end of one of a site's tab reads and the start of the next.
 export const READ_TIMEOUT_MS = 75 * 1000;
 export const READ_GAP_MS = 3000;
@@ -624,13 +625,18 @@ export function createSender({
     }
   }
 
-  async function run(site, args) {
+  // run drives one send. timeoutMs counts from accepted, when the send
+  // was queued, so a send that waited behind others to the same site
+  // still ends inside the host's bound; one with no time left opens no
+  // tab, so it cannot go out after the host has reported it failed.
+  async function run(site, args, accepted) {
     const cfg = SITES[site];
     const sel = SELECTORS[site];
     if (!cfg || !sel) throw new OpError('bad_request', 'unknown site');
     const start = now();
-    const deadline = start + timeoutMs;
+    const deadline = (accepted ?? start) + timeoutMs;
     const late = () => now() >= deadline;
+    if (late()) throw new OpError('timeout', 'the send waited too long behind other requests to the site');
     const existing = args.conversation_id && !args.new_chat ? args.conversation_id : '';
     const target = existing ? cfg.convURL(existing) : cfg.newURL;
 
@@ -758,15 +764,21 @@ export function createSender({
   // for the page to load signed in, then calls step(tabId, late) once a
   // poll until it returns {result}, and closes the tab. Each read starts
   // at least readGapMs after the site's last one ended, so reads keep a
-  // human pace.
-  async function readTab(site, url, step) {
+  // human pace. readMs counts from accepted, when the read was queued, so
+  // time spent behind a send counts against it and the answer still
+  // comes before the Go client's wait ends; a read with no time left
+  // opens no tab. The page is checked for the site's human check every
+  // poll: one that shows while the list is read is blocked, not a short
+  // list.
+  async function readTab(site, url, step, accepted) {
     const cfg = SITES[site];
     const sel = SELECTORS[site];
+    const deadline = accepted + readMs;
+    const late = () => now() >= deadline;
     const wait = (lastRead[site] ?? -Infinity) + readGapMs - now();
     if (wait > 0) await sleep(wait);
+    if (late()) throw new OpError('timeout', 'the read waited too long behind other requests to the site');
     const start = now();
-    const deadline = start + readMs;
-    const late = () => now() >= deadline;
     const tab = await tabs.create({ url, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('timeout', 'could not open a tab');
     owned.add(tab.id);
@@ -779,6 +791,9 @@ export function createSender({
       });
       for (;;) {
         await onSite(tab.id, cfg);
+        const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
+        if (p.blocked) throw new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
+        if (p.loggedOut) throw new OpError('not_logged_in', `logged out of ${new URL(cfg.newURL).host}`);
         const r = await step(tab.id, late);
         if (r) return r.result;
         await sleep(pollMs);
@@ -798,6 +813,7 @@ export function createSender({
   async function readList(site, count) {
     const sel = SELECTORS[site];
     const cfg = SITES[site];
+    const accepted = now();
     return enqueue(site, () => {
       const seen = new Map();
       let still = 0;
@@ -819,14 +835,15 @@ export function createSender({
         if (rounds >= listRounds || late()) return { result: { conversations: list, more: true } };
         return null;
       };
-      return readTab(site, cfg.newURL, step);
+      return readTab(site, cfg.newURL, step, accepted);
     });
   }
 
   return {
     // send runs after any earlier send to the same site has finished.
     send(site, args) {
-      return enqueue(site, () => run(site, args));
+      const accepted = now();
+      return enqueue(site, () => run(site, args, accepted));
     },
     // readList reads Copilot's chat list from its rendered sidebar (see
     // above).
