@@ -54,7 +54,9 @@ type helperResponse struct {
 	Command string        `json:"command"`
 	Notes   []NoteSummary `json:"notes"`
 	Note    *Note         `json:"note"`
-	Existed bool          `json:"existed"`
+	// Existed is absent (nil) from a helper that predates idempotency
+	// keys, which is how such a helper is told apart.
+	Existed *bool `json:"existed"`
 	Error   *struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
@@ -170,7 +172,17 @@ func (h *Helper) run(ctx context.Context, args ...string) (helperResponse, error
 type CreateResult struct {
 	Note    Note
 	Existed bool // the idempotency key matched an existing note
+	// NoIdempotency is set when a key was sent but the response has no
+	// "existed" field: the helper predates idempotency keys and ignored it.
+	NoIdempotency bool
 }
+
+// codeHelperTooOld is the health code for a helper that ignores
+// idempotency keys.
+const codeHelperTooOld = "helper_too_old"
+
+// helperTooOldMessage tells the owner what to do about codeHelperTooOld.
+const helperTooOldMessage = "This Agent Notes helper does not support idempotency keys, so a redelivered add could create a duplicate note. Please update Agent Notes to the latest version."
 
 // Create adds a note in the background with an idempotency key and
 // provenance properties. A note in any state already carrying key is
@@ -192,7 +204,13 @@ func (h *Helper) Create(ctx context.Context, title, body string, tags []string, 
 	if resp.Note == nil || resp.Note.Summary.ID == "" {
 		return CreateResult{}, &HelperError{Code: "helper_bad_output", Message: "create returned no note id"}
 	}
-	return CreateResult{Note: *resp.Note, Existed: resp.Existed}, nil
+	res := CreateResult{Note: *resp.Note}
+	if resp.Existed != nil {
+		res.Existed = *resp.Existed
+	} else if key != "" {
+		res.NoIdempotency = true
+	}
+	return res, nil
 }
 
 // Search returns the notes matching query, in every state.

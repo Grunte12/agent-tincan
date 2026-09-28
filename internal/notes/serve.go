@@ -37,6 +37,10 @@ const (
 // fromAgentTag is the tag every note added through Tincan carries (R9).
 const fromAgentTag = "from-agent"
 
+// maxExtractAttempts is how many failed extractions a request gets before
+// it is answered failed (KTD6).
+const maxExtractAttempts = 3
+
 // maxReplyBytes caps every reply body.
 const maxReplyBytes = 64 << 10
 
@@ -106,6 +110,10 @@ type Service struct {
 
 	mu       sync.Mutex
 	inflight map[string]bool // request ids being applied, loop or timer
+	// extractFails counts failed extractions per request id, so the third
+	// one is answered (KTD6). It is in memory: a restart gives a request
+	// fresh attempts, which only delays its answer.
+	extractFails map[string]int
 	// createMu runs one helper create at a time: the helper looks an
 	// idempotency key up in the library as loaded at its start, so two
 	// concurrent creates for one key could both write a note.
@@ -135,7 +143,7 @@ func New(cfg Config) (*Service, error) {
 		agent:      orDefault(cfg.Agent, DefaultAgentName),
 		helper:     &Helper{Path: orDefault(cfg.HelperPath, DefaultHelperPath), LibraryRoot: cfg.LibraryRoot, AppSupportRoot: cfg.AppSupportRoot},
 		spool:      &Spool{Dir: cfg.SpoolDir},
-		healthPath: orDefault(cfg.HealthPath, filepath.Join(cfg.AppSupportRoot, "tincan-notes-health.json")),
+		healthPath: orDefault(cfg.HealthPath, HealthPathIn(cfg.AppSupportRoot)),
 		readAllow:  allowlistAt(cfg.ReadAllowlistPath),
 		addAllow:   allowlistAt(cfg.AddAllowlistPath),
 		extractor:  cfg.Extractor,
@@ -145,6 +153,8 @@ func New(cfg Config) (*Service, error) {
 		presence:   cfg.PresenceInterval,
 		log:        cfg.Log,
 		inflight:   map[string]bool{},
+
+		extractFails: map[string]int{},
 	}
 	if s.retryEvery <= 0 {
 		s.retryEvery = DefaultRetryEvery
@@ -360,14 +370,25 @@ func (s *Service) parse(ctx context.Context, req envelope.Request) (Request, boo
 	r, err := s.extractor.Extract(ctx, req.Body)
 	switch {
 	case errors.Is(err, ErrUnclearRequest):
+		s.forgetExtractFails(req.ID)
 		s.logf("request %s from %s: unclear request: %v", req.ID, req.From, err)
 		s.reply(ctx, req, "I could not tell whether to save, search, or read a note, so nothing was done. "+StructuredHelp, envelope.StatusFailed)
 		return Request{}, false
 	case err != nil:
-		s.logf("request %s from %s: extractor failed: %v", req.ID, req.From, err)
-		s.reply(ctx, req, "The notes agent could not process the request right now (its request step failed), so nothing was done. "+StructuredHelp, envelope.StatusFailed)
+		// The service never guesses the operation (KTD6): the request is
+		// left claimed and unanswered, and the relay redelivers it once the
+		// claim lease runs out. The third failure is answered.
+		n := s.countExtractFail(req.ID)
+		if n < maxExtractAttempts {
+			s.logf("request %s from %s: extractor failed (attempt %d of %d), leaving it for redelivery: %v", req.ID, req.From, n, maxExtractAttempts, err)
+			return Request{}, false
+		}
+		s.forgetExtractFails(req.ID)
+		s.logf("request %s from %s: extractor failed (attempt %d of %d), answering failed: %v", req.ID, req.From, n, maxExtractAttempts, err)
+		s.reply(ctx, req, "The notes agent could not work out this free-text request (its request step failed several times), so nothing was done. "+StructuredHelp, envelope.StatusFailed)
 		return Request{}, false
 	}
+	s.forgetExtractFails(req.ID)
 	// The extractor never writes an add's body: the sender's text is saved
 	// verbatim (R4).
 	if r.Op == OpAdd {
@@ -383,6 +404,21 @@ func (s *Service) parse(ctx context.Context, req envelope.Request) (Request, boo
 		return Request{}, false
 	}
 	return r, true
+}
+
+// countExtractFail records a failed extraction of id and returns how many
+// there have been.
+func (s *Service) countExtractFail(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extractFails[id]++
+	return s.extractFails[id]
+}
+
+func (s *Service) forgetExtractFails(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.extractFails, id)
 }
 
 // add spools r and applies it. Validation failures are answered before
@@ -425,7 +461,14 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	s.createMu.Lock()
 	res, err := s.helper.Create(ctx, e.Note.Title, e.Note.Body, tags, props, "tincan:"+req.ID)
 	s.createMu.Unlock()
-	s.recordHealth("create", req.ID, err)
+	if err == nil && res.NoIdempotency {
+		// The note was written, so the asker gets its id, but this helper
+		// cannot dedupe a redelivered add: tell the owner loudly.
+		s.logf("request %s: WARNING %s: the Agent Notes helper ignored the idempotency key; a redelivered add could be saved twice. %s", req.ID, codeHelperTooOld, helperTooOldMessage)
+		s.recordHealth("create", req.ID, &HelperError{Code: codeHelperTooOld, Message: helperTooOldMessage})
+	} else {
+		s.recordHealth("create", req.ID, err)
+	}
 	if err != nil {
 		if IsPermanent(err) {
 			s.logf("request %s from %s: add rejected by the helper: %v", req.ID, req.From, err)

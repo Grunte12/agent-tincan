@@ -49,7 +49,8 @@ type fakeCall struct {
 // stdout, exit 0 on ok and 1 on failure. Controls, in the state dir:
 // fail-create holds an error code every create returns; the library root
 // missing gives unauthorized_library; a session-context.json in the
-// Application Support root gives turn_context_invalid.
+// Application Support root gives turn_context_invalid; old-helper makes
+// create behave like a build without idempotency keys.
 func fakeHelperMain(state string, args []string) int {
 	env := map[string]string{}
 	for _, kv := range os.Environ() {
@@ -141,7 +142,15 @@ func fakeHelperMain(state string, args []string) int {
 				return fail("invalid_metadata", "bad properties")
 			}
 		}
-		if key := opts["idempotency-key"]; key != "" {
+		// An Agent Notes build older than the idempotency feature ignores
+		// the key and its create response has no "existed" field.
+		_, statErr := os.Stat(filepath.Join(state, "old-helper"))
+		oldHelper := statErr == nil
+		key := opts["idempotency-key"]
+		if oldHelper {
+			key = ""
+		}
+		if key != "" {
 			props["remote.request-id"] = key
 			for _, n := range notes {
 				if n.Props["remote.request-id"] == key {
@@ -155,7 +164,11 @@ func fakeHelperMain(state string, args []string) int {
 		}
 		n := fakeNote{ID: fakeUUID(), Title: title, Body: opts["body"], Tags: tags, State: "active", Props: props}
 		saveFakeNote(lib, n)
-		return succeed(map[string]any{"note": map[string]any{"summary": summary(n), "body": n.Body}})
+		resp := map[string]any{"note": map[string]any{"summary": summary(n), "body": n.Body}}
+		if !oldHelper {
+			resp["existed"] = false
+		}
+		return succeed(resp)
 	case "search":
 		q := strings.ToLower(opts["query"])
 		if q == "" {

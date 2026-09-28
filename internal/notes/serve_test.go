@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -805,5 +806,149 @@ func TestCreatesNeverOverlap(t *testing.T) {
 	}
 	if n := len(r.helper.notes()); n != 3 {
 		t.Fatalf("notes = %d, want 3", n)
+	}
+}
+
+// redeliver lets the claim lease run out and requeues the request, as the
+// relay does for a claimed request left unanswered.
+func (r *rig) redeliver(t *testing.T) {
+	t.Helper()
+	time.Sleep(200 * time.Millisecond)
+	r.mesh.Server.Sweep(t.Context())
+}
+
+// KTD6: an extraction that fails (not unclear) leaves the request
+// unanswered for redelivery; the third failure replies failed with the
+// structured form. The helper is never called and nothing is spooled.
+func TestExtractorFailureRedeliveredThenFailsOnThird(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	r.ext.err = errors.New("codex timed out")
+	req := r.send(t, "grokbot", "save this: buy the blue tent")
+	for attempt := 1; attempt <= 2; attempt++ {
+		if attempt > 1 {
+			r.redeliver(t)
+		}
+		r.poll(t, 1)
+		if res := r.get(t, "grokbot", req.ID); res.Reply != nil {
+			t.Fatalf("attempt %d: answered after an extractor failure: %+v", attempt, res.Reply)
+		}
+		if len(r.helper.calls(t)) != 0 {
+			t.Fatalf("attempt %d: helper ran after an extractor failure", attempt)
+		}
+		r.assertSpoolEmpty(t)
+	}
+	r.redeliver(t)
+	r.poll(t, 1)
+	res := r.get(t, "grokbot", req.ID)
+	if res.Reply == nil || res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `note: {"op":"add"`) {
+		t.Fatalf("third failure: status %s reply %+v", res.Status, res.Reply)
+	}
+	if r.ext.calls() != 3 {
+		t.Fatalf("extractor ran %d times, want 3", r.ext.calls())
+	}
+	if len(r.helper.calls(t)) != 0 || len(r.helper.notes()) != 0 {
+		t.Fatal("helper ran or a note was saved after extraction failed")
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Unclear is the model's answer, not a failure: replied failed at once.
+func TestUnclearFreeTextFailsImmediately(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.ext.err = fmt.Errorf("%w: op unclear", ErrUnclearRequest)
+	res := r.ask(t, "grokbot", "how is the weather")
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, `note: {"op":"add"`) {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if r.ext.calls() != 1 || len(r.helper.calls(t)) != 0 {
+		t.Fatal("unclear request retried or reached the helper")
+	}
+	r.assertSpoolEmpty(t)
+}
+
+func TestStructuredRequestNeverInvokesExtractor(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.ext.err = errors.New("must not run")
+	if res := r.ask(t, "grokbot", addBody("Tent", "blue")); res.Status != envelope.StatusAnswered {
+		t.Fatalf("add: status %s body %q", res.Status, res.Reply.Body)
+	}
+	if res := r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`); res.Status != envelope.StatusAnswered {
+		t.Fatalf("search: status %s body %q", res.Status, res.Reply.Body)
+	}
+	if r.ext.calls() != 0 {
+		t.Fatalf("extractor ran %d times for structured requests", r.ext.calls())
+	}
+}
+
+// R11: an agent on the read allowlist only whose free text extracts as an
+// add is declined, and nothing is spooled or written.
+func TestReadOnlyAgentFreeTextAddDeclined(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, r.cfg.ReadAllowlistPath, "muse\n")
+	writeFile(t, r.cfg.AddAllowlistPath, "grokbot\n")
+	r.ext.r = Request{Op: OpAdd, Title: "Tent"}
+	res := r.ask(t, "muse", "save this: buy the blue tent")
+	if res.Status != envelope.StatusDeclined {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	r.assertSpoolEmpty(t)
+	if len(r.helper.calls(t)) != 0 || len(r.helper.notes()) != 0 {
+		t.Fatal("a declined free-text add reached the helper")
+	}
+}
+
+// Covers AE4 end to end through the Codex extractor: the saved body is
+// the sender's text byte for byte, whatever the model chose.
+func TestCodexFreeTextAddBodyIsVerbatim(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	_, x := fakeCodex(t, `{"op":"add","title":"Tent choice","tags":["camping"],"query":"","count":0,"id":""}`)
+	r.cfg.Extractor = x
+	r.restart(t)
+	text := "save this: buy the blue tent, not the green one  \n\tcafé ✓\n"
+	res := r.ask(t, "grokbot", text)
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	notes := r.helper.notes()
+	if len(notes) != 1 || notes[0].Body != text || notes[0].Title != "Tent choice" {
+		t.Fatalf("notes = %+v, want body exactly %q", notes, text)
+	}
+}
+
+// An Agent Notes build older than the idempotency feature ignores the key
+// and sends no "existed" field: the note was written, so the add is
+// answered, but health says the helper is too old.
+func TestOldHelperWithoutExistedAnsweredAndFlagged(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, filepath.Join(r.helper.state, "old-helper"), "")
+	res := r.ask(t, "grokbot", addBody("Tent", "blue"))
+	notes := r.helper.notes()
+	if res.Status != envelope.StatusAnswered || len(notes) != 1 || !strings.Contains(res.Reply.Body, notes[0].ID) {
+		t.Fatalf("status %s reply %+v notes %+v", res.Status, res.Reply, notes)
+	}
+	r.assertSpoolEmpty(t)
+	var h Health
+	b, err := os.ReadFile(r.cfg.HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &h); err != nil || h.OK || h.Code != "helper_too_old" || !strings.Contains(h.Message, "update Agent Notes") {
+		t.Fatalf("health = %s (%v)", b, err)
+	}
+	if !strings.Contains(r.log.String(), "helper_too_old") {
+		t.Fatalf("log does not flag the old helper:\n%s", r.log.String())
+	}
+}
+
+// A current helper reports "existed": false on a fresh create: healthy.
+func TestCurrentHelperFreshCreateIsHealthy(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	if res := r.ask(t, "grokbot", addBody("Tent", "blue")); res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	var h Health
+	b, _ := os.ReadFile(r.cfg.HealthPath)
+	if err := json.Unmarshal(b, &h); err != nil || !h.OK || h.Code != "" {
+		t.Fatalf("health = %s (%v)", b, err)
 	}
 }
