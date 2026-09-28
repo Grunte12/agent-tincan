@@ -212,3 +212,47 @@ func TestCodexWakeWriteRootsRefusesEscapes(t *testing.T) {
 		}
 	}
 }
+
+// An upgrade notice alone (TINCAN_WAITING=0) is logged for the operator and
+// starts no codex run; with items waiting, codex runs and it is logged too.
+func TestCodexWakeUpgradeNoticeAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("codex-wake.sh is a POSIX sh script")
+	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "examples", "codex", "codex-wake.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(bin, []byte(fakeCodex), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvOut := filepath.Join(tmp, "argv")
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + tmp,
+		"CODEX_BIN=" + bin,
+		"ARGV_OUT=" + argvOut,
+		"TINCAN_CODEX_LOCK_DIR=" + filepath.Join(tmp, "lock"),
+		"TINCAN_CODEX_WORKDIR=" + filepath.Join(tmp, "work"),
+		"TINCAN_WAITING=0",
+		"TINCAN_UPGRADE_AVAILABLE=9.9.9",
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("codex-wake.sh: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if _, err := os.Stat(argvOut); !os.IsNotExist(err) {
+		t.Fatalf("codex ran for an upgrade notice alone (%v)\nstderr:\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tincan 9.9.9 is available from the relay") {
+		t.Fatalf("upgrade notice not logged:\n%s", stderr.String())
+	}
+	r := runCodexWake(t, tmp, "TINCAN_UPGRADE_AVAILABLE=9.9.9")
+	if !strings.Contains(r.stderr, "tincan 9.9.9 is available from the relay") || !strings.Contains(r.prompt(), "check_inbox") {
+		t.Fatalf("with work waiting: %q\nstderr:\n%s", r.argv, r.stderr)
+	}
+}

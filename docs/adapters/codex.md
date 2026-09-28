@@ -62,7 +62,7 @@ While the command runs, and during the 30-second wait after it, the listener kee
 
 `tincan listen` also fires when a reply to one of codex's own requests is waiting and unread, and counts it in `TINCAN_WAITING`. So an `ask` Codex sends may return before the teammate answers, and the run does not have to wait for it: when the reply arrives, the listener starts a new run, and check_inbox shows replies to codex's requests (with what it asked) before any new requests. The wake prompt tells Codex to finish the work that was waiting on each reply.
 
-`tincan listen` waits 30 seconds between nudges but does not wait for a previous command to finish first, and a busy relay can still see requests queued while a run is underway. codex-wake.sh guards against two overlapping `codex exec` runs with a lock directory (`mkdir`, an atomic, portable lock): if a run is already in progress it exits quietly and leaves the requests queued for the next nudge.
+`tincan listen` waits 30 seconds between nudges but does not wait for a previous command to finish first, and a busy relay can still see requests queued while a run is underway. codex-wake.sh guards against two overlapping `codex exec` runs with a lock directory (`mkdir`, an atomic, portable lock): if a run is already in progress it exits quietly and leaves the requests queued for the next nudge. A new relay release also nudges the script, with its version in `TINCAN_UPGRADE_AVAILABLE`: the script writes the upgrade notice to the listener's log, and when nothing is waiting (`TINCAN_WAITING` is 0) it exits without starting `codex exec`.
 
 Set codex's wake to `command` in the relay's `wake.json`:
 

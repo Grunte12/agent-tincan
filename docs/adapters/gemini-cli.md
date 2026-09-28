@@ -139,7 +139,7 @@ Keep the key in a file only you can read (`chmod 600 ~/.config/tincan/gemini-api
 
 Each nudge, the script:
 
-1. Takes the wake lock (a second nudge during a run exits and leaves requests queued; a lock left by a killed run is broken) and exits early while a backoff is in force.
+1. Logs the relay's upgrade notice when `tincan listen` passes one in `TINCAN_UPGRADE_AVAILABLE`, and exits without a run when that notice is all the nudge is for (`TINCAN_WAITING` is 0). Otherwise it takes the wake lock (a second nudge during a run exits and leaves requests queued; a lock left by a killed run is broken) and exits early while a backoff is in force.
 2. Checks the engine: `agy` or `gemini` on PATH (`AGY_BIN`, `GEMINI_BIN` to override), answering `--version` in the expected shape (`TINCAN_GEMINI_VERSION_PATTERN` to override), `GEMINI_API_KEY` for the gemini engine, and the unconfined opt-in for agy (step 6 above).
 3. Pins identity: it reads the chosen engine's MCP config (agy: `TINCAN_AGY_MCP_CONFIG`, default `~/.gemini/config/mcp_config.json`, plus `.agents/mcp_config.json` in the workdir; gemini: `TINCAN_GEMINI_SETTINGS`, default `~/.gemini/settings.json`, plus `.gemini/settings.json` in the workdir) and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is listed in `TINCAN_WAKE_ALLOWED_SERVERS`. The engine runs with tool approval off, so every server it loads is trusted. Reading these JSON files needs `jq` or `python3` on the listener's PATH.
 4. Runs the engine in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`) with a prompt that tells it to call check_inbox, finish work waiting on replies, handle and reply to every request, and repeat until the inbox is empty:

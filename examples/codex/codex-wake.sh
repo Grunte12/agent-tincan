@@ -18,6 +18,17 @@ set -eu
 : "${TINCAN_CONFIG:=$HOME/.config/tincan/codex.json}"
 export TINCAN_CONFIG
 
+# A new relay release also nudges this script, with its version in
+# TINCAN_UPGRADE_AVAILABLE. The notice goes to the listener's log; when
+# nothing is waiting (TINCAN_WAITING=0) there is no work for a codex run.
+if [ -n "${TINCAN_UPGRADE_AVAILABLE:-}" ]; then
+  echo "codex-wake: tincan $TINCAN_UPGRADE_AVAILABLE is available from the relay: run tincan upgrade on this machine, then restart this listener" >&2
+  if [ "${TINCAN_WAITING:-}" = 0 ]; then
+    echo "codex-wake: nothing is waiting, so no run" >&2
+    exit 0
+  fi
+fi
+
 CODEX_BIN="${CODEX_BIN:-codex}"
 LOCK_DIR="${TINCAN_CODEX_LOCK_DIR:-${TMPDIR:-/tmp}/tincan-codex-wake.lock}"
 CODEX_WORKDIR="${TINCAN_CODEX_WORKDIR:-$HOME/tincan-codex}"

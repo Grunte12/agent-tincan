@@ -9,7 +9,8 @@
 #
 #   . "$(dirname "$0")/tincan-wake-lib.sh"
 #   tincan_wake_init mycli                  # names, defaults, state dir
-#   tincan_wake_begin                       # lock and backoff; may exit 0
+#   tincan_wake_begin                       # upgrade notice, lock, backoff;
+#                                           # may exit 0
 #   tincan_wake_check_binary "$BIN" '^MyCLI '
 #   mycli_mcp_list() { ... }                # prints the CLI's MCP listing
 #   tincan_wake_check_identity mycli_mcp_list   # sets tincan_wake_server
@@ -92,12 +93,27 @@ tincan_wake_log() {
   echo "$_tw_name-wake: $*" >&2
 }
 
-# tincan_wake_begin takes the lock and checks the backoff marker. When a run
-# is already in progress, or the wake is backing off, it exits 0 and the
-# requests stay queued for a later nudge. When the state directory cannot
-# be made, or the lock cannot be recorded in it, it tells the operator and
-# exits 1.
+# tincan_wake_upgrade_notice logs the relay's upgrade notice when "tincan
+# listen" passed one in TINCAN_UPGRADE_AVAILABLE. When nothing is waiting
+# (TINCAN_WAITING is 0) the nudge was for the notice alone: it exits 0
+# without a CLI run, since there is nothing for one to do.
+tincan_wake_upgrade_notice() {
+  [ -n "${TINCAN_UPGRADE_AVAILABLE:-}" ] || return 0
+  tincan_wake_log "tincan $TINCAN_UPGRADE_AVAILABLE is available from the relay: run tincan upgrade on this machine, then restart this listener"
+  if [ "${TINCAN_WAITING:-}" = 0 ]; then
+    tincan_wake_log "nothing is waiting, so no run"
+    exit 0
+  fi
+}
+
+# tincan_wake_begin passes on an upgrade notice (see
+# tincan_wake_upgrade_notice), then takes the lock and checks the backoff
+# marker. When a run is already in progress, or the wake is backing off, it
+# exits 0 and the requests stay queued for a later nudge. When the state
+# directory cannot be made, or the lock cannot be recorded in it, it tells
+# the operator and exits 1.
 tincan_wake_begin() {
+  tincan_wake_upgrade_notice
   _tw_rc=0
   tincan_wake_lock || _tw_rc=$?
   if [ "$_tw_rc" -eq 2 ]; then
