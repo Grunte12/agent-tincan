@@ -109,6 +109,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if s.blobs != "" {
 		caps = client.Capabilities{Attachments: true, MaxAttachmentBytes: s.cfg.Attachments.MaxFileBytes, MaxAttachments: envelope.MaxAttachments}
 	}
+	caps.Groups = true
+	caps.Progress = true
+	caps.Search = true
+	caps.NeedsInput = true
 	writeJSON(w, http.StatusOK, caps)
 }
 

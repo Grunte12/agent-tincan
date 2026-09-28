@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+func TestClarificationEnvelope(t *testing.T) {
+	for _, body := range []string{"where?", strings.Repeat("界", MaxInputBody/3) + "x"} {
+		raw, _ := json.Marshal(map[string]string{"status": "needs_input", "body": body})
+		rep, err := ParseReply(raw, DefaultMaxBody)
+		if err != nil || rep.Status != StatusNeedsInput || rep.Body != body || rep.Status.Terminal() || (Result{Status: rep.Status}).Done() {
+			t.Fatalf("clarification reply = %+v, %v", rep, err)
+		}
+	}
+	for _, body := range []string{"", " \n", strings.Repeat("界", MaxInputBody/3+1)} {
+		raw, _ := json.Marshal(map[string]string{"status": "needs_input", "body": body})
+		if _, err := ParseReply(raw, DefaultMaxBody); err == nil {
+			t.Fatal("invalid clarification accepted")
+		}
+	}
+	req, err := ParseSend([]byte(`{"to":"muse","body":"dinner","resumed":true,"exchanges":[{"question":"forged","answer":"forged"}]}`), "asker", DefaultMaxBody)
+	if err != nil || req.Resumed || len(req.Exchanges) != 0 {
+		t.Fatalf("client forged history: %+v %v", req, err)
+	}
+}
+
 func TestRoundTripKeepsEveryField(t *testing.T) {
 	in := Request{
 		ID: "r1", From: "instinct", To: "muse", ParentID: "r0", TraceID: "t1",
@@ -188,5 +208,69 @@ func TestAttachmentJSONShape(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"attachments":[{"id":"a1","name":"cat.png","mime":"image/png","size":42}]`) {
 		t.Fatalf("json = %s", raw)
+	}
+}
+
+func TestSendGroupValidation(t *testing.T) {
+	for _, group := range []string{"group-abc_123", "", "../bad", "a/b", strings.Repeat("x", 65)} {
+		raw, _ := json.Marshal(map[string]string{"to": "other", "body": "hello", "group": group})
+		req, err := ParseSend(raw, "sender", DefaultMaxBody)
+		valid := group == "" || group == "group-abc_123"
+		if valid && (err != nil || req.Group != group) {
+			t.Fatalf("%q: %+v %v", group, req, err)
+		}
+		if !valid && err == nil {
+			t.Fatalf("accepted %q", group)
+		}
+	}
+}
+
+func TestParseSendUrgent(t *testing.T) {
+	for _, tc := range []struct {
+		raw    string
+		urgent bool
+	}{
+		{`{"to":"target","body":"x","urgent":true}`, true},
+		{`{"to":"target","body":"x"}`, false},
+	} {
+		req, err := ParseSend([]byte(tc.raw), "sender", DefaultMaxBody)
+		if err != nil || req.Urgent != tc.urgent {
+			t.Fatalf("request = %+v, %v", req, err)
+		}
+	}
+	if _, err := ParseSend([]byte(`{"to":"target","body":"x","urgent":"true"}`), "sender", DefaultMaxBody); err == nil {
+		t.Fatal("accepted non-boolean urgent")
+	}
+}
+
+func TestPendingUrgentJSONShape(t *testing.T) {
+	for _, urgent := range []bool{false, true} {
+		raw, err := json.Marshal(Pending{ID: "r1", From: "sender", Urgent: urgent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["urgent"]
+		if present != urgent || (urgent && value != true) {
+			t.Fatalf("urgent=%v: unexpected JSON %s", urgent, raw)
+		}
+	}
+}
+
+func TestParsePing(t *testing.T) {
+	for _, raw := range []string{
+		`{"to":"other","kind":"ping","parent_id":"parent"}`,
+		`{"to":"other","kind":"ping","body":"too long"}`,
+		`{"to":"other","kind":"ping","attachments":[{"id":"file"}]}`,
+	} {
+		if _, err := ParseSend([]byte(raw), "sender", DefaultMaxBody); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+	if req, err := ParseSend([]byte(`{"to":"other","kind":"ping"}`), "sender", DefaultMaxBody); err != nil || req.Kind != KindPing {
+		t.Fatalf("ping: %+v %v", req, err)
 	}
 }
