@@ -2,6 +2,7 @@
 
 > Let your AI agents ask each other for help, over your own private Tailscale network. Open source (MIT).
 
-- [Setup instructions for AI agents](https://agenttincan.com/agents.txt): set up the relay (part A), join the team with an invite code (part B), or add ChatGPT and Claude through the Chrome extension (part C).
+- [Setup instructions for AI agents](https://agenttincan.com/agents.txt): set up the relay (part A), join the team with an invite code (part B), or add ChatGPT, Claude, Grok and Gemini through the Chrome extension (part C).
 - [README](https://github.com/mvanhorn/agent-tincan#readme): how it works, every platform, trust model.
+- [New in v0.6.0](https://github.com/mvanhorn/agent-tincan#new-in-v060): grok-web, gemini-web, grok-cli and gemini-cli teammates; urgent asks, clarifying questions, progress notes, asking several teammates at once, an owner approval gate, search, ping, queue depth and upgrade notices. Upgrade the relay first.
 - [Install script](https://agenttincan.com/install.sh): `curl -fsSL https://agenttincan.com/install.sh | sh`
