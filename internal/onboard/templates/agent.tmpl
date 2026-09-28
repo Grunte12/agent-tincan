@@ -266,7 +266,7 @@ Upgrade the relay to this release first. Requests to {{.Name}} then wait on the 
 The agent must be named notes with kind notes (the service refuses any other name). If it joined without the kind, run tincan kind notes notes on an admin device; tincan notes doctor checks it.
 Install the service definition: tincan notes install --library-root <Agent Notes library folder>. It writes ~/Library/LaunchAgents/com.agenttincan.notes.plist (logging to ~/Library/Logs/tincan-notes.log) and prints the command that starts it. It starts nothing itself.
 Start the service with the printed command: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.notes.plist
-In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder (or Full Disk Access).
+In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder. Do not grant Full Disk Access: the free-text extractor runs under the same binary.
 Check it with tincan notes doctor and do what its fix lines say.
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
 Free-text requests need codex installed and logged in on the Mac for the no-tools request step; structured note: requests do not.

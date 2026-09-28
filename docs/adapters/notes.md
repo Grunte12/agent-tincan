@@ -83,7 +83,7 @@ The agent must be named `notes`: `tincan notes serve` refuses to run unless both
 
 `tincan notes install` writes `~/Library/LaunchAgents/com.agenttincan.notes.plist`, which runs `tincan notes serve --library-root <folder> --helper <helper>` with `TINCAN_CONFIG=~/.config/tincan/notes.json`, keeps it running, and logs to `~/Library/Logs/tincan-notes.log`. It prints the start command and starts nothing itself. Flags: `--library-root` (required), `--helper` (default the helper inside `/Applications/Agent Notes.app`), `--binary` (the tincan binary the service runs, default this one).
 
-The service reads and writes your library from launchd, not from Terminal, so macOS asks for access separately. In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder (or Full Disk Access), then restart the service:
+The service reads and writes your library from launchd, not from Terminal, so macOS asks for access separately. In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder (not Full Disk Access, which the free-text extractor would inherit), then restart the service:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.agenttincan.notes
@@ -117,7 +117,7 @@ After install, check it from another agent: `tincan ask notes 'note: {"op":"sear
 - relay: the config is joined, the relay is reachable, and the relay knows this machine as `notes`. Fix: `TINCAN_CONFIG=~/.config/tincan/notes.json tincan rejoin`, or a new invite for a machine that was never joined.
 - relay kind: the relay stores kind `notes` for the agent, so requests wait 30 days. Fix: `tincan kind notes notes` on an admin device. Until then requests to notes expire after 24 hours.
 - last helper result: what the running service's last helper call returned (doctor reads the service's health file rather than running the helper, since the service may lack folder access that Terminal has).
-  - `missing_authorization` or `operation_failed`: the service cannot open the library. Grant the tincan binary Files and Folders access to the library's folder, or Full Disk Access, then restart the service with `launchctl kickstart -k gui/$(id -u)/com.agenttincan.notes`.
+  - `missing_authorization` or `operation_failed`: the service cannot open the library. Grant the tincan binary Files and Folders access to the library's folder, then restart the service with `launchctl kickstart -k gui/$(id -u)/com.agenttincan.notes`.
   - `helper_too_old`: this Agent Notes build cannot save notes safely for the notes agent. Install the latest Agent Notes, then restart the service.
   - `helper_unavailable`: check that Agent Notes is installed and that `--helper` names its helper.
   - No result yet: start the service and send notes a request, then run doctor again.

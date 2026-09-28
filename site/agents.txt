@@ -374,8 +374,9 @@ D4. Ask your owner where their Agent Notes library folder is, then install the
         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.notes.plist
 
 D5. Ask your owner to open System Settings > Privacy & Security > Files and
-    Folders (or Full Disk Access) and grant the tincan binary access to the
-    library folder. Without it the service cannot open the library.
+    Folders and grant the tincan binary access to the library folder. Not
+    Full Disk Access: the free-text extractor runs under the same binary.
+    Without it the service cannot open the library.
 D6. Check everything:
 
         tincan notes doctor
