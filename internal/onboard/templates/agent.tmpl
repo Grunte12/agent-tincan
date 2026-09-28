@@ -18,7 +18,7 @@ TINCAN_CONFIG like the fresh-session kinds, their blocks have no standing
 instructions, and their config path is always ~/.config/tincan/<kind>.json:
 history.json (the history service's default config), or the one tincan web
 install's service definition sets for the web agents (chatgpt-web,
-claude-web, grok-web, gemini-web, perplexity-web).
+claude-web, grok-web, gemini-web, perplexity-web, copilot-web).
 */ -}}
 
 {{- define "cfgpath"}}~/.config/tincan/{{if .Service}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
@@ -115,11 +115,11 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- end -}}
 
 {{- define "instructions.history" -}}
-{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
-{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else if eq .Kind "perplexity-web"}}Perplexity (www.perplexity.ai){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
-{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else if eq .Kind "perplexity-web"}}perplexity{{else}}chatgpt{{end}}{{end -}}
+{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else if eq .Kind "perplexity-web"}}Perplexity (www.perplexity.ai){{else if eq .Kind "copilot-web"}}Microsoft Copilot (copilot.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
+{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else if eq .Kind "perplexity-web"}}perplexity{{else if eq .Kind "copilot-web"}}copilot{{else}}chatgpt{{end}}{{end -}}
 
 {{- define "instructions.web" -}}
 {{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer{{if eq .Kind "perplexity-web"}} followed by its source links (title and URL){{else}} and any generated images attached{{end}}. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
@@ -129,6 +129,7 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- define "instructions.grok-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.gemini-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.perplexity-web"}}{{template "instructions.web" .}}{{end -}}
+{{- define "instructions.copilot-web"}}{{template "instructions.web" .}} Copilot's replies end with a "Sources:" list of the answer's links.{{end -}}
 
 {{- define "instructions.generic" -}}
 {{- if eq .Wake "webhook" -}}
@@ -264,7 +265,7 @@ Threading: a first line "new chat" starts a new conversation, "conversation: <id
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
 Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
-{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else if eq .Kind "gemini-web"}}gemini.google.com{{else if eq .Kind "perplexity-web"}}www.perplexity.ai{{else}}chatgpt.com{{end}}{{end -}}
+{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else if eq .Kind "gemini-web"}}gemini.google.com{{else if eq .Kind "perplexity-web"}}www.perplexity.ai{{else if eq .Kind "copilot-web"}}copilot.com (Microsoft Copilot, where copilot.microsoft.com leads){{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.claude-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.grok-web"}}{{template "setup.web" .}}{{end -}}
@@ -279,6 +280,13 @@ Perplexity is an optional site in the extension: grant it once on the extension'
 Sign in: Perplexity answers signed-out visitors too, so {{.Name}} checks for a signed-in account before it opens a tab and refuses to send anonymously; a request while {{.Owner}} is signed out gets a not logged in reply.
 Account risk: Perplexity's terms do not allow using the service by automated means. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Perplexity can still limit or suspend the account. Decide whether that risk is acceptable before starting it.
 Replies carry the answer text, then "Sources:" and up to 10 source links numbered as the answer's [n] markers number them. Perplexity is not a history source: tincan history does not read Perplexity threads.
+{{- end -}}
+{{- define "setup.copilot-web"}}{{template "setup.web" .}}
+It needs a personal Microsoft account: open https://copilot.microsoft.com in Chrome once, sign in, and finish any sign-in or terms prompt Microsoft shows; it lands on copilot.com/chat. A work or school (Microsoft 365) account is not supported, and GitHub Copilot is a different product.
+Copilot is an optional site in the extension: grant it once on the extension's options page (chrome://extensions > Agent Tincan History > Details > Extension options > Grant next to Copilot; it covers copilot.com and copilot.microsoft.com). Until then tincan web serve --site copilot waits while the extension is connected, checking again every minute, and starts serving as soon as the grant appears; requests get a reply naming the options page.
+Account risk: the Microsoft Services Agreement does not allow automated access to Copilot. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Microsoft can limit or suspend the whole Microsoft account (Outlook, OneDrive and the rest). Decide whether that risk is acceptable before starting it.
+Copilot may show a "Verification required" human check; the agent never touches it. It replies that the check is showing and holds Copilot requests back for 5 minutes; {{.Owner}} completes the check in Chrome.
+The extension reads a Copilot conversation from copilot.com's own page data with {{.OwnerPoss}} cookies and never reads a token. Listing chats for history opens copilot.com in a background tab of the extension's own and reads the sidebar, so a history question about Copilot briefly opens a tab too.
 {{- end -}}
 
 {{- define "setup.generic" -}}
@@ -299,10 +307,11 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
 {{- define "title.gemini-cli"}}Gemini through Antigravity CLI or Gemini CLI, woken by tincan listen{{end -}}
 {{- define "title.grok-cli"}}xAI Grok Build CLI woken by tincan listen{{end -}}
-{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI chats{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.gemini-web"}}Gemini (gemini.google.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.perplexity-web"}}Perplexity (www.perplexity.ai) as a teammate, with source links, through your logged-in browser{{end -}}
+{{- define "title.copilot-web"}}Microsoft Copilot (copilot.com, personal account) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

@@ -51,13 +51,14 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <chatgpt|claude-ai|grok|gemini|codex|claude-code|grok-cli>",
-		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI history",
-		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions, grok-cli wakes, and chats the chatgpt-web, claude-web, grok-web and gemini-web agents sent into) are left out unless --all is given.\n" +
-			"chatgpt, claude-ai, grok and gemini are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
+		Use:   "history <chatgpt|claude-ai|grok|gemini|copilot|codex|claude-code|grok-cli>",
+		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI history",
+		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI history. With no mode flag it shows the latest prompt the owner typed.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, grok-cli wakes, and chats the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent into) are left out unless --all is given.\n" +
+			"chatgpt, claude-ai, grok, gemini and copilot are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
+			"Copilot's chat list is read from copilot.com's sidebar in a background tab the extension opens, and has no dates.\n" +
 			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
-			"(ChatGPT, claude.ai, Grok and Gemini read at most 100). When that window cut the answer short, a note says so on stderr.",
+			"(ChatGPT, claude.ai, Grok, Gemini and Copilot read at most 100). When that window cut the answer short, a note says so on stderr.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modes := 0
@@ -275,7 +276,7 @@ func historyServeCmd() *cobra.Command {
 			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query,\n" +
 			"     unless the request is already one (a \"query:\" first line and JSON), which is checked in Go and never reaches a model;\n" +
-			"  3. the matching source is read (ChatGPT, claude.ai and Gemini through the Tincan Chrome extension);\n" +
+			"  3. the matching source is read (ChatGPT, claude.ai, Grok, Gemini and Copilot through the Tincan Chrome extension);\n" +
 			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
 			"Retrieved chat content is never sent to an LLM. The allowlist file is reread for every request.\n" +
 			"The owner's window file ({\"days\": N, \"max\": N}) sets how far back lookups go and is also reread for every request;\n" +
@@ -430,7 +431,11 @@ func printHistory(cmd *cobra.Command, convs []history.Conversation, listing bool
 			if c.Automated {
 				flag = "  [" + c.Originator + "]"
 			}
-			cmd.Printf("%s  %s  %s  %s%s\n", c.UpdatedAt.Local().Format("2006-01-02 15:04"), c.ID, cwd, oneLine(c.Title), flag)
+			when := "-               "
+			if !c.UpdatedAt.IsZero() {
+				when = c.UpdatedAt.Local().Format("2006-01-02 15:04")
+			}
+			cmd.Printf("%s  %s  %s  %s%s\n", when, c.ID, cwd, oneLine(c.Title), flag)
 			continue
 		}
 		if i > 0 {

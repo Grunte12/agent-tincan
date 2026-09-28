@@ -1,5 +1,5 @@
 // Package history reads Matt's conversations with ChatGPT, claude.ai, Grok,
-// Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
+// Gemini, Copilot, Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
 // and send back the images from that turn.
 //
 // Every source is an adapter behind Reader. Adapters share one Query shape,
@@ -37,6 +37,7 @@ const (
 	SourceClaudeAI   Source = "claude-ai"
 	SourceGrok       Source = "grok"
 	SourceGemini     Source = "gemini"
+	SourceCopilot    Source = "copilot"
 	SourceGrokCLI    Source = "grok-cli"
 	// SourcePerplexity is www.perplexity.ai. It fronts the perplexity-web
 	// agent only and is not a history source (not in Sources).

@@ -182,6 +182,12 @@ const (
 	OpPerplexityDetail Op = "perplexity.detail"
 	OpPerplexitySend   Op = "perplexity.send"
 	OpPerplexityClose  Op = "perplexity.close"
+	// Copilot (copilot.com). There is no file operation; copilot.list
+	// reads the page's sidebar in a tab the extension opens.
+	OpCopilotList   Op = "copilot.list"
+	OpCopilotDetail Op = "copilot.detail"
+	OpCopilotSend   Op = "copilot.send"
+	OpCopilotClose  Op = "copilot.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -401,6 +407,9 @@ func (e *UnavailableError) Error() string {
 		reason = "the Tincan Chrome extension is not connected (install it, then run tincan history install)"
 	case ErrNotLoggedIn:
 		reason = "not logged in to " + site + " in Chrome"
+		if s := siteFor(e.Source); s != nil && s.notLoggedIn != nil {
+			reason = s.notLoggedIn(e.Detail)
+		}
 	case ErrEndpointChanged:
 		reason = site + " changed its API"
 	case ErrTimeout:
@@ -473,9 +482,9 @@ func clampRetryAfterSeconds(secs int) time.Duration {
 const DefaultRateLimitCooldown = 30 * time.Second
 
 // DefaultBlockedCooldown is how long every request to a site with a
-// blockedCooldown (Gemini, Perplexity) is refused locally after it showed an anti-bot
-// check: time for the owner to clear it in Chrome, without the agent
-// tripping it again meanwhile.
+// blockedCooldown (Gemini, Perplexity, Copilot) is refused locally after
+// it showed an anti-bot check: time for the owner to clear it in Chrome,
+// without the agent tripping it again meanwhile.
 const DefaultBlockedCooldown = 5 * time.Minute
 
 // SiteCooldown remembers, per site, until when requests must not go to it
@@ -721,8 +730,25 @@ func (c *Client) timeout(op Op) time.Duration {
 		return SendClientTimeout
 	case op.file():
 		return 90 * time.Second
+	case op.readsInTab():
+		return TabReadClientTimeout
 	}
 	return 30 * time.Second
+}
+
+// TabReadClientTimeout bounds a list read the extension makes in a tab of
+// its own (Copilot's sidebar): longer than the extension's 75 second
+// bound on such a read, which counts from when the extension queued it,
+// so time spent behind a send to the same site or in the 3 second gap
+// between reads is inside it; shorter than the native host's 2 minute
+// bound on a request.
+const TabReadClientTimeout = 100 * time.Second
+
+// readsInTab reports whether op is a list read the extension makes by
+// opening a tab (a site with listInTab).
+func (op Op) readsInTab() bool {
+	site, kind, ok := op.resolve()
+	return ok && kind == opList && site.listInTab
 }
 
 func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(NativeResponse) (bool, error)) error {

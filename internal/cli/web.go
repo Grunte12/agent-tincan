@@ -20,10 +20,10 @@ import (
 func webCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
-		Short: "Run ChatGPT, Claude, Grok, Gemini or Perplexity as a teammate through your logged-in browser",
-		Long: "A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com or www.perplexity.ai a teammate: a request's text is typed into your logged-in\n" +
+		Short: "Run ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot as a teammate through your logged-in browser",
+		Long: "A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or copilot.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
-			"with generated images attached (and Perplexity's source links listed). It acts as you there, and the chats show up in your history.\n" +
+			"with generated images attached (and Perplexity's and Copilot's source links listed). It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",
 	}
 	cmd.AddCommand(webServeCmd(), webInstallCmd())
@@ -54,7 +54,7 @@ func webServeCmd() *cobra.Command {
 	var site, configPath, allowPath, statePath, name string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude, Grok, Gemini or Perplexity in your browser",
+		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot in your browser",
 		Long: "Long-polls the relay as the web agent and handles one request at a time:\n" +
 			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
 			"     with no file (or a * entry) any joined agent may ask;\n" +

@@ -1,0 +1,78 @@
+{
+  "store": {
+    "rawConversationResponse": {
+      "conversationId": "c0b1107a-0000-4000-8000-000000000001",
+      "chatName": "Tin can telephones",
+      "createTimeUtc": "2026-09-20T10:00:00.000Z",
+      "updateTimeUtc": "2026-09-20T10:05:30.000Z",
+      "reconnectToken": "dummy-reconnect-token-never-returned",
+      "tone": "magic",
+      "isLegacyWebChat": false,
+      "turnState": "Completed",
+      "requestId": "00000000-0000-4000-8000-0000000000aa",
+      "telemetry": "{\"AccessToken\":\"dummy-access-token-never-returned\"}",
+      "plugins": [],
+      "result": { "value": "Success", "message": "dummy" },
+      "messages": [
+        {
+          "text": "How far can a tin can telephone carry a voice?",
+          "author": "user",
+          "from": { "id": "dummy-user" },
+          "createdAt": "2026-09-20T10:00:00.000Z",
+          "timestamp": "2026-09-20T10:00:00.000Z",
+          "locale": "en-us",
+          "messageId": "m0000000-0000-4000-8000-000000000001",
+          "requestId": "00000000-0000-4000-8000-0000000000a1"
+        },
+        {
+          "text": "",
+          "author": "api_tool",
+          "messageType": "Context",
+          "createdAt": "2026-09-20T10:00:01.000Z",
+          "messageId": "m0000000-0000-4000-8000-000000000002"
+        },
+        {
+          "text": "tin can telephone range",
+          "author": "bot",
+          "messageType": "InternalSearchQuery",
+          "createdAt": "2026-09-20T10:00:02.000Z",
+          "messageId": "m0000000-0000-4000-8000-000000000003"
+        },
+        {
+          "text": "About **30 metres** with a taut string [1][2].",
+          "author": "bot",
+          "createdAt": "2026-09-20T10:00:05.000Z",
+          "timestamp": "2026-09-20T10:00:05.000Z",
+          "messageId": "m0000000-0000-4000-8000-000000000004",
+          "contentOrigin": "DeepLeo",
+          "sourceAttributions": [
+            { "providerDisplayName": "Example Physics", "seeMoreUrl": "https://physics.example/tin-can", "sourceType": "CITATION", "referenceMetadata": "{\"dummy\":true}" },
+            { "providerDisplayName": "Example Physics again", "seeMoreUrl": "https://physics.example/tin-can" },
+            { "providerDisplayName": "String Lab", "seeMoreUrl": "https://strings.example/range" },
+            { "providerDisplayName": "Not a link", "seeMoreUrl": "javascript:alert(1)" }
+          ]
+        },
+        {
+          "text": "And with wire instead of string?",
+          "author": "user",
+          "createdAt": "2026-09-20T10:05:00.000Z",
+          "messageId": "m0000000-0000-4000-8000-000000000005"
+        },
+        {
+          "text": "Wire carries it further, a few hundred metres.",
+          "author": "bot",
+          "createdAt": "2026-09-20T10:05:30.000Z",
+          "messageId": "m0000000-0000-4000-8000-000000000006"
+        },
+        {
+          "text": "Try asking about string tension",
+          "author": "bot",
+          "messageType": "Suggestion",
+          "messageId": "m0000000-0000-4000-8000-000000000007"
+        }
+      ]
+    },
+    "clientCorrelationId": "dummy-correlation"
+  },
+  "__queryState": {}
+}

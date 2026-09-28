@@ -1,11 +1,12 @@
 package history
 
 // Web agents make ChatGPT (chatgpt.com), Claude (claude.ai), Grok
-// (grok.com), Gemini (gemini.google.com) and Perplexity (www.perplexity.ai)
-// teammates: a request's body is typed into the owner's logged-in site
-// through the Tincan Chrome extension, and the reply comes back as the
-// answer, with generated images attached and, on a site whose answers
-// cite the web, its source links. See docs/adapters/web-agents.md.
+// (grok.com), Gemini (gemini.google.com), Perplexity (www.perplexity.ai)
+// and Copilot (copilot.com) teammates: a request's body is typed into the
+// owner's logged-in site through the Tincan Chrome extension, and the
+// reply comes back as the answer, with generated images attached and, on
+// a site whose answers cite the web, its source links. See
+// docs/adapters/web-agents.md.
 
 import (
 	"context"
@@ -120,7 +121,8 @@ type WebAgent struct {
 	// ClaudeStablePolls and ClaudeStableFor override the site's
 	// text-stability rule (claude.ai's DefaultClaudeStablePolls and
 	// DefaultClaudeStableFor, Gemini's DefaultGeminiStablePolls and
-	// DefaultGeminiStableFor; ChatGPT has none): a reply the site does not
+	// DefaultGeminiStableFor, Copilot's DefaultCopilotStablePolls and
+	// DefaultCopilotStableFor; ChatGPT and Grok have none): a reply the site does not
 	// mark finished counts as finished once the same text is read on this
 	// many consecutive polls, spanning at least this long. Zero keeps the
 	// site's rule.
@@ -538,17 +540,18 @@ const maxSourceURL = 2048
 
 // sourcesFooter formats an answer's sources: "Sources:", then one
 // "- <title> <url>" line per source ("- [n] <title> <url>" when the site
-// numbers them), in the site's order. Only http and https URLs are
-// listed, each once (its first occurrence, with that number), and none
-// over maxSourceURL bytes; titles are put on one line and capped. After maxReplySources the rest are counted.
-// It is "" when there is nothing to list.
+// numbers them), in the site's order. Only http and https URLs without
+// credentials are listed, each once (its first occurrence, with that
+// number), and none over maxSourceURL bytes; titles are put on one line
+// and capped. After maxReplySources the rest are counted. It is "" when
+// there is nothing to list.
 func sourcesFooter(srcs []webSource) string {
 	seen := map[string]bool{}
 	var lines []string
 	more := 0
 	for _, s := range srcs {
 		u, err := url.Parse(strings.TrimSpace(s.url))
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
 			continue
 		}
 		link := u.String()
@@ -740,6 +743,10 @@ type webNode struct {
 	text   string
 	at     time.Time
 	images int
+	// sources is how many source links the message carries (Copilot),
+	// so a text-stability wait also waits for links that come after the
+	// text.
+	sources int
 	// finished: the site marks this message finished.
 	finished bool
 	// hidden: the site does not show this message (ChatGPT's
@@ -828,7 +835,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 	}
 	var leaf, answer *webNode
-	images, ended, limited := 0, false, false
+	images, sources, ended, limited := 0, 0, false, false
 	for i := b + 1; i < end; i++ {
 		n := &nodes[i]
 		ended = ended || n.endTurn
@@ -838,6 +845,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 		leaf = n
 		images += n.images
+		sources += n.sources
 		if n.reply && strings.TrimSpace(n.text) != "" {
 			answer = n
 		}
@@ -853,7 +861,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 	}
 	p.found = text != "" || images > 0
 	p.limited = limited && !p.found
-	p.sig = fmt.Sprintf("%s\n%d\n%s", id, images, text)
+	p.sig = fmt.Sprintf("%s\n%d\n%d\n%s", id, images, sources, text)
 	p.finished = ended || (p.found && leaf.reply && leaf.finished)
 	return p
 }

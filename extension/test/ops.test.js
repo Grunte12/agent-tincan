@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES, PERPLEXITY_MAX_PAGES, PERPLEXITY_ENTRY_FIELDS } from '../ops.js';
+import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, copilotConversation, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES, PERPLEXITY_MAX_PAGES, PERPLEXITY_ENTRY_FIELDS } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -85,6 +85,8 @@ test('validate accepts only the fixed operation set with exact args', () => {
     { id: 1, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1', url: 'https://assets.grok.com/x' } },
     { id: 1, op: 'grok.list', args: { count: 1, pageToken: 'x' } },
     { id: 1, op: 'grok.detail', args: { id: '../../rest/app-chat/conversations' } },
+    { id: 1, op: 'copilot.file', args: { file_id: 'f1', conversation_id: 'c1' } },
+    { id: 1, op: 'copilot.detail', args: { id: 'c0b1107a-0000-4000-8000-000000000001', url: 'https://copilot.com/' } },
     { id: 1, op: 'extension.reload', args: { now: true } },
     { id: 1, op: 'extension.reload' },
   ];
@@ -376,10 +378,10 @@ test('worker code has no dynamic code execution', () => {
   const send = src('../send.js');
   const calls = send.match(/executeScript\([^)]*\)/g);
   assert.deepEqual(calls, ['executeScript({ target: { tabId }, world: \'ISOLATED\', func, args })']);
-  const injected = [...send.matchAll(/inject\((?:tab\.id|entry\[0\]), (\w+),/g)].map((m) => m[1]);
+  const injected = [...send.matchAll(/await inject\((?:tab\.id|tabId|entry\[0\]), (\w+),/g)].map((m) => m[1]);
   assert.equal(injected.length, [...send.matchAll(/await inject\(/g)].length, 'every injection is listed');
   for (const f of injected) {
-    assert.ok(['pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage'].includes(f), f);
+    assert.ok(['pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage', 'pageCopilotList'].includes(f), f);
   }
 });
 
@@ -406,12 +408,14 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   const required = Object.values(SITE_ACCESS).filter((s) => s.required).flatMap((s) => s.origins);
   const optional = Object.values(SITE_ACCESS).filter((s) => !s.required).flatMap((s) => s.origins);
   // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new;
-  // Grok, Gemini and Perplexity are optional, granted from the options page.
+  // Grok, Gemini, Perplexity and Copilot are optional, granted from the options page.
   assert.deepEqual(m.host_permissions, ['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
-  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://www.perplexity.ai/*']);
+  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://www.perplexity.ai/*', 'https://copilot.com/*', 'https://copilot.microsoft.com/*']);
   assert.equal(SITE_ACCESS.grok.required, false);
   assert.equal(SITE_ACCESS.gemini.required, false);
   assert.equal(SITE_ACCESS.perplexity.required, false);
+  assert.equal(SITE_ACCESS.copilot.required, false);
+  assert.deepEqual(SITE_ACCESS.copilot.pageOrigins, ['https://copilot.com/*']);
   assert.ok(m.description.length <= 132, 'the store caps the description at 132 characters');
   assert.deepEqual(m.host_permissions, required);
   assert.deepEqual(m.optional_host_permissions || [], optional);
@@ -987,6 +991,115 @@ test('gemini ops need the Gemini page grant; the options page grants the image h
   assert.equal(SITE_ACCESS.gemini.required, false, 'an optional site: upgrading asks for nothing');
 });
 
+// ---- Copilot.
+
+const COPILOT_ID = 'c0b1107a-0000-4000-8000-000000000001';
+const COPILOT_PAGE = `https://copilot.com/chat/conversation/${COPILOT_ID}`;
+
+test('copilot.detail reads the conversation page JSON with the cookies and returns only the fields Go reads', async () => {
+  const page = fixture(`copilot/page-${COPILOT_ID}.json`);
+  const f = fakeFetch({ [COPILOT_PAGE]: jsonResponse(page) });
+  const r = createRunner({ fetch: f });
+  const frames = await run(r, 'copilot.detail', { id: COPILOT_ID });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].url, COPILOT_PAGE);
+  assert.equal(f.calls[0].init.credentials, 'include');
+  assert.equal(f.calls[0].init.headers.accept, 'application/json');
+  assert.equal(f.calls[0].init.headers.authorization, undefined, 'no token is sent');
+  assert.deepEqual(frames, [{ ok: true, result: fixture(`copilot/detail-${COPILOT_ID}.json`) }]);
+  // The reconnect token and the token-bearing telemetry never leave.
+  const out = JSON.stringify(frames);
+  for (const secret of ['reconnect', 'AccessToken', 'dummy-access-token', 'telemetry', 'requestId', 'Suggestion', 'InternalSearchQuery', 'javascript:']) {
+    assert.ok(!out.includes(secret), `result carries ${secret}`);
+  }
+  assert.deepEqual(copilotConversation(page, COPILOT_ID), frames[0].result);
+});
+
+test('copilot.detail: a bad id is refused before any fetch; sign-in redirects, 404s and HTML are classified', async () => {
+  const f = fakeFetch({});
+  const r = createRunner({ fetch: f });
+  await assert.rejects(run(r, 'copilot.detail', { id: 'not-a-uuid' }), (e) => e.code === 'bad_request');
+  await assert.rejects(run(r, 'copilot.detail', { id: COPILOT_ID.toUpperCase() }), (e) => e.code === 'bad_request');
+  assert.equal(f.calls.length, 0);
+  const cases = [
+    ['a sign-in redirect', () => Object.defineProperty(jsonResponse({}), 'url', { value: 'https://login.live.com/oauth20_authorize.srf?x=1' }), 'not_logged_in'],
+    ['the terms page', () => Object.defineProperty(jsonResponse('<html>terms</html>', 200, 'text/html'), 'url', { value: 'https://account.live.com/tou/accrue?x=1' }), 'not_logged_in'],
+    ['a 401', () => jsonResponse({}, 401), 'not_logged_in'],
+    ['a 404', () => jsonResponse({}, 404), 'not_found'],
+    ['the app HTML', () => jsonResponse('<html>app</html>', 200, 'text/html'), 'endpoint_changed'],
+    ['JSON without a conversation', () => jsonResponse({ store: {} }), 'endpoint_changed'],
+    ['a 429', () => jsonResponse({}, 429), 'rate_limited'],
+  ];
+  for (const [name, res, code] of cases) {
+    const r2 = createRunner({ fetch: fakeFetch({ [COPILOT_PAGE]: res }) });
+    await assert.rejects(run(r2, 'copilot.detail', { id: COPILOT_ID }), (e) => e.code === code, name);
+  }
+});
+
+test('copilotConversation keeps user and bot content only, with http(s) sources deduped and capped', () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({ providerDisplayName: `S${i}`, seeMoreUrl: `https://s${i}.example/` }));
+  const got = copilotConversation(
+    {
+      store: {
+        rawConversationResponse: {
+          conversationId: COPILOT_ID.toUpperCase(),
+          messages: [
+            null,
+            { author: 'user', text: 'q', messageId: '../x', createdAt: 5 },
+            { author: 'bot', text: 'a', messageId: 'b1', sourceAttributions: many },
+            { author: 'bot', messageType: 'Progress', text: 'searching' },
+            { author: 'system', text: 'hidden' },
+          ],
+        },
+      },
+    },
+    COPILOT_ID,
+  );
+  assert.equal(got.conversationId, COPILOT_ID, 'ids are lowercased');
+  assert.deepEqual(got.messages.map((m) => [m.author, m.text, m.id, m.createdAt]), [['user', 'q', '', ''], ['bot', 'a', 'b1', '']]);
+  assert.equal(got.messages[1].sources.length, 50);
+  assert.throws(() => copilotConversation({ store: { rawConversationResponse: {} } }, COPILOT_ID), (e) => e.code === 'endpoint_changed');
+  assert.throws(() => copilotConversation(null, COPILOT_ID), (e) => e.code === 'endpoint_changed');
+});
+
+test('copilot.list and copilot.send go to the sender; nothing is fetched and ids are checked', async () => {
+  const f = fakeFetch({});
+  const calls = [];
+  const sender = {
+    readList: async (site, count) => (calls.push(['list', site, count]), { conversations: [] }),
+    send: async (site, a) => (calls.push(['send', site, a]), { conversation_id: COPILOT_ID, url: '', submitted_at: 1 }),
+    close: async (site, id) => (calls.push(['close', site, id]), { closed: 1 }),
+  };
+  const r = createRunner({ fetch: f, sender });
+  assert.deepEqual(await run(r, 'copilot.list', { count: 7 }), [{ ok: true, result: { conversations: [] } }]);
+  await run(r, 'copilot.send', { message: 'hi', conversation_id: COPILOT_ID });
+  await assert.rejects(run(r, 'copilot.send', { message: 'hi', conversation_id: 'abc' }), (e) => e.code === 'bad_request');
+  await run(r, 'copilot.close', { conversation_id: COPILOT_ID });
+  assert.deepEqual(calls, [['list', 'copilot', 7], ['send', 'copilot', { message: 'hi', conversation_id: COPILOT_ID }], ['close', 'copilot', COPILOT_ID]]);
+  assert.equal(f.calls.length, 0);
+  // An older sender without readList: the list is unsupported.
+  const old = createRunner({ fetch: f, sender: { send: sender.send, close: sender.close } });
+  await assert.rejects(run(old, 'copilot.list', { count: 1 }), (e) => e.code === 'unsupported');
+});
+
+test('copilot ops need the copilot.com grant; the options page grants copilot.microsoft.com with it', async () => {
+  const f = fakeFetch({ [COPILOT_PAGE]: jsonResponse(fixture(`copilot/page-${COPILOT_ID}.json`)) });
+  const sent = [];
+  const sender = { readList: async () => (sent.push('list'), {}), send: async () => (sent.push('send'), {}), close: async () => ({ closed: 0 }) };
+  const perms = fakePermissions(['https://chatgpt.com/*', 'https://claude.ai/*', 'https://copilot.microsoft.com/*']);
+  const r = createRunner({ fetch: f, sender, permissions: perms });
+  for (const [op, args] of [['copilot.detail', { id: COPILOT_ID }], ['copilot.list', { count: 1 }], ['copilot.send', { message: 'hi' }]]) {
+    await assert.rejects(run(r, op, args), (e) => e.code === 'permission_missing' && /Copilot/.test(e.message), op);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(await run(r, 'copilot.close', { conversation_id: COPILOT_ID }), [{ ok: true, result: { closed: 0 } }]);
+  perms.granted.add('https://copilot.com/*');
+  assert.equal((await run(r, 'copilot.detail', { id: COPILOT_ID }))[0].ok, true);
+  assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai', 'copilot']);
+  assert.deepEqual(SITE_ACCESS.copilot.origins, ['https://copilot.com/*', 'https://copilot.microsoft.com/*']);
+});
+
 // ---- Perplexity: a signed-in session check, then /rest/thread reads.
 
 const PX = 'https://www.perplexity.ai';
@@ -1042,11 +1155,15 @@ test('perplexity.detail stops after PERPLEXITY_MAX_PAGES pages and says more exi
   assert.equal(calls.length, PERPLEXITY_MAX_PAGES);
   assert.equal(frames[0].result.entries.length, PERPLEXITY_MAX_PAGES);
   assert.equal(frames[0].result.more, true);
-  // A cursor that does not move ends the read.
+  // A cursor that does not move, or none, ends the read, still marked
+  // more: the newest entries were not read.
   const stuck = [];
   const s = async (url) => (stuck.push(String(url)), jsonResponse({ entries: [], has_next_page: true, next_cursor: 'same' }));
-  await run(createRunner({ fetch: s }), 'perplexity.detail', { id: PX_SLUG });
+  const st = await run(createRunner({ fetch: s }), 'perplexity.detail', { id: PX_SLUG });
   assert.equal(stuck.length, 2);
+  assert.equal(st[0].result.more, true);
+  const none = async () => jsonResponse({ entries: [], has_next_page: true, next_cursor: null });
+  assert.equal((await run(createRunner({ fetch: none }), 'perplexity.detail', { id: PX_SLUG }))[0].result.more, true);
 });
 
 test('perplexity.send needs a signed-in user first; signed out, a sign-in redirect or a challenge opens no tab', async () => {

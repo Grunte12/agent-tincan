@@ -24,6 +24,8 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpGeminiList: SourceGemini, OpGeminiDetail: SourceGemini, OpGeminiFile: SourceGemini,
 		OpGeminiSend: SourceGemini, OpGeminiClose: SourceGemini,
 		OpPerplexityDetail: SourcePerplexity, OpPerplexitySend: SourcePerplexity, OpPerplexityClose: SourcePerplexity,
+		OpCopilotList: SourceCopilot, OpCopilotDetail: SourceCopilot,
+		OpCopilotSend: SourceCopilot, OpCopilotClose: SourceCopilot,
 	}
 	for op, want := range cases {
 		if got := op.source(); got != want {
@@ -83,7 +85,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("bard")
-	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini or perplexity)` {
+	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity or copilot)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -145,10 +147,10 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini or perplexity" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web or perplexity-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok and Gemini" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity or copilot" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web or copilot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, grok, gemini, codex, claude-code or grok-cli" {
+	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
@@ -156,6 +158,7 @@ func TestSiteTableNames(t *testing.T) {
 		SourceClaudeAI: {"claude-web", "claude.ai", "claude.ai"},
 		SourceGrok:     {"grok-web", "Grok", "grok.com"},
 		SourceGemini:   {"gemini-web", "Gemini", "gemini.google.com"},
+		SourceCopilot:  {"copilot-web", "Copilot", "copilot.com"},
 	}
 	for src, w := range want {
 		if got := [3]string{WebAgentName(src), siteLabel(src), siteOf(src)}; got != w {
@@ -211,7 +214,7 @@ func TestConversationRefHosts(t *testing.T) {
 // Perplexity fronts a web agent only: it is not a history source, has no
 // list or file operation, and the history prose leaves it out.
 func TestPerplexityIsNotAHistorySource(t *testing.T) {
-	want := []Source{SourceChatGPT, SourceClaudeAI, SourceGrok, SourceGemini, SourceCodex, SourceClaudeCode, SourceGrokCLI}
+	want := []Source{SourceChatGPT, SourceClaudeAI, SourceGrok, SourceGemini, SourceCopilot, SourceCodex, SourceClaudeCode, SourceGrokCLI}
 	if len(Sources) != len(want) {
 		t.Fatalf("Sources = %v", Sources)
 	}

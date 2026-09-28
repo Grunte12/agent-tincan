@@ -1,9 +1,9 @@
 package history
 
 // The live sites: everything that differs between chatgpt.com, claude.ai,
-// grok.com, gemini.google.com and www.perplexity.ai, in one table. Adding a
-// site is one entry here plus its reader file; nothing else branches on
-// which site it is.
+// grok.com, gemini.google.com, www.perplexity.ai and copilot.com, in one
+// table. Adding a site is one entry here plus its reader file; nothing
+// else branches on which site it is.
 
 import (
 	"encoding/json"
@@ -63,6 +63,14 @@ type webSite struct {
 	// this long after it showed an anti-bot check, so the agent does not
 	// keep tripping it on the owner's account.
 	blockedCooldown time.Duration
+	// listInTab: the list operation reads the site's page in a tab the
+	// extension opens (Copilot's sidebar), so it gets
+	// TabReadClientTimeout.
+	listInTab bool
+	// notLoggedIn, when set, is the reason a not_logged_in error gives
+	// for the site, from the extension's detail: what the owner has to
+	// do in Chrome.
+	notLoggedIn func(detail string) string
 	// webOnly: the site fronts a web agent only and is not a history
 	// source. It has no list or file operation, is not in Sources, and the
 	// history readers and prose lists leave it out.
@@ -181,6 +189,36 @@ var webSites = []*webSite{
 		webOnly:         true,
 		sources:         true,
 	},
+	{
+		source:   SourceCopilot,
+		label:    "Copilot",
+		host:     "copilot.com",
+		agent:    "copilot-web",
+		opPrefix: "copilot",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewCopilot(c)
+			r.Now = now
+			return r
+		},
+		nodes:           copilotNodes,
+		stable:          &stableRule{polls: DefaultCopilotStablePolls, span: DefaultCopilotStableFor},
+		convPath:        copilotConvPath,
+		canonID:         copilotCanonicalID,
+		blockedCooldown: DefaultBlockedCooldown,
+		listInTab:       true,
+		notLoggedIn:     copilotNotLoggedIn,
+		sources:         true,
+	},
+}
+
+// copilotNotLoggedIn is the not_logged_in reason for Copilot: a work or
+// school account landing gets its own; any other (a Microsoft sign-in or
+// terms page, or a page with no account) says to finish it in Chrome.
+func copilotNotLoggedIn(detail string) string {
+	if strings.Contains(detail, "work or school account") {
+		return "Copilot opened with a work or school account; copilot-web needs a personal Microsoft account, so sign in to copilot.com in Chrome with a personal Microsoft account"
+	}
+	return "not signed in to Copilot in Chrome; open https://copilot.microsoft.com in Chrome, sign in with a personal Microsoft account and finish any Microsoft sign-in or terms prompt"
 }
 
 // grokConvPath is grok.com's conversation path, /c/<id>.
@@ -252,7 +290,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 }
 
 // WebSiteNames lists the --site values, for help and errors
-// ("chatgpt, claude-ai, grok, gemini or perplexity").
+// ("chatgpt, claude-ai, grok, gemini, perplexity or copilot").
 func WebSiteNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -272,7 +310,7 @@ func SourceNames() string {
 }
 
 // WebAgentNames lists the sites' default web agent names ("chatgpt-web,
-// claude-web, grok-web, gemini-web or perplexity-web").
+// claude-web, grok-web, gemini-web, perplexity-web or copilot-web").
 func WebAgentNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {

@@ -34,6 +34,11 @@ type live struct {
 	// canonID, when set, turns a conversation id in any of the site's
 	// forms into the canonical one every store holds.
 	canonID func(id string) (string, bool)
+	// undatedList: the list carries no times, newest first (Copilot's
+	// sidebar). Its conversations are never aged out by the list, and a
+	// read bounds each candidate's time by the one read before it, which
+	// the sidebar's order guarantees is no older.
+	undatedList bool
 }
 
 // imageRef is a placeholder image: the source's pointer and a display
@@ -118,7 +123,7 @@ func (l *live) List(ctx context.Context, count int, opts Options) (Page, error) 
 	page := Page{Window: w}
 	aged := false
 	for _, c := range convs {
-		if !w.fresh(c.UpdatedAt, now) {
+		if (!l.undatedList || !c.UpdatedAt.IsZero()) && !w.fresh(c.UpdatedAt, now) {
 			aged = true
 			continue
 		}
@@ -183,8 +188,19 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	if err != nil {
 		return Page{}, err
 	}
-	page, err := pick(q, w, l.clock(), len(cands), more,
-		func(i int) time.Time { return cands[i].UpdatedAt },
+	// prev is the time of the last candidate read, for an undated list.
+	var prev time.Time
+	now := l.clock()
+	page, err := pick(q, w, now, len(cands), more,
+		func(i int) time.Time {
+			if !l.undatedList || !cands[i].UpdatedAt.IsZero() {
+				return cands[i].UpdatedAt
+			}
+			if prev.IsZero() {
+				return now
+			}
+			return prev
+		},
 		func(i int) (thread, bool, error) {
 			if err := ctx.Err(); err != nil {
 				return thread{}, false, err
@@ -204,6 +220,19 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 				th.conv.Title = cands[i].Title
 			}
 			th.conv.Automated = owned[cands[i].ID]
+			if l.undatedList {
+				// With no time from the list or the read, its age cannot
+				// be checked against the window, so it is not shown.
+				if th.conv.UpdatedAt.IsZero() {
+					return thread{}, false, nil
+				}
+				prev = th.conv.UpdatedAt
+				// Past the window's age: not shown, and the next
+				// candidate's bound (this time) stops the scan.
+				if !w.orDefault().fresh(prev, now) {
+					return thread{}, false, nil
+				}
+			}
 			return th, len(th.turns) > 0, nil
 		})
 	if err != nil {
