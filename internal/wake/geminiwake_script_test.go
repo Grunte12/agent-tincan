@@ -565,3 +565,27 @@ func TestGeminiWakeSignalRemovesCapturedOutput(t *testing.T) {
 		t.Fatalf("lock left behind after a SIGTERM\nstderr:\n%s", stderr.String())
 	}
 }
+
+// A listen nudge for a relay upgrade alone (TINCAN_WAITING=0) goes to the
+// listener's log and starts no engine run; with items waiting, the run
+// still happens and the notice is logged too.
+func TestGeminiWakeUpgradeNoticeAlone(t *testing.T) {
+	h := newGeminiHarness(t)
+	r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1", "TINCAN_WAITING=0", "TINCAN_UPGRADE_AVAILABLE=9.9.9")
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if n := len(h.runs()); n != 0 {
+		t.Fatalf("engine ran %d times for an upgrade notice alone\nstderr:\n%s", n, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "tincan 9.9.9 is available from the relay") || !strings.Contains(r.stderr, "tincan upgrade") {
+		t.Fatalf("upgrade notice not logged:\n%s", r.stderr)
+	}
+	if h.backoff() || h.noticeCount() != 0 {
+		t.Fatalf("backoff %v, notices %d; want neither", h.backoff(), h.noticeCount())
+	}
+	r = h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1", "TINCAN_UPGRADE_AVAILABLE=9.9.9")
+	if r.err != nil || len(h.runs()) != 1 || !strings.Contains(r.stderr, "tincan 9.9.9 is available from the relay") {
+		t.Fatalf("with work waiting: %v, %d runs\nstderr:\n%s", r.err, len(h.runs()), r.stderr)
+	}
+}

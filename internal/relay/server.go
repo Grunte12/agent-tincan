@@ -700,8 +700,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// MaxPeekPending caps how many queued requests one peek names. queued still
-// counts them all.
+// MaxPeekPending caps how many queued requests one peek names, with a
+// separate cap for pings, which are listed first. queued still counts them
+// all.
 const MaxPeekPending = 50
 
 // MaxRepliesBytes bounds the request, reply, and parent bodies of the unseen replies

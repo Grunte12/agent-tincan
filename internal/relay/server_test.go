@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -890,8 +891,24 @@ func TestPingCapablePollAndExactPeekCount(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &waiting); err != nil {
 		t.Fatal(err)
 	}
-	if waiting.Total != MaxPeekPending+2 || waiting.Pings != MaxPeekPending+1 || len(waiting.Pending) != MaxPeekPending {
+	// Pings have their own cap, so the work behind them is still named.
+	if waiting.Total != MaxPeekPending+2 || waiting.Pings != MaxPeekPending+1 || len(waiting.Pending) != MaxPeekPending+1 ||
+		waiting.Pending[MaxPeekPending].Kind == envelope.KindPing {
 		t.Fatalf("peek: %+v", waiting)
+	}
+}
+
+func TestPeekListsPingBehindFullBacklog(t *testing.T) {
+	h := newHarness(t, Config{})
+	for _, kind := range append(slices.Repeat([]envelope.Kind{envelope.KindAsk}, MaxPeekPending+5), envelope.KindPing) {
+		if _, err := h.st.Enqueue(context.Background(), envelope.Request{From: "grokbot", To: "muse", Kind: kind, Body: "x"}, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out client.Waiting
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, &out)
+	if out.Pings != 1 || len(out.Pending) != MaxPeekPending+1 || out.Pending[0].Kind != envelope.KindPing {
+		t.Fatalf("peek = pings %d, pending %d, first %+v", out.Pings, len(out.Pending), out.Pending[0])
 	}
 }
 

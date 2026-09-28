@@ -36,6 +36,9 @@ func searchCmd() *cobra.Command {
 				if hit.ReplySnippet != "" {
 					cmd.Printf("  Reply: %s\n", oneLine(hit.ReplySnippet))
 				}
+				if hit.QuestionSnippet != "" {
+					cmd.Printf("  Question: %s\n", oneLine(hit.QuestionSnippet))
+				}
 				if len(hit.AttachmentNames) > 0 {
 					cmd.Printf("  Attachments: %s\n", searchAttachmentNames(hit.AttachmentNames))
 				}

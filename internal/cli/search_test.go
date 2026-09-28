@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -54,5 +55,26 @@ func TestSearchAttachmentNamesBounded(t *testing.T) {
 	}
 	if got := searchAttachmentNames(nil); got != "" {
 		t.Fatalf("empty = %q", got)
+	}
+}
+
+func TestSearchCLILabelsQuestion(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	muse := m.Client(t, "muse")
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "book dinner", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Claim(ctx, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Reply(ctx, req.ID, "which restaurant?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, Root(), "search", "restaurant")
+	if err != nil || !strings.Contains(out, "  Question: which [restaurant]?") || strings.Contains(out, "Reply:") {
+		t.Fatalf("search = %s, %v", out, err)
 	}
 }

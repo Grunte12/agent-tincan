@@ -842,7 +842,7 @@ func TestQueueStatsUsesStatusIndex(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	rows, err := s.db.Query(`EXPLAIN QUERY PLAN SELECT to_agent, status, COUNT(*), MIN(created_at)
 		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > 0
-		AND (status != 'claimed' OR lease_until > 0) GROUP BY to_agent, status`)
+		AND (status != 'claimed' OR lease_until > 0) AND kind != 'ping' GROUP BY to_agent, status`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,5 +858,54 @@ func TestQueueStatsUsesStatusIndex(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(plan, "\n"), "requests_status_to") {
 		t.Fatalf("plan does not use requests_status_to:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
+func TestPendingRequestsListsPingsBeyondCap(t *testing.T) {
+	s, c := open(t, ":memory:")
+	var asks []envelope.Request
+	for range 3 {
+		asks = append(asks, ask(t, s, "a", "b", "work"))
+		c.advance(time.Second)
+	}
+	ping, err := s.Enqueue(t.Context(), envelope.Request{From: "a", To: "b", Kind: envelope.KindPing, Hop: 1, Chain: []string{}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingRequests(t.Context(), "b", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 3 || pending[0].ID != ping.ID || pending[0].Kind != envelope.KindPing ||
+		pending[1].ID != asks[0].ID || pending[2].ID != asks[1].ID {
+		t.Fatalf("pending = %+v", pending)
+	}
+}
+
+func TestQueueStatsIgnoresPings(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	ping, err := s.Enqueue(ctx, envelope.Request{From: "a", To: "muse", Kind: envelope.KindPing, Hop: 1, Chain: []string{}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	req := ask(t, s, "a", "muse", "work")
+	stats, err := s.QueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats["muse"]; got.Queued != 1 || !got.OldestQueued.Equal(req.CreatedAt) {
+		t.Fatalf("muse = %+v, ping %s", got, ping.ID)
+	}
+	if _, err := s.Claim(ctx, ping.ID, "muse", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = s.QueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats["muse"]; got.Queued != 1 || got.Claimed != 0 {
+		t.Fatalf("muse after ping claim = %+v", got)
 	}
 }

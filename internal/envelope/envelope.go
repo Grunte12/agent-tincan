@@ -321,13 +321,16 @@ func ParseReply(raw []byte, maxBody int) (Reply, error) {
 
 // SearchResult is a matching request or reply excerpt, without full bodies or files.
 type SearchResult struct {
-	RequestID       string    `json:"request_id"`
-	TraceID         string    `json:"trace_id"`
-	From            string    `json:"from"`
-	To              string    `json:"to"`
-	Status          Status    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
-	Snippet         string    `json:"snippet,omitempty"`
-	ReplySnippet    string    `json:"reply_snippet,omitempty"`
-	AttachmentNames []string  `json:"attachment_names,omitempty"`
+	RequestID    string    `json:"request_id"`
+	TraceID      string    `json:"trace_id"`
+	From         string    `json:"from"`
+	To           string    `json:"to"`
+	Status       Status    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	Snippet      string    `json:"snippet,omitempty"`
+	ReplySnippet string    `json:"reply_snippet,omitempty"`
+	// QuestionSnippet excerpts a clarification question (a needs_input
+	// reply) that matched. It is an exchange on the request, never its reply.
+	QuestionSnippet string   `json:"question_snippet,omitempty"`
+	AttachmentNames []string `json:"attachment_names,omitempty"`
 }

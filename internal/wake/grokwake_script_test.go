@@ -657,3 +657,22 @@ func TestGrokWakeRefusesABinaryInTemp(t *testing.T) {
 		h2.refused(h2.run("GROK_BIN="+bin, "TMPDIR="), "the sandboxed run can write")
 	}
 }
+
+// As for the gemini wake: an upgrade notice alone is logged, not run.
+func TestGrokWakeUpgradeNoticeAlone(t *testing.T) {
+	h := newGrokHarness(t)
+	r := h.run("TINCAN_WAITING=0", "TINCAN_UPGRADE_AVAILABLE=9.9.9")
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if n := len(h.runs()); n != 0 {
+		t.Fatalf("grok ran %d times for an upgrade notice alone\nstderr:\n%s", n, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "tincan 9.9.9 is available from the relay") || h.backoff() || h.notices() != 0 {
+		t.Fatalf("backoff %v, notices %d, stderr:\n%s", h.backoff(), h.notices(), r.stderr)
+	}
+	r = h.run("TINCAN_UPGRADE_AVAILABLE=9.9.9")
+	if r.err != nil || len(h.runs()) != 1 || !strings.Contains(r.stderr, "tincan 9.9.9 is available from the relay") {
+		t.Fatalf("with work waiting: %v, %d runs\nstderr:\n%s", r.err, len(h.runs()), r.stderr)
+	}
+}
