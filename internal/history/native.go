@@ -161,10 +161,15 @@ const (
 	OpClaudeAIFile   Op = "claudeai.file"
 	OpChatGPTSend    Op = "chatgpt.send"
 	OpClaudeAISend   Op = "claudeai.send"
+	OpGrokList       Op = "grok.list"
+	OpGrokDetail     Op = "grok.detail"
+	OpGrokFile       Op = "grok.file"
+	OpGrokSend       Op = "grok.send"
 	// The close operations close the tab a send left open for a
 	// conversation, once its reply is finished.
 	OpChatGPTClose  Op = "chatgpt.close"
 	OpClaudeAIClose Op = "claudeai.close"
+	OpGrokClose     Op = "grok.close"
 	// Gemini (gemini.google.com). gemini.file takes the conversation id
 	// and "<response candidate id>-<n>", never a URL.
 	OpGeminiList   Op = "gemini.list"

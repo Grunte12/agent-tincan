@@ -23,6 +23,9 @@ type live struct {
 	detailOp   Op
 	// parseList turns a list result into conversations without messages.
 	parseList func(raw json.RawMessage) ([]Conversation, error)
+	// listMore, when set, reports whether a list result was cut short
+	// with older conversations left unlisted, however many it holds.
+	listMore func(raw json.RawMessage) bool
 	// parseDetail turns a detail result into a thread whose images are
 	// placeholders made by imageRef.
 	parseDetail func(id string, raw json.RawMessage) (thread, error)
@@ -51,21 +54,24 @@ func splitRef(img Image) (pointer, name string, ok bool) {
 func (l *live) clock() time.Time { return orNow(l.now) }
 
 // list asks the extension for the n newest conversations, newest first.
-func (l *live) list(ctx context.Context, n int) ([]Conversation, error) {
+// more says older conversations may be left unlisted: the list is full
+// (n, capped at MaxListCount), or the source says it was cut short.
+func (l *live) list(ctx context.Context, n int) (convs []Conversation, more bool, err error) {
 	n = min(max(n, 1), MaxListCount)
 	raw, err := l.client.Request(ctx, l.listOp, OpArgs{Count: n})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	convs, err := l.parseList(raw)
+	convs, err = l.parseList(raw)
 	if err != nil {
-		return nil, unavailable(l.source, ErrEndpointChanged, "unexpected list shape")
+		return nil, false, unavailable(l.source, ErrEndpointChanged, "unexpected list shape")
 	}
 	sort.SliceStable(convs, func(i, j int) bool { return convs[i].UpdatedAt.After(convs[j].UpdatedAt) })
 	if len(convs) > n {
 		convs = convs[:n]
 	}
-	return convs, nil
+	more = len(convs) >= n || (l.listMore != nil && l.listMore(raw))
+	return convs, more, nil
 }
 
 func (l *live) detail(ctx context.Context, id string) (thread, error) {
@@ -104,12 +110,11 @@ func (l *live) List(ctx context.Context, count int, opts Options) (Page, error) 
 	if !opts.All {
 		fetch += len(owned)
 	}
-	convs, err := l.list(ctx, fetch)
+	convs, full, err := l.list(ctx, fetch)
 	if err != nil {
 		return Page{}, err
 	}
 	w, now := l.applied(opts), l.clock()
-	full := len(convs) >= min(fetch, MaxListCount)
 	page := Page{Window: w}
 	aged := false
 	for _, c := range convs {
@@ -173,12 +178,11 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	if !opts.All {
 		fetch += len(owned)
 	}
-	cands, err := l.list(ctx, fetch)
+	// A full or cut-short list may have older conversations behind it.
+	cands, more, err := l.list(ctx, fetch)
 	if err != nil {
 		return Page{}, err
 	}
-	// A full list may have older conversations behind it.
-	more := len(cands) >= min(fetch, MaxListCount)
 	page, err := pick(q, w, l.clock(), len(cands), more,
 		func(i int) time.Time { return cands[i].UpdatedAt },
 		func(i int) (thread, bool, error) {

@@ -47,13 +47,13 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <chatgpt|claude-ai|gemini|codex|claude-code>",
-		Short: "Read the owner's ChatGPT, claude.ai, Gemini, Codex or Claude Code history",
-		Long: "Read the owner's ChatGPT, claude.ai, Gemini, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web, claude-web and gemini-web agents sent into) are left out unless --all is given.\n" +
-			"chatgpt, claude-ai and gemini are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
+		Use:   "history <chatgpt|claude-ai|grok|gemini|codex|claude-code>",
+		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex or Claude Code history",
+		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web, claude-web, grok-web and gemini-web agents sent into) are left out unless --all is given.\n" +
+			"chatgpt, claude-ai, grok and gemini are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
 			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
-			"(ChatGPT, claude.ai and Gemini read at most 100). When that window cut the answer short, a note says so on stderr.",
+			"(ChatGPT, claude.ai, Grok and Gemini read at most 100). When that window cut the answer short, a note says so on stderr.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modes := 0

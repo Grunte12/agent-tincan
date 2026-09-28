@@ -1,7 +1,7 @@
 package history
 
-// The live sites: everything that differs between chatgpt.com, claude.ai
-// and gemini.google.com, in one table. Adding a site is one entry here plus its
+// The live sites: everything that differs between chatgpt.com, claude.ai,
+// grok.com and gemini.google.com, in one table. Adding a site is one entry here plus its
 // reader file; nothing else branches on which site it is.
 
 import (
@@ -42,6 +42,13 @@ type webSite struct {
 	// convPath matches a conversation URL's path on host; its first
 	// group is the conversation id.
 	convPath *regexp.Regexp
+	// noteMissingImages: a reply whose generated images could not all be
+	// fetched says so, instead of leaving them out silently.
+	noteMissingImages bool
+	// planLimitCooldown is how long the site is left alone after an
+	// answer ends on the account's rate or plan limit (a webNode marked
+	// limited).
+	planLimitCooldown time.Duration
 	// canonID, when set, turns a conversation id in any of the site's
 	// forms into the one form every store (per-asker state, used list,
 	// journal, reply footer) holds; ok is false for an id that is not
@@ -114,6 +121,23 @@ var webSites = []*webSite{
 		convPath: convURLPattern,
 	},
 	{
+		source:                SourceGrok,
+		label:                 "Grok",
+		host:                  "grok.com",
+		agent:                 "grok-web",
+		opPrefix:              "grok",
+		fileTakesConversation: true,
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewGrok(c)
+			r.Now = now
+			return r
+		},
+		nodes:             grokNodes,
+		convPath:          grokConvPath,
+		noteMissingImages: true,
+		planLimitCooldown: DefaultPlanLimitCooldown,
+	},
+	{
 		source:                SourceGemini,
 		label:                 "Gemini",
 		host:                  "gemini.google.com",
@@ -133,6 +157,13 @@ var webSites = []*webSite{
 		blockedCooldown: DefaultBlockedCooldown,
 	},
 }
+
+// grokConvPath is grok.com's conversation path, /c/<id>.
+var grokConvPath = regexp.MustCompile(`^/c/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/?$`)
+
+// DefaultPlanLimitCooldown is how long a site is left alone after an
+// answer ended on the account's rate or plan limit.
+const DefaultPlanLimitCooldown = 15 * time.Minute
 
 // siteFor returns src's table entry, or nil when src is not a live site.
 func siteFor(src Source) *webSite {
@@ -190,7 +221,7 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 }
 
 // WebSiteNames lists the --site values, for help and errors
-// ("chatgpt, claude-ai or gemini").
+// ("chatgpt, claude-ai, grok or gemini").
 func WebSiteNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -200,7 +231,7 @@ func WebSiteNames() string {
 }
 
 // SourceNames lists every history source, for errors ("chatgpt,
-// claude-ai, gemini, codex or claude-code").
+// claude-ai, grok, gemini, codex or claude-code").
 func SourceNames() string {
 	names := make([]string, len(Sources))
 	for i, s := range Sources {
@@ -210,7 +241,7 @@ func SourceNames() string {
 }
 
 // WebAgentNames lists the sites' default web agent names ("chatgpt-web,
-// claude-web or gemini-web").
+// claude-web, grok-web or gemini-web").
 func WebAgentNames() string {
 	names := make([]string, len(webSites))
 	for i, s := range webSites {
@@ -219,8 +250,8 @@ func WebAgentNames() string {
 	return joinList(names, "or")
 }
 
-// LiveSourcesLabel names the live sources in prose ("ChatGPT, claude.ai
-// and Gemini").
+// LiveSourcesLabel names the live sources in prose ("ChatGPT, claude.ai,
+// Grok and Gemini").
 func LiveSourcesLabel() string {
 	labels := make([]string, len(webSites))
 	for i, s := range webSites {

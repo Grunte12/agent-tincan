@@ -1,0 +1,51 @@
+{
+  "conversations": [
+    {
+      "conversationId": "0e1d0000-0000-4000-8000-000000000001",
+      "title": "Fox mascot sketch",
+      "starred": false,
+      "createTime": "2026-09-22T10:00:00.000000Z",
+      "modifyTime": "2026-09-22T11:00:00.000000Z",
+      "systemPromptName": "",
+      "temporary": false,
+      "mediaTypes": ["image"],
+      "workspaces": [],
+      "taskResult": {},
+      "latestAssetMetadata": null,
+      "kind": "",
+      "hasUnreadCheckin": false
+    },
+    {
+      "conversationId": "0e1d0000-0000-4000-8000-000000000002",
+      "title": "Weekend hike ideas",
+      "starred": false,
+      "createTime": "2026-09-20T08:00:00.000000Z",
+      "modifyTime": "2026-09-20T08:05:00.000000Z",
+      "systemPromptName": "",
+      "temporary": false,
+      "mediaTypes": [],
+      "workspaces": [],
+      "taskResult": {},
+      "latestAssetMetadata": null,
+      "kind": "",
+      "hasUnreadCheckin": false
+    },
+    {
+      "conversationId": "0e1d0000-0000-4000-8000-000000000003",
+      "title": "Ancient chat",
+      "starred": false,
+      "createTime": "2026-06-01T00:00:00.000000Z",
+      "modifyTime": "2026-06-01T00:10:00.000000Z",
+      "systemPromptName": "",
+      "temporary": false,
+      "mediaTypes": [],
+      "workspaces": [],
+      "taskResult": {},
+      "latestAssetMetadata": null,
+      "kind": "",
+      "hasUnreadCheckin": false
+    }
+  ],
+  "nextPageToken": "",
+  "textSearchMatches": []
+}

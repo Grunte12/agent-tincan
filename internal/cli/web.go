@@ -20,8 +20,8 @@ import (
 func webCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "web",
-		Short: "Run ChatGPT, Claude or Gemini as a teammate through your logged-in browser",
-		Long: "A web agent makes chatgpt.com, claude.ai or gemini.google.com a teammate: a request's text is typed into your logged-in\n" +
+		Short: "Run ChatGPT, Claude, Grok or Gemini as a teammate through your logged-in browser",
+		Long: "A web agent makes chatgpt.com, claude.ai, grok.com or gemini.google.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
 			"with generated images attached. It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",

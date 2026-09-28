@@ -32,7 +32,7 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
-		if kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGeminiWeb {
+		if kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb {
 			// Services too, with the fixed config path their service sets.
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")
 			if want := "TINCAN_CONFIG=~/.config/tincan/" + kind + ".json tincan rejoin --relay " + relayURL + " --name a-" + kind; !strings.Contains(setup, "not joined") || !strings.Contains(setup, want) {
