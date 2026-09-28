@@ -34,8 +34,9 @@ const DefaultWebRequestTimeout = 8 * time.Minute
 // site may date the new message and still have it count as this send's.
 const webClockSkew = 2 * time.Minute
 
-// maxWebReplyBytes caps the reply text, leaving room in the relay's body
-// limit for the footer and notes.
+// maxWebReplyBytes caps a web agent's reply: the answer text with its
+// truncation notice, sources list, notes and conversation footer. Image
+// attachment lines are added after it, inside the relay's body limit.
 const maxWebReplyBytes = 64 << 10
 
 // WebSites are the sites a web agent can front, in the site table's order.
@@ -446,31 +447,6 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 		return
 	}
 	text, conv, generated, lost := rr.text, rr.conv, rr.generated, rr.lost
-	var sources string
-	if w.site().sources {
-		sources = sourcesFooter(rr.sources)
-	}
-	// The sources list is kept whole: the answer text is what gives way
-	// to keep the two inside the cap.
-	body, truncated := capReplyTo(text, maxWebReplyBytes-len(sources))
-	n := imageCount(conv)
-	missing := w.missingImagesNote(generated, n)
-	if missing != "" {
-		n = generated
-	}
-	if strings.TrimSpace(text) == "" && n > 0 {
-		what := "an image"
-		if n > 1 {
-			what = "images"
-		}
-		body = fmt.Sprintf("(%s replied with %s and no text)", label, what)
-	}
-	if truncated {
-		body += fmt.Sprintf("\n\n(reply truncated: showing %d of %d bytes)", len(body), len(text))
-	}
-	if sources != "" {
-		body += "\n\n" + sources
-	}
 	if lost > 0 && w.site().noteLostImages {
 		what := "image"
 		if lost > 1 {
@@ -483,10 +459,40 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 			note = lostNote
 		}
 	}
-	if note != "" {
-		body += "\n\n" + note
+	// Everything after the answer text (the sources list, any note and
+	// the conversation footer) is kept whole: the answer text is what
+	// gives way to keep the reply inside the cap.
+	var tail string
+	if w.site().sources {
+		if sources := sourcesFooter(rr.sources); sources != "" {
+			tail += "\n\n" + sources
+		}
 	}
-	body += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
+	if note != "" {
+		tail += "\n\n" + note
+	}
+	tail += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
+	body, truncated := capReplyTo(text, maxWebReplyBytes-len(tail))
+	if truncated {
+		// Room for the notice comes out of the text too; its numbers are
+		// at most len(text), so this length is an upper bound.
+		const notice = "\n\n(reply truncated: showing %d of %d bytes)"
+		body, _ = capReplyTo(text, maxWebReplyBytes-len(tail)-len(fmt.Sprintf(notice, len(text), len(text))))
+		body += fmt.Sprintf(notice, len(body), len(text))
+	}
+	n := imageCount(conv)
+	missing := w.missingImagesNote(generated, n)
+	if missing != "" {
+		n = generated
+	}
+	if strings.TrimSpace(text) == "" && n > 0 {
+		what := "an image"
+		if n > 1 {
+			what = "images"
+		}
+		body = fmt.Sprintf("(%s replied with %s and no text)", label, what)
+	}
+	body += tail
 
 	ids := w.attachImages(ctx, req, conv, &body)
 	if missing != "" {

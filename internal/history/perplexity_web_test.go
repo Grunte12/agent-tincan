@@ -36,6 +36,9 @@ type perplexityBrowser struct {
 	// maxEntries, when set, is the extension's page cap: a longer thread
 	// shows only its first maxEntries entries, with more set.
 	maxEntries int
+	// repeat, when set, answers with the question repeated that many
+	// times, for answers longer than a message may be.
+	repeat int
 }
 
 type pxTurn struct {
@@ -100,9 +103,13 @@ func (p *perplexityBrowser) Exchange(_ context.Context, req NativeRequest, recv 
 		}
 		n := len(p.threads[slug])
 		now := time.Now()
+		said := req.Args.Message
+		if p.repeat > 0 {
+			said = strings.Repeat(said, p.repeat)
+		}
 		p.threads[slug] = append(p.threads[slug], &pxTurn{
 			id: fmt.Sprintf("0e1d0000-0000-4000-9000-%09d%03d", 100+p.seq, n), query: req.Args.Message,
-			answer: "Perplexity says: " + req.Args.Message + " [1]",
+			answer: "Perplexity says: " + said + " [1]",
 			at:     now, lag: p.lag, pending: p.pending, streaming: p.streaming,
 		})
 		res, _ := json.Marshal(SendResult{ConversationID: slug, URL: "https://www.perplexity.ai/search/" + slug, SubmittedAt: now.UnixMilli()})
@@ -292,8 +299,9 @@ func TestPerplexityWebOversizedSources(t *testing.T) {
 	}
 }
 
-// A long answer gives way so the sources list and footer stay inside the
-// cap.
+// A long answer gives way so the whole reply (the cut text, the
+// truncation notice, the sources list, a note and the conversation
+// footer) stays inside the cap.
 func TestPerplexityWebSourcesKeptInsideCap(t *testing.T) {
 	rig, p := perplexityRig(t)
 	p.sources = pxSources(3)
@@ -302,12 +310,20 @@ func TestPerplexityWebSourcesKeptInsideCap(t *testing.T) {
 	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "- [3] Source 3 https://example.com/3") {
 		t.Fatalf("%s %d bytes", res.Status, len(body))
 	}
-	// The fake doubles nothing, so give it an answer over the cap.
-	rr := webReply{text: strings.Repeat("y", maxWebReplyBytes+100), sources: []webSource{{n: 1, title: "S", url: "https://example.com/s"}}}
-	footer := sourcesFooter(rr.sources)
-	capped, truncated := capReplyTo(rr.text, maxWebReplyBytes-len(footer))
-	if !truncated || len(capped)+len(footer) > maxWebReplyBytes {
-		t.Fatalf("cap: %d + %d", len(capped), len(footer))
+	// An answer over the cap.
+	p.repeat = 3
+	res = rig.ask(t, "codex", strings.Repeat("y", 30<<10))
+	body = res.Reply.Body
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s %q", res.Status, body[:min(len(body), 200)])
+	}
+	for _, part := range []string{"(reply truncated: showing ", "- [3] Source 3 https://example.com/3", "\n\nPerplexity conversation: "} {
+		if !strings.Contains(body, part) {
+			t.Fatalf("reply lacks %q:\n%s", part, body[max(len(body)-600, 0):])
+		}
+	}
+	if len(body) > maxWebReplyBytes {
+		t.Fatalf("reply is %d bytes, over the %d byte cap", len(body), maxWebReplyBytes)
 	}
 }
 
