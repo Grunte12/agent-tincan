@@ -136,7 +136,7 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check bool, out i
 	}
 	done = true
 	fmt.Fprintf(out, "Upgraded %s from tincan %s to %s.\n", exe, current, available)
-	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.ProcessAlive))
+	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.LaunchRunning))
 	return nil
 }
 
@@ -144,13 +144,13 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check bool, out i
 // onto the new build. Each app reloads tincan mcp its own way, so running
 // servers on another build are named with their app's step; with none
 // recorded, the step for every app is listed.
-func reloadAdvice(ls []mcpserver.Launch, newVersion string, alive func(int) bool) string {
+func reloadAdvice(ls []mcpserver.Launch, newVersion string, running func(mcpserver.Launch) bool) string {
 	var b strings.Builder
 	b.WriteString("Restart any long-running tincan processes (tincan wait or listen loops, tincan mcp servers) so they run the new build.\n")
 	newVersion = strings.TrimPrefix(newVersion, "v")
 	var stale []string
 	for _, l := range ls {
-		if !l.Ended.IsZero() || l.Version == "" || strings.TrimPrefix(l.Version, "v") == newVersion || !alive(l.PID) {
+		if !l.Ended.IsZero() || l.Version == "" || strings.TrimPrefix(l.Version, "v") == newVersion || !running(l) {
 			continue
 		}
 		who := l.Client
@@ -161,7 +161,7 @@ func reloadAdvice(ls []mcpserver.Launch, newVersion string, alive func(int) bool
 		stale = append(stale, fmt.Sprintf("  %s (pid %d, tincan %s): %s\n", who, l.PID, l.Version, mcpserver.ReloadStep(kind)))
 	}
 	if len(stale) > 0 {
-		b.WriteString("These tincan mcp servers still run the old build:\n")
+		b.WriteString("These tincan mcp servers still run the build they started with:\n")
 		for _, s := range stale {
 			b.WriteString(s)
 		}

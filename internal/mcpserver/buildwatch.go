@@ -66,23 +66,24 @@ type BuildWatch struct {
 
 	mu       sync.Mutex
 	lastLook time.Time
-	stamp    fileStamp // the file as last looked at
-	disk     string    // version of the file at stamp; "" until one is read
+	stamp    os.FileInfo // the file as last looked at; nil if it was missing
+	disk     string      // version of the file at stamp; "" until one is read
+	reading  bool        // a version read is running outside mu
 	told     map[string]bool
 }
 
-type fileStamp struct {
-	mod  time.Time
-	size int64
-	ok   bool
-}
-
-func stampOf(path string) fileStamp {
+func stampOf(path string) os.FileInfo {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return fileStamp{}
+		return nil
 	}
-	return fileStamp{mod: fi.ModTime(), size: fi.Size(), ok: true}
+	return fi
+}
+
+// sameFile reports whether b is the file a was: the same file (tincan
+// upgrade renames a new one into place), size and modification time.
+func sameFile(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 // NewBuildWatch watches path, the binary running as build running. It
@@ -126,21 +127,29 @@ func (w *BuildWatch) Notice(ctx context.Context, kind string) string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.Now()
-	if !w.lastLook.IsZero() && now.Sub(w.lastLook) < w.Every {
+	if w.reading || (!w.lastLook.IsZero() && now.Sub(w.lastLook) < w.Every) {
 		return ""
 	}
 	w.lastLook = now
 	st := stampOf(w.path)
-	if !st.ok {
+	if st == nil {
 		return ""
 	}
-	if st != w.stamp {
+	if !sameFile(st, w.stamp) {
+		// Run the new file without holding mu, so other tool calls go on
+		// meanwhile; they skip the look while this read runs.
+		w.reading = true
+		w.mu.Unlock()
 		v, err := w.ReadVersion(ctx, w.path)
+		w.mu.Lock()
+		w.reading = false
+		// Either way this file has been looked at: a build that cannot
+		// report its version is not run again until it is replaced.
+		w.stamp = st
 		if err != nil {
-			// A half-written file or a failed run: look again next time.
 			return ""
 		}
-		w.stamp, w.disk = st, strings.TrimPrefix(strings.TrimSpace(v), "v")
+		w.disk = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	}
 	running := strings.TrimPrefix(w.running, "v")
 	if w.disk == "" || w.disk == running || w.told[w.disk] {

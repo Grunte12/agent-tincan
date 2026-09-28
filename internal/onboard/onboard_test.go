@@ -568,12 +568,12 @@ func TestInstructionsNameMCPReloadPerKind(t *testing.T) {
 	}
 	for kind, want := range cases {
 		k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "a", Wake: "none", Kind: kind}}})
-		if got := block(t, k, "a").Instructions; !strings.Contains(got, want) || !strings.Contains(got, "older build") {
+		if got := block(t, k, "a").Instructions; !strings.Contains(got, want) || !strings.Contains(got, "different build") {
 			t.Errorf("%s instructions lack %q: %s", kind, want, got)
 		}
 	}
 	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "a", Wake: "none", Kind: KindChatGPT}}})
-	if got := block(t, k, "a").Instructions; strings.Contains(got, "older build") {
+	if got := block(t, k, "a").Instructions; strings.Contains(got, "different build") {
 		t.Errorf("chatgpt runs no local tincan mcp but was told to reload one: %s", got)
 	}
 }

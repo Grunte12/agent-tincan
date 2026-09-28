@@ -55,7 +55,7 @@ It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, a self-test of tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
-and whether a running tincan mcp is still on an older build than this
+and whether a running tincan mcp is on a different build than this
 binary, as after tincan upgrade until the app reloads it.
 
 Exit status is 1 when a check fails.`,
@@ -172,8 +172,8 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	}
 	add(launchCheck(rep.Launches, time.Now()))
 
-	// 6. tincan mcp servers left on an older build by an upgrade.
-	add(buildCheck(launches, mcpserver.ProcessAlive))
+	// 6. tincan mcp servers left on another build by an upgrade.
+	add(buildCheck(launches, mcpserver.LaunchRunning))
 
 	rep.OK = true
 	hostProblem := false
@@ -410,18 +410,19 @@ func launchCheck(ls []mcpserver.Launch, now time.Time) check {
 	return check{name, "ok", detail, ""}
 }
 
-// buildCheck finds tincan mcp servers still running with an older build
+// buildCheck finds tincan mcp servers still running a different build
 // than this binary, the state tincan upgrade leaves behind until each app
 // reloads its server: the tools keep the old behavior, and a host can show
-// 0 tools after a partial restart. alive says whether a recorded pid still
-// runs.
-func buildCheck(ls []mcpserver.Launch, alive func(int) bool) check {
+// 0 tools after a partial restart. The builds are called different, not
+// older, since a relay can roll a release back. running says whether a
+// recorded server still runs.
+func buildCheck(ls []mcpserver.Launch, running func(mcpserver.Launch) bool) check {
 	const name = "mcp builds"
 	var stale []string
 	var steps []string
 	seen := map[string]bool{}
 	for _, l := range ls {
-		if !l.Ended.IsZero() || l.Version == "" || l.Version == Version || !alive(l.PID) {
+		if !l.Ended.IsZero() || l.Version == "" || l.Version == Version || !running(l) {
 			continue
 		}
 		who := l.Client
@@ -436,13 +437,13 @@ func buildCheck(ls []mcpserver.Launch, alive func(int) bool) check {
 		}
 	}
 	if len(stale) == 0 {
-		return check{name, "ok", "no running tincan mcp is on an older build than this binary (" + Version + ")", ""}
+		return check{name, "ok", "no running tincan mcp is on a different build than this binary (" + Version + ")", ""}
 	}
 	servers := "servers are"
 	if len(stale) == 1 {
 		servers = "server is"
 	}
-	return check{name, "warn", fmt.Sprintf("%d running tincan mcp %s on an older build than this binary (%s): %s",
+	return check{name, "warn", fmt.Sprintf("%d running tincan mcp %s on a different build than this binary (%s): %s",
 		len(stale), servers, Version, strings.Join(stale, "; ")),
 		"Reload each so it starts the new build. " + strings.Join(steps, ". ") + "."}
 }

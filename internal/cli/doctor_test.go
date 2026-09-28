@@ -37,12 +37,12 @@ func TestLaunchCheck(t *testing.T) {
 	}
 }
 
-// Doctor names every tincan mcp still running an older build than this
+// Doctor names every tincan mcp still running a different build than this
 // binary, with the reload step for the app that runs it. Ended launches and
 // dead processes do not count.
 func TestBuildCheck(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
-	alive := func(pid int) bool { return pid != 99 }
+	alive := func(l mcpserver.Launch) bool { return l.PID != 99 }
 	cur := Version
 	ls := []mcpserver.Launch{
 		{Started: now, PID: 10, Client: "claude-code 2.0.1", Version: "0.1.0"},

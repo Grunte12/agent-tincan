@@ -187,7 +187,7 @@ func TestUpgradeWithoutDist(t *testing.T) {
 // After an upgrade, tincan names each tincan mcp still on the old build and
 // how its app reloads it; with none running it lists the step per app.
 func TestReloadAdvice(t *testing.T) {
-	alive := func(int) bool { return true }
+	alive := func(mcpserver.Launch) bool { return true }
 	ls := []mcpserver.Launch{
 		{PID: 10, Client: "claude-code 2.0.1", Version: "0.3.0"},
 		{PID: 11, Client: "cursor-vscode 1", Version: "0.4.0"},

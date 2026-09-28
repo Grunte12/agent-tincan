@@ -191,3 +191,77 @@ func TestReloadStepPerKind(t *testing.T) {
 		}
 	}
 }
+
+// tincan upgrade renames a new file into place, so even a build of the same
+// size and modification time is seen as a replacement.
+func TestReplacementWithSameStampIsSeen(t *testing.T) {
+	b := newFakeBinary(t, "0.6.0")
+	w := b.watch("0.6.0")
+	w.Notice(t.Context(), mcpserver.HostGeneric)
+	before, err := os.Stat(b.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.replace(t, "0.7.0") // "tincan build 0.7.0" is as long as the old content
+	if err := os.Chtimes(b.path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	b.advance(2 * time.Minute)
+	if n := w.Notice(t.Context(), mcpserver.HostGeneric); !strings.Contains(n, "tincan 0.7.0") {
+		t.Fatalf("same-stamp replacement missed: %q", n)
+	}
+}
+
+// A build that cannot report its version is run once, not on every look.
+func TestFailedVersionReadNotRepeated(t *testing.T) {
+	b := newFakeBinary(t, "0.6.0")
+	w := b.watch("0.6.0")
+	w.ReadVersion = func(context.Context, string) (string, error) {
+		b.execs.Add(1)
+		return "", context.DeadlineExceeded
+	}
+	w.Notice(t.Context(), mcpserver.HostGeneric)
+	b.replace(t, "0.7.0")
+	for range 3 {
+		b.advance(2 * time.Minute)
+		if n := w.Notice(t.Context(), mcpserver.HostGeneric); n != "" {
+			t.Fatalf("notice without a version: %q", n)
+		}
+	}
+	if n := b.execs.Load(); n != 1 {
+		t.Fatalf("ran the binary %d times, want 1", n)
+	}
+}
+
+// Other tool calls go on while one of them reads a new build's version.
+func TestVersionReadDoesNotBlockOtherCalls(t *testing.T) {
+	b := newFakeBinary(t, "0.6.0")
+	w := b.watch("0.6.0")
+	w.Notice(t.Context(), mcpserver.HostGeneric)
+	started, release := make(chan struct{}), make(chan struct{})
+	w.ReadVersion = func(context.Context, string) (string, error) {
+		close(started)
+		<-release
+		return "0.7.0", nil
+	}
+	b.replace(t, "0.7.0")
+	b.advance(2 * time.Minute)
+	got := make(chan string, 1)
+	go func() { got <- w.Notice(t.Context(), mcpserver.HostGeneric) }()
+	<-started
+	b.advance(2 * time.Minute)
+	done := make(chan string, 1)
+	go func() { done <- w.Notice(t.Context(), mcpserver.HostGeneric) }()
+	select {
+	case n := <-done:
+		if n != "" {
+			t.Fatalf("second call during the read gave %q", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a tool call waited on another call's version read")
+	}
+	close(release)
+	if n := <-got; !strings.Contains(n, "tincan 0.7.0") {
+		t.Fatalf("reading call gave %q", n)
+	}
+}

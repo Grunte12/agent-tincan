@@ -215,11 +215,31 @@ func launchFiles(dir string) []string {
 	return names
 }
 
+// keepRunning bounds how many records of still-running servers prune keeps
+// past keepLaunches.
+const keepRunning = 50
+
+// prune removes the oldest records beyond keepLaunches, but keeps those of
+// servers still running, so doctor and upgrade can name a long-lived server
+// on an old build however many launches came after it.
 func prune(dir string) {
 	names := launchFiles(dir)
-	for len(names) > keepLaunches {
-		_ = os.Remove(filepath.Join(dir, names[0]))
-		names = names[1:]
+	excess := len(names) - keepLaunches
+	kept := 0
+	for _, name := range names {
+		if excess <= 0 {
+			break
+		}
+		path := filepath.Join(dir, name)
+		if kept < keepRunning {
+			var l Launch
+			if raw, err := os.ReadFile(path); err == nil && json.Unmarshal(raw, &l) == nil && LaunchRunning(l) {
+				kept++
+				continue
+			}
+		}
+		_ = os.Remove(path)
+		excess--
 	}
 }
 

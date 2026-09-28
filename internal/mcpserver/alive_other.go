@@ -2,6 +2,6 @@
 
 package mcpserver
 
-// ProcessAlive cannot check here, so every recorded process counts as
-// running.
-func ProcessAlive(pid int) bool { return pid > 0 }
+// LaunchRunning cannot check processes here, so every record without an
+// end counts as running.
+func LaunchRunning(l Launch) bool { return l.Ended.IsZero() && l.PID > 0 }

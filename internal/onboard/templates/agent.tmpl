@@ -45,7 +45,7 @@ At the start of each turn, call check_inbox (or run tincan inbox) to pick up wai
 If a request asks you to spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first.
 When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell {{.Owner}} if you cannot.
 {{- if ne .Kind "chatgpt"}}
-Your tincan MCP server keeps running the older build after tincan upgrade until {{template "mcpreload" .}}. Do that when a tool result or tincan doctor says your tincan mcp runs an older build than the binary.
+Your tincan MCP server keeps running the build it started with after tincan upgrade until {{template "mcpreload" .}}. Do that when a tool result or tincan doctor says your tincan mcp runs a different build than the binary.
 {{- end}}
 {{template "instructions.selfheal" .}}
 {{- end -}}
