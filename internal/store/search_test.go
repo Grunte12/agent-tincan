@@ -256,3 +256,51 @@ func TestSearchHidesHeldUntilApproved(t *testing.T) {
 		t.Fatalf("approved request hidden: %+v, %v", hits, err)
 	}
 }
+
+func TestSearchLabelsClarificationQuestions(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := t.Context()
+	req := ask(t, s, "a", "b", "book dinner")
+	question := envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which restaurant?"}
+	claimAndAsk := func() {
+		t.Helper()
+		if _, err := s.Claim(ctx, req.ID, "b", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Reply(ctx, req.ID, "b", question); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantQuestion := func(step string, status envelope.Status) {
+		t.Helper()
+		hits, err := s.Search(ctx, "restaurant", "a", 20)
+		if err != nil || len(hits) != 1 || hits[0].Status != status || hits[0].ReplySnippet != "" || !strings.Contains(hits[0].QuestionSnippet, "[restaurant]") {
+			t.Fatalf("%s: %+v, %v", step, hits, err)
+		}
+	}
+	claimAndAsk()
+	wantQuestion("waiting", envelope.StatusNeedsInput)
+	if _, err := s.Answer(ctx, req.ID, "a", "Nopa"); err != nil {
+		t.Fatal(err)
+	}
+	wantQuestion("answered question", envelope.StatusQueued)
+	if _, err := s.Reply(ctx, req.ID, "b", envelope.Reply{Status: envelope.StatusAnswered, Body: "booked Nopa"}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(ctx, "Nopa", "a", 20)
+	if err != nil || len(hits) != 1 || !strings.Contains(hits[0].ReplySnippet, "[Nopa]") || hits[0].QuestionSnippet != "" {
+		t.Fatalf("final reply: %+v, %v", hits, err)
+	}
+
+	// A question left waiting when the request expires is history, not a reply.
+	req = ask(t, s, "a", "b", "book lunch")
+	claimAndAsk()
+	c.advance(2 * time.Hour)
+	if _, err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hits, err = s.Search(ctx, "restaurant", "a", 20)
+	if err != nil || len(hits) != 1 || hits[0].RequestID != req.ID || hits[0].Status != envelope.StatusExpired || hits[0].ReplySnippet != "" || !strings.Contains(hits[0].QuestionSnippet, "[restaurant]") {
+		t.Fatalf("expired: %+v, %v", hits, err)
+	}
+}

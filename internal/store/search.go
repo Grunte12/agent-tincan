@@ -159,8 +159,12 @@ const searchExcerpts = `
 // and returns at most limit results, newest request first.
 func (s *Store) searchRows(ctx context.Context, candidates string, limit int, args ...any) ([]envelope.SearchResult, error) {
 	out := []envelope.SearchResult{}
+	// The index keeps the last text stored as the reply. A clarification
+	// question stays there after it is answered (its reply row is removed)
+	// or after the request expires while waiting, so only a final reply's
+	// match is a reply excerpt; any other is the question's.
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.trace_id, r.from_agent, r.to_agent, r.status, r.created_at,
- c.snippet, c.reply_snippet, r.attachments, COALESCE(p.attachments, '')
+ c.snippet, c.reply_snippet, p.request_id IS NULL OR p.status = 'needs_input', r.attachments, COALESCE(p.attachments, '')
  FROM (`+candidates+`) c JOIN requests r ON r.rowid = c.rowid
  LEFT JOIN replies p ON p.request_id = r.id
  ORDER BY r.rowid DESC LIMIT ?`, append(args, limit)...)
@@ -172,8 +176,12 @@ func (s *Store) searchRows(ctx context.Context, candidates string, limit int, ar
 		var hit envelope.SearchResult
 		var created int64
 		var requestAttachments, replyAttachments string
-		if err := rows.Scan(&hit.RequestID, &hit.TraceID, &hit.From, &hit.To, &hit.Status, &created, &hit.Snippet, &hit.ReplySnippet, &requestAttachments, &replyAttachments); err != nil {
+		var question bool
+		if err := rows.Scan(&hit.RequestID, &hit.TraceID, &hit.From, &hit.To, &hit.Status, &created, &hit.Snippet, &hit.ReplySnippet, &question, &requestAttachments, &replyAttachments); err != nil {
 			return nil, err
+		}
+		if question {
+			hit.QuestionSnippet, hit.ReplySnippet = hit.ReplySnippet, ""
 		}
 		hit.CreatedAt = time.UnixMilli(created).UTC()
 		for _, raw := range []string{requestAttachments, replyAttachments} {
