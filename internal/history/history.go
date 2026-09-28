@@ -37,8 +37,9 @@ const (
 	SourceClaudeAI   Source = "claude-ai"
 )
 
-// Sources lists every valid Source.
-var Sources = []Source{SourceChatGPT, SourceClaudeAI, SourceCodex, SourceClaudeCode}
+// Sources lists every valid Source: the live sites, in the site table's
+// order, then the local sources.
+var Sources = append(siteSources(), SourceCodex, SourceClaudeCode)
 
 // Mode is what a query asks for.
 type Mode string

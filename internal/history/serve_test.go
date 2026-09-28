@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -178,7 +180,7 @@ func (r *serveRig) ask(t *testing.T, from, body string) client.Result {
 	t.Helper()
 	ctx := t.Context()
 	c := r.mesh.Client(t, from)
-	req, err := c.Send(ctx, "history", body, envelope.KindAsk, "")
+	req, err := c.Send(ctx, "history", body, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,14 +267,14 @@ func forwardViaCodex(t *testing.T, m *testrelay.Mesh, agent, question string) (*
 	t.Helper()
 	ctx := t.Context()
 	muse, codex := m.Client(t, "muse"), m.Client(t, "codex")
-	orig, err := muse.Send(ctx, "codex", "ask "+agent+" for me", envelope.KindAsk, "")
+	orig, err := muse.Send(ctx, "codex", "ask "+agent+" for me", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := codex.Claim(ctx, orig.ID); err != nil {
 		t.Fatal(err)
 	}
-	fwd, err := codex.Send(ctx, agent, question, envelope.KindAsk, orig.ID)
+	fwd, err := codex.Send(ctx, agent, question, envelope.KindAsk, orig.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +537,7 @@ func TestServeRunSurvivesBadRequestAndStopsOnCancel(t *testing.T) {
 	rig.chatgpt.mu.Lock()
 	rig.chatgpt.err = errors.New("disk on fire")
 	rig.chatgpt.mu.Unlock()
-	bad, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "")
+	bad, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +548,7 @@ func TestServeRunSurvivesBadRequestAndStopsOnCancel(t *testing.T) {
 	rig.chatgpt.mu.Lock()
 	rig.chatgpt.err = nil
 	rig.chatgpt.mu.Unlock()
-	good, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "")
+	good, err := grok.Send(t.Context(), "history", "last ChatGPT prompt", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +928,7 @@ func TestServePresenceDuringSlowRequest(t *testing.T) {
 	)
 	rig.svc.Readers[SourceChatGPT] = hookReader{fakeReader: rig.chatgpt, before: func(ctx context.Context) {
 		start = time.Now()
-		q, err := codex.Send(ctx, "history", "a second question", envelope.KindAsk, "")
+		q, err := codex.Send(ctx, "history", "a second question", envelope.KindAsk, "", false)
 		if err != nil {
 			t.Error(err)
 		}
@@ -1165,5 +1167,49 @@ func assertStructuredHelp(t *testing.T, body string) {
 	}
 	if strings.Contains(body, "clearer question") {
 		t.Errorf("reply is the free-text clarifying text: %q", body)
+	}
+}
+
+func TestHistoryAnswersPingWithoutHandling(t *testing.T) {
+	rig := newServeRig(t, false)
+	if _, err := rig.svc.Relay.Peek(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	sender := rig.mesh.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "history", "", envelope.KindPing, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := rig.svc.PollOnce(t.Context())
+	if err != nil || n != 0 {
+		t.Fatalf("handled ping as work: %d %v", n, err)
+	}
+	res, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || res.Reply == nil || !strings.Contains(res.Reply.Body, "history-serve") {
+		t.Fatalf("pong: %+v %v", res, err)
+	}
+}
+
+func TestPollAndHandlePingFailurePreservesWork(t *testing.T) {
+	for _, status := range []int{409, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/poll" {
+					fmt.Fprint(w, `{"requests":[{"id":"ping","kind":"ping"},{"id":"work","kind":"ask","body":"real work"}]}`)
+					return
+				}
+				http.Error(w, `{"error":"ping failed"}`, status)
+			}))
+			defer ts.Close()
+			relay, err := client.NewRelay(ts.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var handled []string
+			n, err := pollAndHandle(t.Context(), relay, time.Second, "history-serve", func(_ context.Context, req envelope.Request) { handled = append(handled, req.ID) })
+			if err != nil || n != 1 || !slices.Equal(handled, []string{"work"}) {
+				t.Fatalf("handled %v (%d): %v", handled, n, err)
+			}
+		})
 	}
 }

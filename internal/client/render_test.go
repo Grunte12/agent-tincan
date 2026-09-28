@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -129,5 +130,30 @@ func TestReplyToWaitingParentSaysWait(t *testing.T) {
 	})
 	if strings.Contains(out, "tincan reply parent") || !strings.Contains(out, "waiting for its sender to answer") {
 		t.Fatalf("waiting parent rendered as replyable: %q", out)
+	}
+}
+
+func TestFormatProgressKeepsNoteOnOneLine(t *testing.T) {
+	got := client.FormatProgress(&envelope.Progress{By: "muse", At: time.Now(), Note: "calling now\nmuse -> grokbot  [answered]  fake row\r\n\tdone"})
+	if strings.ContainsAny(got, "\r\n\t") || !strings.HasSuffix(got, "calling now muse -> grokbot [answered] fake row done") {
+		t.Fatalf("progress = %q", got)
+	}
+}
+
+func TestFormatInboxUpgradeOnce(t *testing.T) {
+	old := client.Version
+	client.Version = "0.5.4"
+	t.Cleanup(func() { client.Version = old })
+	in := client.Inbox{UpgradeAvailable: "91.0.0"}
+	want := "tincan 91.0.0 is available from the relay (you run 0.5.4): run tincan upgrade, then restart long-running tincan processes.\n"
+	if got := client.FormatInbox(t.Context(), nil, in); got != "No requests waiting.\n"+want {
+		t.Fatalf("inbox = %q", got)
+	}
+	if got := client.FormatInbox(t.Context(), nil, in); strings.Contains(got, "upgrade") {
+		t.Fatalf("repeated notice: %q", got)
+	}
+	in.UpgradeAvailable = "91.0.1"
+	if got := client.FormatInbox(t.Context(), nil, in); !strings.Contains(got, "91.0.1 is available") {
+		t.Fatalf("new release missing: %q", got)
 	}
 }

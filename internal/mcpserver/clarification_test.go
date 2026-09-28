@@ -12,7 +12,7 @@ import (
 func TestClarificationOverMCP(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	asker, handler := session(t, m, "grokbot"), session(t, m, "muse")
-	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "book dinner", envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "book dinner", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

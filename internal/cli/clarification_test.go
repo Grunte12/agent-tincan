@@ -19,7 +19,7 @@ func TestClarificationCLIAndWake(t *testing.T) {
 		wake.Options{ReplyGrace: time.Millisecond, UnseenReplies: m.Server.UnseenReplies, ReplyRetries: []time.Duration{}})
 	m.Server.SetEvents(w)
 	ctx := t.Context()
-	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "private dinner", envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "private dinner", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

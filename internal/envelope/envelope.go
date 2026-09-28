@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,10 +22,14 @@ const MaxInputBody = 16 << 10
 // MaxExchanges caps clarification rounds per request.
 const MaxExchanges = 3
 
+// MaxProgressNote caps a progress note in bytes.
+const MaxProgressNote = 1024
+
 // MaxAttachments caps how many attachments one request or reply carries.
 const MaxAttachments = 8
 
 var (
+	groupID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	// ErrBodyTooLarge is returned when a body exceeds the configured cap.
 	ErrBodyTooLarge = errors.New("body too large")
 	// ErrTooManyAttachments is returned when a message names more than
@@ -49,6 +54,8 @@ type Kind string
 const (
 	// KindAsk expects a reply.
 	KindAsk Kind = "ask"
+	// KindPing is answered automatically by the receiving client.
+	KindPing Kind = "ping"
 	// KindNotify is fire-and-forget; the target may still reply.
 	KindNotify Kind = "notify"
 )
@@ -57,6 +64,7 @@ const (
 type Status string
 
 const (
+	StatusHeld       Status = "held"
 	StatusQueued     Status = "queued"
 	StatusDelivered  Status = "delivered"
 	StatusClaimed    Status = "claimed"
@@ -77,6 +85,8 @@ func (s Status) Terminal() bool {
 type Request struct {
 	Exchanges []Exchange `json:"exchanges,omitempty"`
 	Resumed   bool       `json:"resumed,omitempty"`
+	Group     string     `json:"group,omitempty"`
+	Urgent    bool       `json:"urgent,omitempty"`
 	ID        string     `json:"id,omitempty"`
 	From      string     `json:"from,omitempty"`
 	To        string     `json:"to"`
@@ -91,12 +101,39 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// Progress is store metadata; the wire exposes it on Result.
+	Progress *Progress `json:"-"`
+
+	// Status is set on held sends; omitted for ordinary requests.
+	Status Status `json:"status,omitempty"`
+	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
+	HoldTTL        time.Duration `json:"-"`
+	ApprovalNotify string        `json:"-"`
+	// WasHeld and Approved are persisted relay-only approval history.
+	WasHeld  bool `json:"-"`
+	Approved bool `json:"-"`
+}
+
+// RedactFor hides content that the owner has never released to other agents.
+func (r *Request) RedactFor(agent string) {
+	if r.WasHeld && !r.Approved && r.From != agent {
+		r.Body = "waiting for the owner's approval"
+		r.Attachments = nil
+	}
+}
+
+// GroupMember identifies a request without fetching its result or marking replies seen.
+type GroupMember struct {
+	ID string `json:"id"`
+	To string `json:"to"`
 }
 
 // Pending names a queued request without its body, as a peek reports it.
 type Pending struct {
-	ID   string `json:"id"`
-	From string `json:"from"`
+	Kind   Kind   `json:"kind,omitempty"`
+	Urgent bool   `json:"urgent,omitempty"`
+	ID     string `json:"id"`
+	From   string `json:"from"`
 }
 
 // ReplyAck identifies a specific reply generation for acknowledgement.
@@ -116,9 +153,17 @@ type Reply struct {
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
 }
 
+// Progress is the latest note from the agent handling a request.
+type Progress struct {
+	Note string    `json:"note"`
+	At   time.Time `json:"at"`
+	By   string    `json:"by"`
+}
+
 // Result is a request with its current status and reply, if any. The relay
 // returns it for get-reply and for each step of a trace.
 type Result struct {
+	Progress  *Progress  `json:"progress,omitempty"`
 	Exchanges []Exchange `json:"exchanges,omitempty"`
 	Request   Request    `json:"request"`
 	Status    Status     `json:"status"`
@@ -163,6 +208,8 @@ func (r Result) Done() bool {
 
 // sendInput is the only part of a send the relay accepts from a client.
 type sendInput struct {
+	Group       string       `json:"group"`
+	Urgent      bool         `json:"urgent"`
 	To          string       `json:"to"`
 	Body        string       `json:"body"`
 	Kind        Kind         `json:"kind"`
@@ -178,13 +225,16 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Request{}, fmt.Errorf("decode send: %w", err)
 	}
+	if in.Group != "" && !groupID.MatchString(in.Group) {
+		return Request{}, errors.New("send: invalid group id")
+	}
 	in.To = strings.TrimSpace(in.To)
 	switch {
 	case in.To == "":
 		return Request{}, errors.New("send: to is required")
 	case in.To == sender:
 		return Request{}, errors.New("send: an agent cannot send to itself")
-	case in.Body == "" && len(in.Attachments) == 0:
+	case in.Kind != KindPing && in.Body == "" && len(in.Attachments) == 0:
 		return Request{}, errors.New("send: body is required")
 	case len(in.Body) > maxBody:
 		return Request{}, fmt.Errorf("send: %w (%d > %d bytes)", ErrBodyTooLarge, len(in.Body), maxBody)
@@ -192,6 +242,11 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	switch in.Kind {
 	case "":
 		in.Kind = KindAsk
+	case KindPing:
+		if len(in.Body) > 4 || in.ParentID != "" || len(in.Attachments) != 0 {
+			return Request{}, errors.New("send: ping requires no parent or attachments and at most 4 body bytes")
+		}
+		in.Body = ""
 	case KindAsk, KindNotify:
 	default:
 		return Request{}, fmt.Errorf("send: unknown kind %q", in.Kind)
@@ -200,7 +255,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
+	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
 }
 
 // attachmentIDs keeps only the ids a client names, checking the count and
@@ -262,4 +317,17 @@ func ParseReply(raw []byte, maxBody int) (Reply, error) {
 		return Reply{}, fmt.Errorf("reply: %w", err)
 	}
 	return Reply{Status: in.Status, Body: in.Body, Attachments: atts}, nil
+}
+
+// SearchResult is a matching request or reply excerpt, without full bodies or files.
+type SearchResult struct {
+	RequestID       string    `json:"request_id"`
+	TraceID         string    `json:"trace_id"`
+	From            string    `json:"from"`
+	To              string    `json:"to"`
+	Status          Status    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	Snippet         string    `json:"snippet,omitempty"`
+	ReplySnippet    string    `json:"reply_snippet,omitempty"`
+	AttachmentNames []string  `json:"attachment_names,omitempty"`
 }

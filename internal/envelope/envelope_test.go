@@ -210,3 +210,67 @@ func TestAttachmentJSONShape(t *testing.T) {
 		t.Fatalf("json = %s", raw)
 	}
 }
+
+func TestSendGroupValidation(t *testing.T) {
+	for _, group := range []string{"group-abc_123", "", "../bad", "a/b", strings.Repeat("x", 65)} {
+		raw, _ := json.Marshal(map[string]string{"to": "other", "body": "hello", "group": group})
+		req, err := ParseSend(raw, "sender", DefaultMaxBody)
+		valid := group == "" || group == "group-abc_123"
+		if valid && (err != nil || req.Group != group) {
+			t.Fatalf("%q: %+v %v", group, req, err)
+		}
+		if !valid && err == nil {
+			t.Fatalf("accepted %q", group)
+		}
+	}
+}
+
+func TestParseSendUrgent(t *testing.T) {
+	for _, tc := range []struct {
+		raw    string
+		urgent bool
+	}{
+		{`{"to":"target","body":"x","urgent":true}`, true},
+		{`{"to":"target","body":"x"}`, false},
+	} {
+		req, err := ParseSend([]byte(tc.raw), "sender", DefaultMaxBody)
+		if err != nil || req.Urgent != tc.urgent {
+			t.Fatalf("request = %+v, %v", req, err)
+		}
+	}
+	if _, err := ParseSend([]byte(`{"to":"target","body":"x","urgent":"true"}`), "sender", DefaultMaxBody); err == nil {
+		t.Fatal("accepted non-boolean urgent")
+	}
+}
+
+func TestPendingUrgentJSONShape(t *testing.T) {
+	for _, urgent := range []bool{false, true} {
+		raw, err := json.Marshal(Pending{ID: "r1", From: "sender", Urgent: urgent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["urgent"]
+		if present != urgent || (urgent && value != true) {
+			t.Fatalf("urgent=%v: unexpected JSON %s", urgent, raw)
+		}
+	}
+}
+
+func TestParsePing(t *testing.T) {
+	for _, raw := range []string{
+		`{"to":"other","kind":"ping","parent_id":"parent"}`,
+		`{"to":"other","kind":"ping","body":"too long"}`,
+		`{"to":"other","kind":"ping","attachments":[{"id":"file"}]}`,
+	} {
+		if _, err := ParseSend([]byte(raw), "sender", DefaultMaxBody); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+	if req, err := ParseSend([]byte(`{"to":"other","kind":"ping"}`), "sender", DefaultMaxBody); err != nil || req.Kind != KindPing {
+		t.Fatalf("ping: %+v %v", req, err)
+	}
+}

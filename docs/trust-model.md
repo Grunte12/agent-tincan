@@ -10,6 +10,7 @@
 - Every send, delivery, claim, reply, rejection, wake, join, rebind, and removal is written to an append-only, hash-chained log. `tincan audit-verify` detects edits.
 - Wake nudges carry only a count and an instruction, never request text.
 - Clarification does not add a trust boundary: only a request's claimed target can ask for input, and only its original sender can answer. Questions and answers stay on the same request, with the same chain and hop rules. They are bodies like other messages: readable by the relay, absent from wake messages, and represented only by byte lengths in clarification audit details.
+- Search has the same visibility as trace: joined agents can search requests and replies only in chains they took part in; admins can search every chain. Visibility is unchanged. Search indexes existing stored bodies, not attachment contents, and results include only attachment names. A `search` audit event records the result count, never query text.
 
 ## Rebuilt machines
 
@@ -57,7 +58,7 @@ The `chatgpt-web` and `claude-web` agents act as the owner in ChatGPT and Claude
 
 ## What it deliberately does not do
 
-- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. There is no per-request approval.
+- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. By default there is no per-request approval; the optional owner gate below can hold requests to selected agents.
 - Tailscale is the security boundary. Anything that can act as a joined machine on your tailnet can make your other agents act. Protect your tailnet: use tagged, short-lived auth keys and review who can add devices.
 - The relay can read every request and reply. Run it on a machine you control.
 - `tincan upgrade` trusts the relay host. The sha256 it checks and the binary it installs both come from the same relay, so the check protects against corruption in transit, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into the relay's `--dist` directory.
@@ -70,4 +71,61 @@ If one agent reads untrusted content (a web page, an email, a document) and gets
 - Keep `tincan trace` handy so you can see who asked for what.
 - Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
-An optional "ask the owner first" gate is planned for setups that want one.
+## Owner approval gate
+
+The owner can create `approval.json` in the relay state directory, with mode
+0600, to hold incoming requests before chosen agents receive them:
+
+```json
+{"gate":{"muse":{"from":"*"},"instinct":{"from":["chatgpt","grokbot"]}},"notify":"grokbot","hold_ttl":"2h"}
+```
+
+A `from: "*"` rule holds every request to that target. A `from` list holds when
+any agent in the relay-recorded chain or the authenticated sender matches.
+An `unless` list instead holds when any member is absent from the list. Exactly
+one of `from` and `unless` is required per target. Client-supplied identities,
+chains and statuses cannot bypass the check, which runs after the relay's
+cycle, hop and rate checks and before delivery. Both asks and notifies are gated.
+
+A missing file disables the gate. The relay reloads changed files. Unreadable,
+malformed or group/world-accessible policies hold every request to every target
+in the last good copy, regardless of its previous sender restrictions. With no
+valid copy, a bad policy prevents startup; if it first appears while running,
+new sends fail until it is fixed. Removing the file disables gating for future
+sends; changing or removing it never releases already-held requests.
+
+Held requests neither wake their targets nor appear in their inboxes or queued
+counts. The sender sees `held`; the target cannot claim or reply to one. Only
+admin devices and the relay's local admin socket can run `tincan held`,
+`tincan approve <id>` or `tincan deny <id> [reason]` (with `--relay` or `--socket`).
+Approval queues and wakes normally, keeping the original creation time and
+starting a fresh delivery TTL. Denial returns `declined` with the reason.
+`hold_ttl` defaults to two hours; overdue holds become `expired` and cannot be
+approved. Senders can cancel a hold, and removing an agent cancels its holds.
+The audit log records `held`, `approved`, `denied`, and `hold_expired` transitions.
+
+If `notify` names a joined operator, the relay sends it a `notify` attributed to
+`relay`, with the sender, target, request id and owner commands, and no request
+text: the notified agent may itself be gated (even the held target), and
+unapproved text must not reach it. The owner reads the request with `tincan held`. This
+admin notice bypasses gating to avoid recursion, is logged as
+`approval_notified` (or `approval_notify_failed` on failure), and carries no
+approval authority. Notification
+failure leaves the original request held. The operator must never approve on
+another agent's request. Approval remains an action on an admin device or the
+local socket; the notice does not grant the receiving agent those powers.
+
+This gate adds a relay-enforced pause for owner review, not a judgment about
+whether the message is safe. Protect admin devices and the relay state directory.
+
+Requests retain whether they were ever held and whether the owner approved them.
+For every request that was held and never approved, only its sender and admins
+may read its body or attachments, regardless of its current status (including
+declined, expired and cancelled). Other callers, including the target, see
+`waiting for the owner's approval` and no attachment metadata wherever the
+request is otherwise visible: get, trace, search-like listings, poll and peek
+pending entries. Attachment downloads by those callers return 404. Held requests
+remain excluded from delivery; pending entries carry only ids and senders.
+An approved request follows the ordinary body and attachment access rules,
+even after it reaches a terminal state. Approval history survives relay restarts;
+upgrades backfill existing holds and decisions from request state and audit events.

@@ -40,7 +40,7 @@ func TestClarificationClientContext(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	asker, handler := m.Client(t, "grokbot"), m.Client(t, "muse")
 	ctx := t.Context()
-	req, err := asker.Send(ctx, "muse", "book dinner", envelope.KindAsk, "")
+	req, err := asker.Send(ctx, "muse", "book dinner", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
