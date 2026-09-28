@@ -38,6 +38,7 @@ func adminRelay(socket, relayURL string) (*client.Relay, error) {
 func traceCmd() *cobra.Command {
 	var socket, relayURL string
 	var limit int
+	var pings bool
 	cmd := &cobra.Command{
 		Use:   "trace [trace-id]",
 		Short: "Show who asked what: one request chain, or the most recent chains (admin)",
@@ -51,11 +52,15 @@ func traceCmd() *cobra.Command {
 				var out struct {
 					Traces []envelope.Result `json:"traces"`
 				}
-				if err := r.Raw(cmd.Context(), "GET", fmt.Sprintf("/v1/trace?limit=%d", limit), nil, &out); err != nil {
+				if err := r.Raw(cmd.Context(), "GET", fmt.Sprintf("/v1/trace?limit=%d&exclude_pings=%t", limit, !pings), nil, &out); err != nil {
 					return err
 				}
+				out.Traces = filterPingTraces(out.Traces, pings)
 				for _, st := range out.Traces {
-					cmd.Printf("%s  %s -> %s  %-9s %s\n", st.Request.TraceID, st.Request.From, st.Request.To, st.Status, oneLine(st.Request.Body))
+					if st.Progress != nil {
+						cmd.Printf("%s  %s\n", st.Request.TraceID, client.FormatProgress(st.Progress))
+					}
+					cmd.Printf("%s  %s -> %s  %-9s %s\n", st.Request.TraceID, st.Request.From, st.Request.To, st.Status, oneLine(string(st.Request.Kind)+" "+st.Request.Body))
 				}
 				if len(out.Traces) == 0 {
 					cmd.Println("No requests yet.")
@@ -66,12 +71,17 @@ func traceCmd() *cobra.Command {
 			if err := r.Raw(cmd.Context(), "GET", "/v1/trace/"+args[0], nil, &tr); err != nil {
 				return err
 			}
+			if !pings && len(tr.Steps) > 0 && tr.Steps[0].Request.Kind == envelope.KindPing {
+				cmd.Println("Ping hidden; use --pings to show it.")
+				return nil
+			}
 			cmd.Print(formatTrace(tr))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
+	cmd.Flags().BoolVar(&pings, "pings", false, "include ping checks")
 	cmd.Flags().IntVar(&limit, "limit", 20, "how many recent chains to list")
 	return cmd
 }
@@ -80,7 +90,10 @@ func formatTrace(tr traceResp) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Trace %s\n", tr.TraceID)
 	for _, st := range tr.Steps {
-		fmt.Fprintf(&b, "%s%s -> %s  [%s]  %s\n", strings.Repeat("  ", max(st.Request.Hop-1, 0)), st.Request.From, st.Request.To, st.Status, oneLine(st.Request.Body))
+		fmt.Fprintf(&b, "%s%s -> %s  [%s]  %s\n", strings.Repeat("  ", max(st.Request.Hop-1, 0)), st.Request.From, st.Request.To, st.Status, oneLine(string(st.Request.Kind)+" "+st.Request.Body))
+		if st.Progress != nil {
+			fmt.Fprintf(&b, "  %s\n", client.FormatProgress(st.Progress))
+		}
 		if st.Reply != nil {
 			fmt.Fprintf(&b, "%s  reply from %s: %s\n", strings.Repeat("  ", max(st.Request.Hop-1, 0)), st.Reply.From, oneLine(st.Reply.Body))
 		}
@@ -140,4 +153,17 @@ func localAdminSocket() string {
 		return p
 	}
 	return ""
+}
+
+func filterPingTraces(in []envelope.Result, pings bool) []envelope.Result {
+	if pings {
+		return in
+	}
+	var out []envelope.Result
+	for _, r := range in {
+		if r.Request.Kind != envelope.KindPing {
+			out = append(out, r)
+		}
+	}
+	return out
 }

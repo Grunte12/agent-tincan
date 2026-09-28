@@ -86,6 +86,17 @@ var defaultWake = map[string]string{
 	KindGeneric:      "none",
 }
 
+// freshSession lists the kinds whose every wake starts a fresh session with
+// no memory of the last one; their instructions carry instructions.fresh.
+// They commonly share a machine with another agent, so their tincan commands
+// carry a per-agent TINCAN_CONFIG and their rejoin names the agent. A new
+// command-woken CLI kind is added here, not to template conditions.
+var freshSession = map[string]bool{
+	KindHermes:   true,
+	KindOpenClaw: true,
+	KindCodex:    true,
+}
+
 // Member is one roster entry as the relay reports it.
 type Member struct {
 	Name   string `json:"name"`
@@ -137,6 +148,16 @@ const relayPlaceholder = "<relay-url>"
 type agentData struct {
 	Name, Kind, Wake, RelayURL, Owner, OwnerPoss string
 	Team                                         []string
+	// OwnConfig: every tincan command in the block carries TINCAN_CONFIG
+	// and the rejoin names the agent (fresh-session kinds and services).
+	OwnConfig bool
+	// Service: a Go service whose config file is named after its kind.
+	Service bool
+}
+
+func newAgentData(name, kind, wake, relay, owner string, team []string) agentData {
+	return agentData{Name: name, Kind: kind, Wake: wake, RelayURL: relay, Owner: owner, OwnerPoss: possessive(owner), Team: team,
+		OwnConfig: freshSession[kind] || isService(kind), Service: isService(kind)}
 }
 
 type teamLine struct {
@@ -191,7 +212,7 @@ func Build(o Options) (Kit, error) {
 			wake = defaultWake[kind]
 		}
 		wakes[wake] = true
-		d := agentData{Name: m.Name, Kind: kind, Wake: wake, RelayURL: relay, Owner: owner, OwnerPoss: possessive(owner), Team: others(names, m.Name)}
+		d := newAgentData(m.Name, kind, wake, relay, owner, others(names, m.Name))
 		b, err := agentBlock(d)
 		if err != nil {
 			return Kit{}, err
@@ -289,7 +310,7 @@ func agentBlock(d agentData) (AgentBlock, error) {
 func recipes(relay, owner string) ([]Recipe, error) {
 	var out []Recipe
 	for _, kind := range Kinds {
-		d := agentData{Name: "<name>", Kind: kind, Wake: defaultWake[kind], RelayURL: relay, Owner: owner, OwnerPoss: possessive(owner)}
+		d := newAgentData("<name>", kind, defaultWake[kind], relay, owner, nil)
 		title, err := execute("title."+kind, d)
 		if err != nil {
 			return nil, err

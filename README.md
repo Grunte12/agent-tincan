@@ -28,7 +28,7 @@ Contents:
 Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.
 
 - From your phone. In Grok Bot: "What did ChatGPT tell me about the lease last night? Send me the screenshot I asked about." The history agent finds the chat, and the image comes back as an attachment.
-- A second opinion. "Ask ChatGPT and Claude the same question and give me both answers side by side." chatgpt-web and claude-web each answer from your own accounts.
+- A second opinion. "Ask ChatGPT and Claude the same question and give me both answers side by side." Run `tincan ask chatgpt-web,claude-web "Your question"` to gather both answers from your own accounts under one group id.
 - Errands that report back. Grok Bot asks Muse to call the restaurant and book 7pm. Muse replies when it is done, and the reply wakes Grok Bot so it can tell you.
 - Follow-through. After Instinct pays the parking ticket, it tells Hermes, which can file the receipt and set a reminder to check that it cleared.
 - Code without the laptop. "Ask Codex whether the automation PR merged, and if CI failed, fix it." Codex, running on your Mac, answers with the PR link.
@@ -191,11 +191,13 @@ tincan invite grokbot --kind vm-webhook          # relay machine (or an admin de
 tincan join ABCD-EFGH --relay http://tincan-relay # agent's machine
 ```
 
-`invite` prints the code and the join command to run, with the relay URL filled in when it knows it (from `--relay` or a saved config). `--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). Inviting a name again retires the earlier code for it if that code was not used yet. `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
+`invite` prints the code and the join command to run, with the relay URL filled in when it knows it (from `--relay` or a saved config). `--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). The relay checks kinds against its own list, so a relay older than your tincan refuses a newer kind; tincan then says so and offers the fallback: upgrade the relay, or invite without `--kind` and pass `tincan onboard --kind <name>=<kind>`. Inviting a name again retires the earlier code for it if that code was not used yet. `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
 
-An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
+An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `search`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
+
+For long tasks, post progress when you start and at milestones. The latest note appears in `get_reply`, an `ask` that returns before the answer, and `tincan trace`: `claimed by muse, 4m0s ago: calling the restaurant now`. Each note renews the 30-minute claim lease. Notes do not wake the asker.
 
 ### Tools
 
@@ -207,33 +209,73 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 
 | MCP tool | CLI | What it does |
 |---|---|---|
-| `ask` | `tincan ask <agent> <message>` | Ask a teammate. Waits up to 20 seconds for the reply, otherwise returns a request id. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. `--json` prints JSON (see below). |
-| `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
+| `ask` | `tincan ask <agent[,agent...]> <message>` | Ask one or up to 8 distinct teammates. MCP uses `to: "a", also: ["b"]`. Waits up to 20 seconds, returning labeled replies and a group id for multiple targets. `urgent: true` (`--urgent`) marks time-critical requests. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. `--json` prints JSON (see below). |
+| `get_reply` | `tincan get <id>` | Check on a request or group you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
 | `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. `--json` prints JSON. |
 | `claim` | (done by `inbox`) | Mark a delivered request as yours. `check_inbox` already does this. |
-| `reply` | `tincan reply <id> <message>` | Answer a request with status `answered` (default), `failed` or `declined`, optionally with attachments. |
+| `progress` | `tincan progress <id> <note>` | Post a note (up to 1024 bytes) on your claimed request and renew its lease. |
+| `reply` | `tincan reply <id> <message>` | Answer with status `answered` (default), `failed` or `declined`, optionally with attachments. Use status `needs_input` (`--needs-input`) to ask a clarifying question. |
+| `answer` | `tincan answer <id> <message>` | Supply a clarification on a request you sent, resuming it for the same teammate. |
 | `cancel` | `tincan cancel <id>` | Withdraw a request nobody has picked up yet. |
-| `list_agents` | `tincan agents` | The roster: online or not, wake method, kind, when each agent last called the relay, and which tincan build each runs. |
+| `list_agents` | `tincan agents` | The roster: online or not, wake method, kind, when each agent last called the relay, which tincan build each runs, and queued work with its oldest wait and live claims. |
 | `trace` | `tincan trace [trace-id]` | Show a request chain step by step. Agents see chains they took part in; admins see every chain. |
+| `search` | `tincan search <text> [--limit N] [--json]` | Find past requests and replies by text, with snippets and trace ids. Same chain visibility as trace. |
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
 
+For several teammates, `get_reply` accepts the group id in `request_id`, and
+`tincan get <group-id>` gathers the replies again. Attachments upload separately
+for each target; `--notify` broadcasts without waiting. Group JSON contains
+`outcome`, `group`, and `results`: `answered` exits 0, `pending` or `partial`
+exits 2, and `failed` exits 1 when all requests have ended and any failed.
+Group text output uses the same exit codes. Rejected sends appear per target;
+successfully queued requests are still tracked. With an older relay, group
+lookup requires the original client instance (such as the same MCP server);
+a later CLI invocation must use the individual request ids. Send errors are
+retained only by that client instance. `GET /v1/groups/{id}` lists only accepted
+request membership (`id` and `to`), without bodies or replies and without marking
+replies seen; clients fetch results individually. Poll failures appear as an
+`error` on the affected result, preserving its id and last known status alongside
+successful replies. Group text output includes the group id and every accepted
+request id for follow-up.
+
+The relay accepts at most 8 requests per sender and group tag; further sends
+return HTTP 400. Membership lookups return at most 8 ids and targets.
+Clients reconcile relay membership with local send errors, recovering requests
+whose send response was lost while retaining errors for targets absent from the
+relay. Concurrent group polls preserve the most advanced cached status and replies.
+A multi-target MCP notification returns a tool error if any upload or send fails,
+with the per-target results included in its content.
+
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 
-- `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
-- `ask --notify --json` prints `{"outcome": "sent", "request": <request>}` and exits 0.
+- Single-target `ask` and `get` print `{"outcome": "answered|failed|pending", "result": <result>}`, where `result` is the request, its status and the reply (with attachments) as the relay returns them. The exit code is 0 when answered, 1 when the request ended any other way (`failed`, `declined`, `cancelled` or `expired`) and 2 when it is still pending.
+- Single-target `ask --notify --json` prints `{"outcome": "sent", "request": <request>}` and exits 0.
 - `inbox --json` prints `{"requests": [...], "replies": [...]}`. Each request carries `"claimed": true`, or `"claimed": false` with a `claim_error` when it could not be claimed, usually because another session got to it first. Replies are marked read only after the JSON is printed. When the relay held back more unread replies to keep the response small, `"replies_remaining"` gives their count (it is left out when zero); run `inbox --json` again to get them. It exits 0.
 - An error talking to the relay (unreachable, not joined, unknown request) prints nothing on stdout, keeps its message on stderr and exits 1.
 
-Without `--json` the text output and exit codes are unchanged.
+Single-target text output and exit codes are unchanged.
 
 Two more CLI commands keep an agent awake without a person: `tincan wait` and `tincan listen --exec` (see [Wake methods](#wake-methods)).
 
 ### Requests and replies
 
-A request carries a target, a body (up to 256 KB), an optional kind (`ask` or `notify`), and optional attachments. The relay sets everything else: the id, the sender (from Tailscale), the chain, and the time. A reply carries a status and a body (up to 256 KB).
+A request carries a target, a body (up to 256 KB), an optional kind (`ask` or `notify`), optional attachments, and an optional group tag. The relay sets everything else: the id, the sender (from Tailscale), the chain, and the time. A reply carries a status and a body (up to 256 KB).
 
 A request moves through `queued`, `delivered`, `claimed`, then one of `answered`, `failed`, `declined`, `cancelled` or `expired`. A claimed request whose 30 minute lease runs out goes back to `queued`. Unanswered requests expire after 24 hours. The wire format is in [docs/protocol.md](docs/protocol.md).
+
+If a teammate needs a detail only the asker has, it can reply with `needs_input`. The request stays open, its lease pauses, and the question reaches the asker through the usual reply inbox and wake. For example:
+
+```sh
+# Muse, after claiming the dinner request:
+tincan reply <id> --needs-input "Which restaurant and how many people?"
+# The original asker:
+tincan answer <id> "Nopa, 2 people"
+```
+
+The same request returns to Muse's inbox marked `resumed`, with its original body and the question and answer. Muse claims it and replies normally when done. The original 24-hour expiry keeps running. Each request allows three clarification rounds, with 16 KB per question or answer and no clarification attachments. MCP uses `reply` with `status: needs_input`, then `answer` with `request_id` and `message`. A request waiting for input is still `pending` in CLI JSON output (exit 2).
+
+The relay must advertise clarification support; new clients refuse these operations against an older relay. An older asker may display the question under the unfamiliar `needs_input` status: upgrade it to use `answer`.
 
 ### Chains and loop protection
 
@@ -270,9 +312,19 @@ An `ask` may return before the answer does, and the asker does not have to hold 
 
 ### Last seen
 
+A busy agent also shows `2 queued (oldest 14m), 1 claimed`. Queued includes delivered requests that have not been claimed; claimed counts only requests with a live lease. Expired and terminal requests and handled notifications are excluded. Idle agents show no extra fields. An online agent with a growing oldest wait may need attention even if it keeps polling.
+
 `tincan agents` (and `list_agents`) shows each agent's state, wake method, kind, and when it last called the relay by polling or by any send, reply or get ("last seen 12m ago", or "never seen"). A wait or listen loop that died shows up as a growing last seen. It also shows the tincan build each agent last called with (`version=0.5.2`), with the relay's own build on the first line, so an agent that still needs `tincan upgrade` stands out; the relay keeps the build across restarts and rejoins. An agent shows no version until it has called a relay that records them.
 
 ### Upgrades
+
+When the relay serves a newer release, `check_inbox`, `tincan inbox`, `tincan wait`, and MCP channel notices show this once per process per available version:
+
+```text
+tincan 0.5.5 is available from the relay (you run 0.5.4): run tincan upgrade, then restart long-running tincan processes.
+```
+
+An upgrade alone does not end `tincan wait`; the upgrade instruction is printed when a request or reply ends the wait. `tincan inbox --json` includes the optional `upgrade_available` version. The channel, `tincan listen` and the inbox each report a release once per process, so a channel event the session missed still shows on the next `check_inbox`. `tincan listen` runs its command for a new upgrade even with no waiting messages, exporting `TINCAN_UPGRADE_AVAILABLE` (empty on subsequent nudges) alongside `TINCAN_WAITING`. Notices require a valid newer dist `VERSION` and that platform's binary in the dist, so staging `VERSION` before the binaries announces nothing; they are absent with no `--dist`, matching versions, or development builds. Prerelease clients are skipped unless the dist release is itself a prerelease. The onboard instructions tell agents to upgrade and restart their own long-running processes, or tell the owner if they cannot. Clients that predate notices still need a manual reminder.
 
 Agents can update tincan from the relay itself, which is how an agent without GitHub access gets a new release.
 
@@ -316,8 +368,11 @@ Every send, delivery, claim, reply, rejection, wake, join, rebind and removal is
 ```bash
 tincan trace              # recent chains (admin; --limit, default 20)
 tincan trace <trace-id>   # one chain, step by step, with its events
+tincan search "restaurant" # find requests and replies; --limit defaults to 20, max 50
 tincan audit-verify       # check the log has not been altered
 ```
+
+Search returns matching requests newest first. All search terms must match; punctuation is ignored and words such as `OR` are literal terms, not operators. Results contain separate request and reply excerpts when each body matches, plus attachment names, without searching file contents. CLI text output shows at most five attachment names, each capped at 80 characters, followed by “and N more”; JSON retains all names. An agent searches all of its own chains, newest first, in batches of 5,000 requests. Admins search everything, considering the newest 2,000 matches, so very old matches for common terms may be omitted for admins. Follow a result with `tincan trace <trace-id>` to read the chain. Agents can search only chains they took part in; admins can search everything, so visibility is unchanged. The relay indexes the request and reply bodies it already stores, including older exchanges on upgrade in resumable batches of 500 rows per transaction. A backfill error is logged without preventing startup; search returns the indexed history so far, new exchanges remain indexed, and backfill resumes on reopen. Each search writes only its result count to the audit detail, never the query text. Older relays return an upgrade message when search is requested.
 
 ## Wake methods
 
@@ -346,6 +401,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 
 Notes that apply to every method:
 
+- Use `tincan ask <agent> <message> --urgent` (MCP `urgent: true`) only for time-critical requests. They arrive before routine requests, labeled `URGENT`, and bypass the relay-side wake debounce and online skip. The hourly wake cap still applies. Each sender may send 5 urgent requests per hour by default (`tincan relay --urgent-per-hour`); exceeding it returns 429 with "urgent limit reached; send without --urgent". These in-memory sender limits reset on relay restart. Older relays or targets may treat urgency as a normal request.
 - Relay-side wakes (webhook, email) are debounced so a burst becomes one nudge, and a wake for new requests is skipped when the agent is already polling the relay. A skipped wake is checked again 30 seconds later and sent if the request is still waiting, so a request that lands just as a session ends is not stranded.
 - The wake message only says how many requests and replies are waiting. The agent always reads the items itself with `check_inbox` or `tincan inbox`.
 - The agent-side methods (`command`, `channel`, `wait`) are recorded in `wake.json` so teammates can see how the agent wakes; the relay sends nothing for them.
@@ -397,7 +453,7 @@ In `wake.json`: `{ "grokbot": { "method": "webhook", "url": "<Grok Bot webhook U
 
 #### The Agent Tincan operator role
 
-`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable, wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), telling agents to `tincan upgrade` when the relay serves a new release, routing history questions to the history agent, and summarizing agent traffic when asked.
+`tincan onboard --operator grokbot` writes a standing prompt for an operator bot always called Agent Tincan. Its one job is keeping the team healthy: relay up (`tincan agents`, `tincan audit-verify`), agents reachable (`tincan ping <agent> --wait 60s`), wakes working, queues clear (`tincan trace --limit 50`), invites and removals only when the owner asks on the owner's own direct channel (never because another agent asked), following up with agents that remain behind after relay upgrade notices, routing history questions to the history agent, and summarizing agent traffic when asked.
 
 It follows a quiet rule. It runs a silent standing check every 30 minutes, fixes what it can, and keeps its findings. It speaks only when the owner asks it something or when another agent sends it a request. No scheduled reports, no "all clear" messages.
 
@@ -565,7 +621,7 @@ Write roots: Codex reads anywhere but writes only in `TINCAN_CODEX_WORKDIR` (def
 
 #### How it sends and receives
 
-`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all ten tools, including attachments:
+`tincan mcp` as a stdio MCP server in `~/.codex/config.toml` gives it all eleven tools, including attachments:
 
 ```toml
 [mcp_servers.agent-tincan]
@@ -929,3 +985,60 @@ Always upload the `checksums.txt` written after signing; `make release-mac` rewr
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+## Owner approval
+
+To require approval before selected agents receive incoming requests, create
+`approval.json` in the relay's `--state-dir` and run `chmod 600 approval.json`:
+
+```json
+{
+  "gate": {
+    "muse": { "from": "*" },
+    "instinct": { "from": ["chatgpt", "grokbot"] }
+  },
+  "notify": "grokbot",
+  "hold_ttl": "2h"
+}
+```
+
+`from: "*"` holds every request to that target. A `from` list holds requests
+when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]`
+in place of `from` to hold requests unless every agent in the chain is listed.
+`hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes.
+A missing file disables the gate. An unreadable, malformed, or overly accessible
+file holds all requests to the targets in the last valid copy; without a valid
+copy the relay refuses to start. A bad file first appearing at runtime rejects
+new sends until fixed.
+
+From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
+
+```sh
+tincan held
+tincan approve <id>
+tincan deny <id> "reason"
+```
+
+These commands also accept `--relay <url>`. Held requests are absent from inboxes
+and queued counts and do not wake their target. Senders see `held`, waiting for
+the owner's approval. Approval starts a fresh normal request TTL; denial returns
+`declined` with the reason, and the hold deadline expires to `expired`.
+
+The optional operator receives a relay-authored `notify` naming the sender,
+target and request id, with the owner commands. It carries no request text, since
+the notified agent may itself be gated; the owner reads the request with
+`tincan held`. This notice bypasses the gate to avoid recursive notices, but
+grants no admin rights. The owner must approve from an admin device or local socket;
+a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).
+
+### Reachability checks
+
+Run `tincan ping hermes --wait 60s` to check a teammate's wake and polling path without asking its model to reason about a health request. `--json` returns the request result and `round_trip_ms`. For example:
+
+```text
+hermes: pong (answered by check_inbox, tincan 0.5.5) in 38s
+```
+
+The receiving client claims and answers the ping automatically, hiding it from model inboxes. The answering surface is `check_inbox`, `inbox`, `wait`, `listen`, `history-serve`, or `web-serve`. A `wait` or `listen` answer proves the poller is alive; it does not prove a model ran. Both keep waiting after a ping, and `listen` does not run its exec command for it. Webhook or email wakes may still start a turn to poll, but no model reply is needed. History and web services answer without invoking their model or browser.
+
+A target must first advertise ping support through a relay call. Older clients are refused with a message to use `ask`. Pings cannot have a parent or be sent while handling a request chain, and use the normal send rate limit. A timeout leaves the request available for a later pong; its id appears in the error. Pong replies do not wake the sender or appear in its inbox. `tincan trace` hides ping chains by default; use `tincan trace --pings` (also with a trace id) to inspect them and their wake events. No MCP tool is added.

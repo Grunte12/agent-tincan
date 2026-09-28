@@ -155,3 +155,12 @@ Not in v1: Deep Research (it needs a mode switch and a plan confirmation the pla
 ### Retries and duplicate sends
 
 The relay requeues a claimed request whose reply never arrives (after its 30-minute claim lease), for example when the agent crashed or the reply failed to reach the relay. A send is not repeated for that: right after the extension confirms a send, the agent records the request id, conversation id, the id of the message it sent (once seen) and `submitted_at` in `~/.config/tincan/<agent>-journal.json` (mode 0600; ids and times only, never messages or answers), and marks the entry answered once it replies. A request found there is not sent again; the agent reads the answer from the journaled conversation (waiting for it if needed) and replies. Entries are dropped after 90 minutes.
+
+## Ask both web agents
+
+Run `tincan ask chatgpt-web,claude-web "Compare these options"`, or call MCP
+`ask` with `{"to":"chatgpt-web","also":["claude-web"],"message":"Compare these options"}`.
+Both receive the same question, with answers labeled by teammate. A partial
+result includes a group id: pass it to `get_reply` as `request_id` or run
+`tincan get <group-id>` to gather later answers. Each web agent still applies
+its own allowlist. Attachments are uploaded once per target.
