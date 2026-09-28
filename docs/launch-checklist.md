@@ -27,5 +27,6 @@ Status: ready. Release v0.5.0 is on the relay and every agent. agenttincan.com i
 
 - OpenClaw has never run live.
 - Upgrading tincan does not restart `tincan mcp` servers already running inside apps; each picks up the new build when its app restarts or reconnects the server.
+- The relay upgrades itself: from an admin device, `tincan relay-upgrade --relay http://100.96.137.127:8787 --from-github v<next>` fetches the release into `/home/box/tincan-dist`, installs it over `/home/box/bin/tincan` (keeping the old build as `tincan.<old version>`), and restarts the relay. The relay runs in a keep-alive loop, so the default re-exec works; `--upgrade-exit` (exit status 75) is the alternative if the loop should do the restart. No operator bot or SSH needed.
 - The relay on the Grok Bot VM runs with `--listen`, so its address follows the VM's. Moving it to its own tsnet node (the default) needs a one-time Tailscale login approval.
 - The time-based attachment sweeps are covered by unit tests only.

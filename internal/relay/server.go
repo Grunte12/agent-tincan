@@ -110,6 +110,9 @@ type Server struct {
 	key    string   // relay key, proves this relay's identity to its agents (hello)
 	urls   []string // addresses advertised to agents in whoami
 
+	// upgrader installs the dist release over the relay binary; nil when off.
+	upgrader SelfUpgrader
+
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
 	polling  map[string]int // long-polls currently held open, per agent
@@ -270,6 +273,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
+	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
 }
