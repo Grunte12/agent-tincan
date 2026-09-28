@@ -98,7 +98,7 @@ func TestNotesDoctorPassesWithNotesKind(t *testing.T) {
 	joinNotes(t, m)
 	setKind(t, m, "notes")
 	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
-	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "search", OK: true})
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "search", OK: true, IdempotencyVerified: true})
 	out, err := e.run(t)
 	if err != nil {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
@@ -213,6 +213,21 @@ func TestNotesDoctorFailsWhileIdempotencyUnsupported(t *testing.T) {
 		t.Fatalf("doctor passed with an idempotency-unsupported helper:\n%s", out)
 	}
 	wantLine(t, out, "[FAIL] last helper result", "helper_too_old", "Update Agent Notes")
+}
+
+// A successful search says nothing about duplicate adds: until a create
+// has shown the helper honors idempotency keys, doctor warns.
+func TestNotesDoctorWarnsWhileIdempotencyUnverified(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	joinNotes(t, m)
+	setKind(t, m, "notes")
+	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "search", OK: true})
+	out, err := e.run(t)
+	if err != nil {
+		t.Fatalf("doctor failed on an unverified helper: %v\n%s", err, out)
+	}
+	wantLine(t, out, "[WARN] last helper result", "duplicate protection not yet verified", "no add has run against this helper")
 }
 
 func TestNotesDoctorNoHealthYet(t *testing.T) {

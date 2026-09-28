@@ -363,6 +363,12 @@ func healthCheck(path, exe string) check {
 		return check{name, "fail", fmt.Sprintf("%s: the helper ignored an add's idempotency key, so a redelivered add could be saved twice (last helper call: %s at %s)", "helper_too_old", h.Command, when),
 			helperFix("helper_too_old", exe)}
 	}
+	if h.OK && !h.IdempotencyVerified {
+		// Only a create shows whether the helper honors idempotency keys:
+		// a successful search or read says nothing about duplicate adds.
+		return check{name, "warn", fmt.Sprintf("duplicate protection not yet verified: no add has run against this helper (%s succeeded at %s)", h.Command, when),
+			"Send notes one add; doctor reports ok once the helper has shown it honors idempotency keys."}
+	}
 	if h.OK {
 		return check{name, "ok", fmt.Sprintf("%s succeeded at %s", h.Command, when), ""}
 	}

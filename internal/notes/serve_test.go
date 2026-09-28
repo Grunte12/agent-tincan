@@ -702,6 +702,49 @@ func TestAddAllowedReadDenied(t *testing.T) {
 	}
 }
 
+// A read allowlist that cannot be loaded does not decline an agent the
+// add allowlist allows: its add goes through, while its search is still
+// declined on the broken read list.
+func TestBrokenReadAllowlistStillAllowsAdd(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, r.cfg.ReadAllowlistPath, "bad!name\n")
+	writeFile(t, r.cfg.AddAllowlistPath, "muse\n")
+	if res := r.ask(t, "muse", addBody("Stove", "fuel")); res.Status != envelope.StatusAnswered {
+		t.Fatalf("add: status %s body %q", res.Status, res.Reply.Body)
+	}
+	if len(r.helper.notes()) != 1 {
+		t.Fatalf("notes = %+v, want the add written", r.helper.notes())
+	}
+	res := r.ask(t, "muse", `note: {"op":"search","query":"stove"}`)
+	if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "could not read its allowlist") {
+		t.Fatalf("search: status %s body %q", res.Status, res.Reply.Body)
+	}
+	if !strings.Contains(r.log.String(), "read allowlist") {
+		t.Fatalf("the read list error was not logged:\n%s", r.log.String())
+	}
+}
+
+// When neither allowlist loads, the request is declined before the
+// extractor runs.
+func TestBothAllowlistsBrokenDeclinedBeforeExtractor(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, r.cfg.ReadAllowlistPath, "bad!name\n")
+	writeFile(t, r.cfg.AddAllowlistPath, "bad!name\n")
+	r.ext.r = Request{Op: OpSearch, Query: "tent"}
+	res := r.ask(t, "muse", "find my tent notes")
+	if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "could not read its allowlist") {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if r.ext.calls() != 0 || len(r.helper.calls(t)) != 0 {
+		t.Fatal("a declined request reached the extractor or the helper")
+	}
+	for _, list := range []string{"read allowlist", "add allowlist"} {
+		if !strings.Contains(r.log.String(), list) {
+			t.Fatalf("the %s error was not logged:\n%s", list, r.log.String())
+		}
+	}
+}
+
 func TestMalformedNoteBodyFails(t *testing.T) {
 	r := newRig(t, relay.Config{})
 	for _, body := range []string{
@@ -1163,5 +1206,84 @@ func TestHelperTooOldIsStickyUntilIdempotentCreate(t *testing.T) {
 	r.ask(t, "grokbot", addBody("Stove", "fuel"))
 	if h := readHealth(t, r.cfg.HealthPath); !h.OK || h.IdempotencyUnsupported {
 		t.Fatalf("health after an idempotent create = %+v, want the flag cleared", h)
+	}
+}
+
+// A sender removed from the add allowlist while its add sits in the spool
+// gets the declined reply a new request would, and nothing is written.
+func TestSpooledAddOfRevokedSenderIsDeclined(t *testing.T) {
+	for _, via := range []string{"retry", "redelivery"} {
+		t.Run(via, func(t *testing.T) {
+			r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+			req := r.stuckThenRequeued(t)
+			writeFile(t, r.cfg.AddAllowlistPath, "muse\n")
+			before := len(r.helper.callsOf(t, "create"))
+			if via == "retry" {
+				r.svc.RetrySpooled(t.Context())
+			} else {
+				r.poll(t, 1)
+			}
+			if after := len(r.helper.callsOf(t, "create")); after != before {
+				t.Fatalf("helper create ran for a revoked sender: %d -> %d", before, after)
+			}
+			if len(r.helper.notes()) != 0 {
+				t.Fatalf("a revoked sender's add was written: %+v", r.helper.notes())
+			}
+			res := r.get(t, "grokbot", req.ID)
+			if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "grokbot is not on the notes add allowlist") {
+				t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+			}
+			r.assertSpoolEmpty(t)
+			if !strings.Contains(r.log.String(), "no longer allowed to add") {
+				t.Fatalf("the decline was not logged:\n%s", r.log.String())
+			}
+		})
+	}
+}
+
+// An add allowlist that cannot be read keeps a spooled add and writes
+// nothing this round; once the list is fixed, the retry writes it.
+func TestSpooledAddKeptWhenAddAllowlistUnreadable(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	r.stuckThenRequeued(t)
+	writeFile(t, r.cfg.AddAllowlistPath, "bad!name\n")
+	before := len(r.helper.callsOf(t, "create"))
+	r.svc.RetrySpooled(t.Context())
+	if after := len(r.helper.callsOf(t, "create")); after != before {
+		t.Fatalf("helper create ran with an unreadable add allowlist: %d -> %d", before, after)
+	}
+	if len(r.spoolFiles(t)) != 1 {
+		t.Fatalf("spool = %v, want the entry kept", r.spoolFiles(t))
+	}
+	writeFile(t, r.cfg.AddAllowlistPath, "grokbot\n")
+	r.svc.RetrySpooled(t.Context())
+	if len(r.helper.notes()) != 1 {
+		t.Fatalf("notes = %+v after the list was fixed", r.helper.notes())
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Duplicate protection is verified only by a create answered with
+// "existed": a search alone leaves it unverified, helper_too_old clears
+// it, and it carries across later searches.
+func TestIdempotencyVerifiedOnlyByCreate(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if h := readHealth(t, r.cfg.HealthPath); !h.OK || h.IdempotencyVerified {
+		t.Fatalf("health after a search = %+v, want unverified", h)
+	}
+	r.ask(t, "grokbot", addBody("Tent", "blue"))
+	if h := readHealth(t, r.cfg.HealthPath); !h.IdempotencyVerified || h.IdempotencyUnsupported {
+		t.Fatalf("health after a create = %+v, want verified", h)
+	}
+	r.restart(t)
+	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if h := readHealth(t, r.cfg.HealthPath); h.Command != "search" || !h.IdempotencyVerified {
+		t.Fatalf("health after a later search = %+v, want verified kept", h)
+	}
+	writeFile(t, filepath.Join(r.helper.state, "old-helper"), "")
+	r.ask(t, "grokbot", addBody("Stove", "fuel"))
+	if h := readHealth(t, r.cfg.HealthPath); h.IdempotencyVerified || !h.IdempotencyUnsupported {
+		t.Fatalf("health after helper_too_old = %+v, want verified cleared", h)
 	}
 }

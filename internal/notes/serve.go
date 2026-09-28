@@ -300,6 +300,9 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		}
 		defer s.end(req.ID)
 		s.logf("request %s from %s: redelivered add, applying from the spool", req.ID, req.From)
+		if !s.stillAllowed(ctx, e) {
+			return
+		}
 		s.applyAdd(ctx, e, true)
 		return
 	}
@@ -340,19 +343,31 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	}
 }
 
-// eitherAllow is the union of the two allowlists.
+// eitherAllow is the union of the allowlists that load. One list that
+// cannot be read does not decline what the other allows: the operation's
+// own check after parsing still denies on that list's error. It fails only
+// when neither list loads.
 func (s *Service) eitherAllow() ([]string, error) {
 	var out []string
-	for _, f := range []func() ([]string, error){s.readAllow, s.addAllow} {
-		names, err := f()
+	var errs []error
+	for _, l := range []struct {
+		name string
+		load func() ([]string, error)
+	}{{"read", s.readAllow}, {"add", s.addAllow}} {
+		names, err := l.load()
 		if err != nil {
-			return nil, err
+			s.logf("%s allowlist: %v", l.name, err)
+			errs = append(errs, err)
+			continue
 		}
 		for _, n := range names {
 			if !slices.Contains(out, n) {
 				out = append(out, n)
 			}
 		}
+	}
+	if len(errs) == 2 {
+		return nil, errors.Join(errs...)
 	}
 	return out, nil
 }
@@ -457,7 +472,7 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 // reach the asker.
 func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
-	if !fresh && !s.stillWanted(ctx, e) {
+	if !fresh && (!s.stillWanted(ctx, e) || !s.stillAllowed(ctx, e)) {
 		return
 	}
 	tags := slices.Clone(e.Note.Tags)
@@ -531,6 +546,27 @@ func (s *Service) stillWanted(ctx context.Context, e SpoolEntry) bool {
 		if err := s.spool.Remove(id); err != nil {
 			s.logf("request %s: spool remove failed: %v", id, err)
 		}
+		return false
+	}
+	return true
+}
+
+// stillAllowed rechecks a spooled add against the add allowlist before a
+// retry or redelivery writes it, so removing a sender from the list stops
+// its adds still waiting in the spool. A denied add is answered declined
+// with the reason a new request gets and its entry cleared. If the list
+// cannot be read, the entry is kept and not written this round.
+func (s *Service) stillAllowed(ctx context.Context, e SpoolEntry) bool {
+	req := e.Request
+	names, err := s.addAllow()
+	if err != nil {
+		s.logf("request %s: could not read the add allowlist, keeping the add spooled for the next retry: %v", req.ID, err)
+		return false
+	}
+	loaded := func() ([]string, error) { return names, nil }
+	if reason := history.ChainDenied(loaded, req, s.agent+" add", "add notes", s.logf); reason != "" {
+		s.logf("request %s from %s (chain %v): spooled add declined, the sender is no longer allowed to add: %s", req.ID, req.From, req.Chain, reason)
+		s.sendFinal(ctx, e, reason, envelope.StatusDeclined)
 		return false
 	}
 	return true
@@ -634,12 +670,17 @@ type Health struct {
 	// idempotency key, and cleared only by a create whose helper honored
 	// it, so a later search or read cannot hide helper_too_old.
 	IdempotencyUnsupported bool `json:"idempotency_unsupported,omitempty"`
+	// IdempotencyVerified is set by a create whose helper answered with
+	// "existed", cleared when helper_too_old is recorded, and carried
+	// across every other call, so doctor can tell a helper whose duplicate
+	// protection was checked from one that has only searched or read.
+	IdempotencyVerified bool `json:"idempotency_verified,omitempty"`
 }
 
 // recordHealth writes the health file; a failure is only logged. The
-// idempotency flag carries over from the previous file unless this is a
-// create, which sets it (the helper ignored the key) or clears it (the
-// helper answered with "existed").
+// idempotency facts carry over from the previous file unless this is a
+// create that showed them: the helper ignored the key (unsupported, not
+// verified) or answered with "existed" (verified, supported).
 func (s *Service) recordHealth(command, requestID string, err error) {
 	s.recordHealthIdem(command, requestID, err, nil)
 }
@@ -659,10 +700,12 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 	defer s.healthMu.Unlock()
 	if idemUnsupported != nil {
 		h.IdempotencyUnsupported = *idemUnsupported
+		h.IdempotencyVerified = !*idemUnsupported
 	} else if prev, rerr := os.ReadFile(s.healthPath); rerr == nil {
 		var p Health
 		if json.Unmarshal(prev, &p) == nil {
 			h.IdempotencyUnsupported = p.IdempotencyUnsupported
+			h.IdempotencyVerified = p.IdempotencyVerified
 		}
 	}
 	b, merr := json.MarshalIndent(h, "", "  ")
