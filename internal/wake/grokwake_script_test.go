@@ -21,11 +21,16 @@ import (
 // fakeGrok answers --version, and "inspect --json" the way Grok Build
 // does: the MCP servers in $GROK_HOME/config.toml, plus the Claude Code
 // ones it imports from $HOME/.claude.json, plus plugins and hooks when
-// FAKE_PLUGINS or FAKE_HOOKS is set. A run records its argv (NUL
-// separated), its HOME, GROK_HOME and auto-update setting, and the
-// sandbox.toml it would load, then prints Grok's JSON result.
+// FAKE_PLUGINS or FAKE_HOOKS is set. FAKE_TARGET overrides the command it
+// reports for config.toml servers (by default the one each entry names), and FAKE_PROJECT_LAYER a project config layer.
+// Every call appends the path it was run as to exe. A run records its argv
+// (NUL separated), its HOME, GROK_HOME and auto-update setting, its working
+// directory and the sandbox.toml it would load, then prints Grok's JSON
+// result.
 const fakeGrok = `#!/bin/sh
+printf '%s\n' "$0" >> "$ARGV_DIR/exe"
 if [ "${1:-}" = --version ]; then
+  printf '%s\n' "$HOME" > "$ARGV_DIR/version.home"
   echo "${FAKE_VERSION:-grok 1.0.40 (eb1a2256660d) [stable]}"
   exit 0
 fi
@@ -35,7 +40,8 @@ if [ "${1:-}" = inspect ]; then
   servers=
   if [ -f "$GROK_HOME/config.toml" ]; then
     for n in $(sed -n 's/^\[mcp_servers\.\([^].]*\)\]$/\1/p' "$GROK_HOME/config.toml"); do
-      servers="$servers{\"name\":\"$n\",\"transport\":\"stdio\",\"target\":\"tincan\",\"source\":{\"type\":\"configToml\",\"path\":\"$GROK_HOME/config.toml\"}},"
+      target=$(awk -v n="$n" '/^\[/ { s = ($0 == "[mcp_servers." n "]") } s && /^command *=/ { sub(/^command *= *"/, ""); sub(/".*/, ""); print; exit }' "$GROK_HOME/config.toml")
+      servers="$servers{\"name\":\"$n\",\"transport\":\"stdio\",\"target\":\"${FAKE_TARGET:-$target}\",\"source\":{\"type\":\"configToml\",\"path\":\"$GROK_HOME/config.toml\"}},"
     done
   fi
   if grep -q tincan "$HOME/.claude.json" 2>/dev/null; then
@@ -45,12 +51,15 @@ if [ "${1:-}" = inspect ]; then
   [ -z "${FAKE_PLUGINS:-}" ] || plugins='{"name":"helper"}'
   hooks=
   [ -z "${FAKE_HOOKS:-}" ] || hooks='{"event":"PreToolUse"}'
-  printf '{"grokVersion":"1.0.40","cwd":"%s","hooks":[%s],"plugins":[%s],"mcpServers":[%s]}\n' "$(pwd -P)" "$hooks" "$plugins" "${servers%,}"
+  layers="{\"role\":\"user\",\"path\":\"$GROK_HOME/config.toml\"}"
+  [ -z "${FAKE_PROJECT_LAYER:-}" ] || layers="$layers,{\"role\":\"project\",\"path\":\"$FAKE_PROJECT_LAYER\"}"
+  printf '{"grokVersion":"1.0.40","cwd":"%s","hooks":[%s],"plugins":[%s],"mcpServers":[%s],"configSources":{"layers":[%s]}}\n' "$(pwd -P)" "$hooks" "$plugins" "${servers%,}" "$layers"
   exit 0
 fi
 n=$(ls "$ARGV_DIR" 2>/dev/null | grep -c "^run\\." || true)
 for a in "$@"; do printf '%s\0' "$a"; done > "$ARGV_DIR/run.$n"
 printf '%s\n%s\n%s\n' "$HOME" "$GROK_HOME" "${GROK_DISABLE_AUTOUPDATER:-}" > "$ARGV_DIR/env.$n"
+pwd -P > "$ARGV_DIR/cwd.$n"
 cp "$GROK_HOME/sandbox.toml" "$ARGV_DIR/sandbox.$n" 2>/dev/null || true
 sid=
 prev=
@@ -258,6 +267,12 @@ func TestGrokWakeRunsSandboxedInItsWakeHome(t *testing.T) {
 	if got := strings.TrimSpace(h.file("inspect.cwd")); got != canonical(t, h.workdir) {
 		t.Fatalf("the identity check listed servers from %q, want the workdir", got)
 	}
+	if got := strings.TrimSpace(h.file("cwd.0")); got != canonical(t, h.workdir) {
+		t.Fatalf("grok ran in %q, want the workdir", got)
+	}
+	if got := strings.TrimSpace(h.file("version.home")); got != h.wakeHome {
+		t.Fatalf("the version check ran with HOME %q, want the wake home", got)
+	}
 	// The sandbox profile extends workspace and opens the attachments
 	// directory tincan mcp saves received files in.
 	sb := h.file("sandbox.0")
@@ -329,6 +344,14 @@ func TestGrokWakeIdentityCheck(t *testing.T) {
 		{"an unvetted server", func(h *grokHarness) {
 			h.writeConfigTOML(h.tincanTable(h.config) + "\n[mcp_servers.files]\ncommand = \"npx\"\n")
 		}, "", "did not allow: files"},
+		{"a listed command that is not the config entry's", func(*grokHarness) {}, "FAKE_TARGET=sh", "sets no TINCAN_CONFIG"},
+		{"a project config.toml in the workdir", func(h *grokHarness) {
+			h.write(filepath.Join(h.workdir, ".grok", "config.toml"), "[mcp_servers.agent-tincan]\ncommand = \"sh\"\n")
+		}, "", "project MCP config"},
+		{"a project .mcp.json above the workdir", func(h *grokHarness) {
+			h.write(filepath.Join(h.wakeHome, ".mcp.json"), `{"mcpServers":{}}`)
+		}, "", "project MCP config"},
+		{"a project layer Grok reports", func(*grokHarness) {}, "FAKE_PROJECT_LAYER=/elsewhere/.grok/config.toml", "project config"},
 		{"a plugin", func(*grokHarness) {}, "FAKE_PLUGINS=1", "plugins or hooks"},
 		{"a hook", func(*grokHarness) {}, "FAKE_HOOKS=1", "plugins or hooks"},
 	} {
@@ -367,6 +390,8 @@ func TestGrokWakeWithPython3(t *testing.T) {
 	h2.refused(h2.run("TINCAN_GROK_JSON_TOOL=python3"), "2 agent-tincan servers")
 	h3 := newGrokHarness(t)
 	h3.refused(h3.run("TINCAN_GROK_JSON_TOOL=python3", "FAKE_HOOKS=1"), "plugins or hooks")
+	h4 := newGrokHarness(t)
+	h4.refused(h4.run("TINCAN_GROK_JSON_TOOL=python3", "FAKE_PROJECT_LAYER=/elsewhere/.grok/config.toml"), "project config")
 }
 
 // Operator write roots under an allowed root become read_write entries of
@@ -421,6 +446,25 @@ func TestGrokWakeAuthFailureBacksOff(t *testing.T) {
 	if len(h.runs()) != 1 || h.notices() != 1 {
 		t.Fatalf("ran again or notified again while backing off: runs %d notices %d", len(h.runs()), h.notices())
 	}
+	// "401" counts only as a whole number in Grok's error message or its
+	// stderr, never inside a token count or a timestamp.
+	tools := []string{"jq", "python3"}
+	for _, tool := range tools {
+		if _, err := exec.LookPath(tool); err != nil {
+			continue
+		}
+		h3 := newGrokHarness(t)
+		r = h3.run("TINCAN_GROK_JSON_TOOL="+tool, "FAKE_EXIT=1", `FAKE_STDOUT={"type":"error","message":"stream closed","usage":{"total_tokens":54012}}`, "FAKE_STDERR=2026-09-27T10:00:00.401Z request failed")
+		if r.err == nil || h3.backoff() || h3.notices() != 0 {
+			t.Fatalf("%s: a non-auth failure backed off at once: err %v, backoff %v, notices %d", tool, r.err, h3.backoff(), h3.notices())
+		}
+		for _, msg := range []string{"401 Unauthorized", "request failed: HTTP 401"} {
+			h4 := newGrokHarness(t)
+			if r := h4.run("TINCAN_GROK_JSON_TOOL="+tool, "FAKE_EXIT=1", `FAKE_STDOUT={"type":"error","message":"`+msg+`"}`); r.err == nil || !h4.backoff() || h4.notices() != 1 {
+				t.Fatalf("%s, %q: backoff %v, notices %d, want an auth backoff", tool, msg, h4.backoff(), h4.notices())
+			}
+		}
+	}
 	// Words in a successful answer never count as an auth failure.
 	h2 := newGrokHarness(t)
 	if r := h2.run(`FAKE_STDOUT={"text":"not authenticated","sessionId":"x"}`); r.err != nil || h2.backoff() {
@@ -451,4 +495,82 @@ func TestGrokWakeRecordsTheIdBeforeRunning(t *testing.T) {
 func TestGrokWakeRefusesTheOwnersHome(t *testing.T) {
 	h := newGrokHarness(t)
 	h.refused(h.run("TINCAN_GROK_WAKE_HOME="+h.home), "the owner's home")
+}
+
+// With the npm install, grok on PATH is a node bootstrap that runs
+// $GROK_HOME/bin/grok, which under the wake's GROK_HOME is a file a run
+// can write. The wake pins the native binary the owner's Grok home points
+// at and runs that file for the version check, the listing and the run,
+// and removes a grok the wake home holds.
+func TestGrokWakePinsTheNativeBinary(t *testing.T) {
+	h := newGrokHarness(t)
+	npm := filepath.Join(h.dir, "npm", "bin")
+	h.write(filepath.Join(npm, "grok"), "#!/usr/bin/env node\nrequire('../lib/grok-bootstrap.js')\n")
+	if err := os.Chmod(filepath.Join(npm, "grok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownerBin := filepath.Join(h.home, ".grok", "bin")
+	h.write(filepath.Join(ownerBin, "grok-1.0.40"), fakeGrok)
+	if err := os.Chmod(filepath.Join(ownerBin, "grok-1.0.40"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("grok-1.0.40", filepath.Join(ownerBin, "grok")); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(h.grokHome, "bin", "grok")
+	h.write(planted, "#!/bin/sh\necho planted >> \"$ARGV_DIR/planted\"\n")
+	r := h.run("GROK_BIN=", "PATH="+npm+":"+os.Getenv("PATH"))
+	if r.err != nil || len(h.runs()) != 1 {
+		t.Fatalf("wake: %v, runs %d\n%s", r.err, len(h.runs()), r.stderr)
+	}
+	native := filepath.Join(canonical(t, ownerBin), "grok-1.0.40")
+	exes := strings.Fields(h.file("exe"))
+	if len(exes) != 3 {
+		t.Fatalf("grok called %d times, want version, inspect and run: %q", len(exes), exes)
+	}
+	for _, e := range exes {
+		if e != native {
+			t.Fatalf("grok ran as %q, want the pinned native binary %q", e, native)
+		}
+	}
+	if _, err := os.Stat(planted); !os.IsNotExist(err) {
+		t.Fatalf("the wake home's bin/grok is still there: %v", err)
+	}
+	// A bootstrap with no native binary in the owner's Grok home is
+	// refused, never run.
+	h2 := newGrokHarness(t)
+	h2.write(filepath.Join(h2.dir, "npm", "grok"), "#!/usr/bin/env node\n")
+	if err := os.Chmod(filepath.Join(h2.dir, "npm", "grok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h2.refused(h2.run("GROK_BIN="+filepath.Join(h2.dir, "npm", "grok")), "native")
+}
+
+// A grok binary the sandboxed run could write is refused.
+func TestGrokWakeRefusesAWritableBinary(t *testing.T) {
+	for _, where := range []func(h *grokHarness) string{
+		func(h *grokHarness) string { return filepath.Join(h.grokHome, "bin", "grok") },
+		func(h *grokHarness) string { return filepath.Join(h.workdir, "grok") },
+	} {
+		h := newGrokHarness(t)
+		bin := where(h)
+		h.write(bin, fakeGrok)
+		if err := os.Chmod(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		h.refused(h.run("GROK_BIN="+bin), "the sandboxed run can write")
+	}
+}
+
+// By default the wake keeps its state beside the teammate's config, outside
+// the temp directories the sandboxed run can write.
+func TestGrokWakeStateOutsideTemp(t *testing.T) {
+	h := newGrokHarness(t)
+	if r := h.run("TINCAN_WAKE_STATE_DIR="); r.err != nil || len(h.runs()) != 1 {
+		t.Fatalf("wake: %v, runs %d\n%s", r.err, len(h.runs()), r.stderr)
+	}
+	st, err := os.Stat(filepath.Join(filepath.Dir(h.config), "grok-cli.wake-state"))
+	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
+		t.Fatalf("state dir beside the config: %v %v", st, err)
+	}
 }

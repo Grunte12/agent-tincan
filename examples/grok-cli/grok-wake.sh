@@ -41,12 +41,26 @@
 #                                (default jq when on PATH)
 #   XAI_API_KEY                  an xAI API key, instead of a login in the
 #                                wake home
-#   GROK_BIN                     the grok binary (default grok)
+#   GROK_BIN                     the grok binary (default grok on PATH). The
+#                                wake resolves it to one file and runs only
+#                                that file; for the npm package's node
+#                                bootstrap, that is the native binary the
+#                                owner's Grok home points at
+#                                ($GROK_HOME/bin/grok, ~/.grok/bin/grok).
+#                                A binary under the wake home, the workdir
+#                                or a write root is refused.
+#   TINCAN_WAKE_STATE_DIR        as in the library, but by default
+#                                <name>.wake-state beside TINCAN_CONFIG,
+#                                outside the temp directories the run can
+#                                write
 set -eu
 
 : "${TINCAN_CONFIG:=$HOME/.config/tincan/grok-cli.json}"
 # shellcheck disable=SC2088 # a literal ~/ prefix, which tincan expands
 case $TINCAN_CONFIG in "~/"*) TINCAN_CONFIG=$HOME/${TINCAN_CONFIG#"~/"} ;; esac
+# The run is started from the workdir, so every path the wake keeps is
+# made absolute first.
+case $TINCAN_CONFIG in /*) ;; *) TINCAN_CONFIG=$(pwd -P)/$TINCAN_CONFIG ;; esac
 export TINCAN_CONFIG
 
 # The library sits next to this script, or in the repo's examples/lib.
@@ -68,6 +82,8 @@ PROFILE=tincan-wake
 cfg_dir=$(dirname -- "$TINCAN_CONFIG")
 cfg_name=$(basename -- "$TINCAN_CONFIG" .json)
 OWNER_HOME=$HOME
+# The owner's Grok home, where the npm bootstrap finds the native binary.
+OWNER_GROK_HOME=${GROK_HOME:-$OWNER_HOME/.grok}
 WAKE_HOME=${TINCAN_GROK_WAKE_HOME:-$cfg_dir/$cfg_name.wake}
 WAKE_HOME=${WAKE_HOME%/}
 GROK_HOME_DIR=$WAKE_HOME/.grok
@@ -80,10 +96,13 @@ BIN=${GROK_BIN:-grok}
 # grok-cli prints a bare version number.
 VERSION_PATTERN=${TINCAN_GROK_VERSION_PATTERN:-^grok [0-9]+[.][0-9]+[.][0-9]+ [(]}
 
+# The run can write the temp directories, so the lock, failure count and
+# saved listing live beside the teammate's config by default (mode 700).
+: "${TINCAN_WAKE_STATE_DIR:=$cfg_dir/$cfg_name.wake-state}"
+case $TINCAN_WAKE_STATE_DIR in /*) ;; *) TINCAN_WAKE_STATE_DIR=$(pwd -P)/$TINCAN_WAKE_STATE_DIR ;; esac
+
 tincan_wake_init grok-cli
 tincan_wake_begin
-
-tincan_wake_check_binary "$BIN" "$VERSION_PATTERN"
 
 # The wake home must not be the owner's home, where Grok would import the
 # owner's Claude Code and Cursor MCP servers along with this teammate's.
@@ -129,125 +148,6 @@ if [ -z "$JSON_TOOL" ]; then
   tincan_wake_refuse "reading grok inspect --json needs jq or python3 on the listener's PATH (or TINCAN_GROK_JSON_TOOL names one that is missing)"
 fi
 
-# A login lives in the wake home's auth.json; XAI_API_KEY is the other way.
-if [ -z "${XAI_API_KEY:-}" ] && [ ! -s "$GROK_HOME_DIR/auth.json" ]; then
-  tincan_wake_refuse "Grok Build is not logged in for this wake: run GROK_HOME=$GROK_HOME_DIR grok login once on this machine, or set XAI_API_KEY in the listener's environment"
-fi
-
-# grok_env runs a command with the wake home as HOME and GROK_HOME, and
-# Grok's update check off (an update mid-run would change the binary the
-# version check vetted).
-# shellcheck disable=SC2329 # run through grok_mcp_list
-grok_env() {
-  HOME=$WAKE_HOME GROK_HOME=$GROK_HOME_DIR GROK_DISABLE_AUTOUPDATER=1 "$@"
-}
-
-INSPECT=$TINCAN_WAKE_STATE_DIR/inspect.json
-
-# grok_inspect_rows prints one line per MCP server in the saved inspect
-# output: name, source type, source path and target, separated by the
-# ASCII unit separator (so an empty field stays in place for read).
-# shellcheck disable=SC2329 # run through grok_mcp_list
-grok_inspect_rows() {
-  if [ "$JSON_TOOL" = jq ]; then
-    jq -r '(.mcpServers // [])[]
-      | [.name // "", .source.type // "", .source.path // "", .target // ""]
-      | map(tostring | gsub("[\t\n\u001f]"; " ")) | join("\u001f")' "$INSPECT"
-  else
-    python3 -c '
-import json, sys
-for s in json.load(open(sys.argv[1])).get("mcpServers") or []:
-    src = s.get("source") or {}
-    row = [s.get("name") or "", src.get("type") or "", src.get("path") or "", s.get("target") or ""]
-    print("\x1f".join(str(x).replace("\t", " ").replace("\n", " ").replace("\x1f", " ") for x in row))
-' "$INSPECT"
-  fi
-}
-
-# grok_extras prints how many plugins and hooks the saved inspect output
-# lists.
-grok_extras() {
-  if [ "$JSON_TOOL" = jq ]; then
-    jq -r '((.plugins // []) | length) + ((.hooks // []) | length)' "$INSPECT"
-  else
-    python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-print(len(d.get("plugins") or []) + len(d.get("hooks") or []))
-' "$INSPECT"
-  fi
-}
-
-# grok_toml_entry FILE NAME prints "TINCAN_CONFIG<TAB>command args" for the
-# [mcp_servers.NAME] table of a Grok config.toml, reading its env either as
-# an [mcp_servers.NAME.env] table or inline (env = { TINCAN_CONFIG = ... }).
-# Only one-line values are read; anything it cannot read comes out empty,
-# which the identity check refuses.
-# shellcheck disable=SC2016 # awk program text, expanded by awk
-_grok_toml_awk='
-function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-function val(s,   q, i) {
-  s = trim(s); q = substr(s, 1, 1)
-  if (q != "\"" && q != "\047") return ""
-  s = substr(s, 2); i = index(s, q)
-  return i ? substr(s, 1, i - 1) : ""
-}
-function after(s) { return substr(s, index(s, "=") + 1) }
-function arr(s,   out, n, parts, i, v) {
-  s = after(s); sub(/^[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
-  n = split(s, parts, ",")
-  for (i = 1; i <= n; i++) { v = val(parts[i]); if (v != "") out = out " " v }
-  return out
-}
-/^[ \t]*\[/ {
-  h = $0; sub(/^[ \t]*\[[ \t]*/, "", h); sub(/[ \t]*\][ \t]*(#.*)?$/, "", h)
-  gsub(/"/, "", h); gsub(/[ \t]/, "", h)
-  sec = ""
-  if (h == "mcp_servers." want) sec = "main"
-  if (h == "mcp_servers." want ".env") sec = "env"
-  next
-}
-sec == "main" && /^[ \t]*command[ \t]*=/ { cmd = val(after($0)) }
-sec == "main" && /^[ \t]*args[ \t]*=/ { args = arr($0) }
-sec == "main" && /^[ \t]*env[ \t]*=/ { s = $0; i = index(s, "TINCAN_CONFIG"); if (i) cfg = val(after(substr(s, i))) }
-sec == "main" && /^[ \t]*env\."?TINCAN_CONFIG"?[ \t]*=/ { cfg = val(after($0)) }
-sec == "env" && /^[ \t]*"?TINCAN_CONFIG"?[ \t]*=/ { cfg = val(after($0)) }
-END { printf "%s\t%s%s\n", cfg, cmd, args }
-'
-# shellcheck disable=SC2329 # run through grok_mcp_list
-grok_toml_entry() {
-  awk -v want="$2" "$_grok_toml_awk" "$1"
-}
-
-# grok_mcp_list prints the MCP servers Grok discovers for the workdir, run
-# the way the wake runs it, as the library's listing lines: name,
-# TINCAN_CONFIG, command. Grok's listing does not show a server's env, so
-# for a server from a config.toml it is read from that file's entry; any
-# other source (a Claude or Cursor import, a plugin) has none.
-# shellcheck disable=SC2329 # run by tincan_wake_check_identity
-grok_mcp_list() {
-  (cd "$workdir_c" && grok_env "$BIN" inspect --json) >"$INSPECT" || return 1
-  _us=$(printf '\037')
-  grok_inspect_rows | while IFS=$_us read -r _name _type _path _target; do
-    [ -n "$_name$_type$_path$_target" ] || continue
-    _entry=$(printf '\t%s' "$_target")
-    case $_path in
-      *.toml) [ -f "$_path" ] && _entry=$(grok_toml_entry "$_path" "$_name") ;;
-    esac
-    printf '%s\t%s\n' "$_name" "$_entry"
-  done
-}
-
-tincan_wake_check_identity grok_mcp_list
-
-# Plugins and hooks run with approval off too, and the identity check does
-# not vet them.
-extras=$(grok_extras 2>/dev/null) || extras=unknown
-if [ "$extras" != 0 ]; then
-  tincan_wake_refuse "grok lists plugins or hooks in the wake home ($GROK_HOME_DIR); they would run unattended, so remove them there (grok inspect --json with HOME=$WAKE_HOME GROK_HOME=$GROK_HOME_DIR shows them)"
-fi
-rm -f "$INSPECT"
-
 # grok_attachment_dir prints where "tincan mcp" saves the attachments this
 # teammate receives: attachments/<agent> beside TINCAN_CONFIG, with the
 # agent name read from the config ("default" when it is missing or not a
@@ -288,6 +188,236 @@ if [ -n "$extra" ]; then
   roots="${roots:+$roots
 }$extra"
 fi
+
+# grok_resolve PATH prints the canonical path of the file PATH names, with
+# every symlink followed, or fails.
+grok_resolve() {
+  _p=$1
+  _n=0
+  while [ -L "$_p" ]; do
+    _n=$((_n + 1))
+    [ "$_n" -le 40 ] || return 1
+    _t=$(readlink "$_p") || return 1
+    case $_t in
+      /*) _p=$_t ;;
+      *) _p=$(dirname -- "$_p")/$_t ;;
+    esac
+  done
+  [ -f "$_p" ] || return 1
+  _d=$(tincan_wake_canonical_dir "$(dirname -- "$_p")") || return 1
+  printf '%s/%s\n' "${_d%/}" "$(basename -- "$_p")"
+}
+
+# grok_is_node_script FILE succeeds if FILE starts with a node shebang, as
+# the npm package's grok bootstrap does.
+grok_is_node_script() {
+  head -c 256 "$1" 2>/dev/null | head -n 1 | grep -Eq '^#!.*[/ ]node([[:space:]]|$)'
+}
+
+# Pin the binary. The npm install of Grok Build puts a node bootstrap on
+# PATH that runs $GROK_HOME/bin/grok, which under the wake's GROK_HOME is a
+# file the sandboxed run can write. So the wake resolves the file once,
+# follows the bootstrap to the native binary the owner's Grok home points
+# at, and runs that one file for the version check, the listing and the
+# run: the vetted file is the executed file.
+bin_path=$(command -v "$BIN" 2>/dev/null) || tincan_wake_refuse "$BIN is not installed or not on PATH"
+case $bin_path in
+  /*) ;;
+  */*) bin_path=$(pwd -P)/$bin_path ;;
+  *) tincan_wake_refuse "$BIN is not a program on PATH (an alias, function or builtin); set GROK_BIN to the grok binary's path" ;;
+esac
+GROK_EXE=$(grok_resolve "$bin_path") || tincan_wake_refuse "cannot resolve the grok binary $bin_path"
+if grok_is_node_script "$GROK_EXE"; then
+  native=$OWNER_GROK_HOME/bin/grok
+  if ! GROK_EXE=$(grok_resolve "$native") || grok_is_node_script "$GROK_EXE"; then
+    tincan_wake_refuse "$bin_path is Grok Build's npm bootstrap and $native is not a native grok binary; set GROK_BIN to the native binary (for example ~/.grok/bin/grok-X.Y.Z)"
+  fi
+  tincan_wake_log "$bin_path is Grok Build's npm bootstrap; running the native binary it uses for $OWNER_GROK_HOME, $GROK_EXE"
+fi
+if [ ! -x "$GROK_EXE" ]; then
+  tincan_wake_refuse "the grok binary $GROK_EXE is not executable"
+fi
+if tincan_wake_under_root "$GROK_EXE" "$wake_home_c:$workdir_c:$(printf '%s' "$roots" | tr '\n' ':')"; then
+  tincan_wake_refuse "the grok binary $GROK_EXE is where the sandboxed run can write (the wake home, the workdir or a write root); install Grok Build elsewhere or set GROK_BIN to a binary outside them"
+fi
+# Nothing runs a grok from the wake home; one found there is removed.
+if [ -e "$GROK_HOME_DIR/bin" ] || [ -L "$GROK_HOME_DIR/bin" ]; then
+  tincan_wake_log "removing $GROK_HOME_DIR/bin; the wake runs $GROK_EXE"
+  rm -rf "${GROK_HOME_DIR:?}/bin" || tincan_wake_refuse "cannot remove $GROK_HOME_DIR/bin"
+fi
+
+tincan_wake_check_binary env "$VERSION_PATTERN" HOME="$WAKE_HOME" GROK_HOME="$GROK_HOME_DIR" \
+  GROK_DISABLE_AUTOUPDATER=1 "$GROK_EXE" --version
+
+# A login lives in the wake home's auth.json; XAI_API_KEY is the other way.
+if [ -z "${XAI_API_KEY:-}" ] && [ ! -s "$GROK_HOME_DIR/auth.json" ]; then
+  tincan_wake_refuse "Grok Build is not logged in for this wake: run GROK_HOME=$GROK_HOME_DIR grok login once on this machine, or set XAI_API_KEY in the listener's environment"
+fi
+
+# grok_env runs a command with the wake home as HOME and GROK_HOME, and
+# Grok's update check off (an update mid-run would change the binary the
+# version check vetted). The version check and the run set the same.
+# shellcheck disable=SC2329 # run through grok_mcp_list
+grok_env() {
+  HOME=$WAKE_HOME GROK_HOME=$GROK_HOME_DIR GROK_DISABLE_AUTOUPDATER=1 "$@"
+}
+
+INSPECT=$TINCAN_WAKE_STATE_DIR/inspect.json
+
+# Grok also loads MCP servers from a project's .grok/config.toml and
+# .mcp.json, above its cwd up to the project root, and grok inspect shows a
+# project server that overrides the wake home's entry with the wake home's
+# file as its source. The model can write the workdir, so any such file in
+# the workdir or a directory above it stops the wake. The wake home's own
+# config.toml and the owner's Grok config (a user config, not a project
+# one, when HOME is the wake home) are the exceptions; a project layer
+# Grok still reports is refused after the listing.
+grok_home_c=$(tincan_wake_canonical_dir "$GROK_HOME_DIR") || grok_home_c=$wake_home_c/.grok
+owner_grok_c=$(tincan_wake_canonical_dir "$OWNER_GROK_HOME") || owner_grok_c=
+d=$workdir_c
+while :; do
+  for f in "${d%/}/.grok/config.toml" "${d%/}/.mcp.json"; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    case $f in
+      "$grok_home_c/config.toml") continue ;;
+      "$owner_grok_c/config.toml") [ -n "$owner_grok_c" ] && continue ;;
+    esac
+    tincan_wake_refuse "found project MCP config $f in or above the workdir $workdir_c; Grok would load its servers with approval off, so remove it or pick another TINCAN_GROK_WORKDIR"
+  done
+  [ "$d" != / ] || break
+  d=$(dirname -- "$d")
+done
+
+# grok_inspect_rows prints one line per MCP server in the saved inspect
+# output: name, source type, source path and target, separated by the
+# ASCII unit separator (so an empty field stays in place for read).
+# shellcheck disable=SC2329 # run through grok_mcp_list
+grok_inspect_rows() {
+  if [ "$JSON_TOOL" = jq ]; then
+    jq -r '(.mcpServers // [])[]
+      | [.name // "", .source.type // "", .source.path // "", .target // ""]
+      | map(tostring | gsub("[\t\n\u001f]"; " ")) | join("\u001f")' "$INSPECT"
+  else
+    python3 -c '
+import json, sys
+for s in json.load(open(sys.argv[1])).get("mcpServers") or []:
+    src = s.get("source") or {}
+    row = [s.get("name") or "", src.get("type") or "", src.get("path") or "", s.get("target") or ""]
+    print("\x1f".join(str(x).replace("\t", " ").replace("\n", " ").replace("\x1f", " ") for x in row))
+' "$INSPECT"
+  fi
+}
+
+# grok_project_layers prints the project config files the saved inspect
+# output says Grok loads, one per line.
+grok_project_layers() {
+  if [ "$JSON_TOOL" = jq ]; then
+    jq -r '(.configSources.layers // [])[] | select(.role == "project") | .path // "?" | tostring' "$INSPECT"
+  else
+    python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for l in (d.get("configSources") or {}).get("layers") or []:
+    if l.get("role") == "project":
+        print(l.get("path") or "?")
+' "$INSPECT"
+  fi
+}
+
+# grok_extras prints how many plugins and hooks the saved inspect output
+# lists.
+grok_extras() {
+  if [ "$JSON_TOOL" = jq ]; then
+    jq -r '((.plugins // []) | length) + ((.hooks // []) | length)' "$INSPECT"
+  else
+    python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(len(d.get("plugins") or []) + len(d.get("hooks") or []))
+' "$INSPECT"
+  fi
+}
+
+# grok_toml_entry FILE NAME TARGET prints "TINCAN_CONFIG<TAB>command args"
+# for the [mcp_servers.NAME] table of a Grok config.toml, reading its env
+# either as an [mcp_servers.NAME.env] table or inline (env = {
+# TINCAN_CONFIG = ... }). TARGET is the command grok inspect says it runs;
+# when the entry's command is not TARGET, the entry is not what Grok
+# loaded (a project config overrides it), so it prints an empty
+# TINCAN_CONFIG and TARGET. Only one-line values are read; anything it
+# cannot read comes out empty, which the identity check refuses.
+# shellcheck disable=SC2016 # awk program text, expanded by awk
+_grok_toml_awk='
+function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+function val(s,   q, i) {
+  s = trim(s); q = substr(s, 1, 1)
+  if (q != "\"" && q != "\047") return ""
+  s = substr(s, 2); i = index(s, q)
+  return i ? substr(s, 1, i - 1) : ""
+}
+function after(s) { return substr(s, index(s, "=") + 1) }
+function arr(s,   out, n, parts, i, v) {
+  s = after(s); sub(/^[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
+  n = split(s, parts, ",")
+  for (i = 1; i <= n; i++) { v = val(parts[i]); if (v != "") out = out " " v }
+  return out
+}
+/^[ \t]*\[/ {
+  h = $0; sub(/^[ \t]*\[[ \t]*/, "", h); sub(/[ \t]*\][ \t]*(#.*)?$/, "", h)
+  gsub(/"/, "", h); gsub(/[ \t]/, "", h)
+  sec = ""
+  if (h == "mcp_servers." want) sec = "main"
+  if (h == "mcp_servers." want ".env") sec = "env"
+  next
+}
+sec == "main" && /^[ \t]*command[ \t]*=/ { cmd = val(after($0)) }
+sec == "main" && /^[ \t]*args[ \t]*=/ { args = arr($0) }
+sec == "main" && /^[ \t]*env[ \t]*=/ { s = $0; i = index(s, "TINCAN_CONFIG"); if (i) cfg = val(after(substr(s, i))) }
+sec == "main" && /^[ \t]*env\."?TINCAN_CONFIG"?[ \t]*=/ { cfg = val(after($0)) }
+sec == "env" && /^[ \t]*"?TINCAN_CONFIG"?[ \t]*=/ { cfg = val(after($0)) }
+END {
+  if (cmd != target) { cfg = ""; cmd = target; args = "" }
+  printf "%s\t%s%s\n", cfg, cmd, args
+}
+'
+# shellcheck disable=SC2329 # run through grok_mcp_list
+grok_toml_entry() {
+  awk -v want="$2" -v target="$3" "$_grok_toml_awk" "$1"
+}
+
+# grok_mcp_list prints the MCP servers Grok discovers for the workdir, run
+# the way the wake runs it, as the library's listing lines: name,
+# TINCAN_CONFIG, command. Grok's listing does not show a server's env, so
+# for a server from a config.toml it is read from that file's entry, when
+# that entry's command is the one Grok reports; any other source (a Claude
+# or Cursor import, a plugin) has none.
+# shellcheck disable=SC2329 # run by tincan_wake_check_identity
+grok_mcp_list() {
+  (cd "$workdir_c" && grok_env "$GROK_EXE" inspect --json) >"$INSPECT" || return 1
+  _us=$(printf '\037')
+  grok_inspect_rows | while IFS=$_us read -r _name _type _path _target; do
+    [ -n "$_name$_type$_path$_target" ] || continue
+    _entry=$(printf '\t%s' "$_target")
+    case $_path in
+      *.toml) [ -f "$_path" ] && _entry=$(grok_toml_entry "$_path" "$_name" "$_target") ;;
+    esac
+    printf '%s\t%s\n' "$_name" "$_entry"
+  done
+}
+
+tincan_wake_check_identity grok_mcp_list
+
+# Plugins and hooks run with approval off too, and the identity check does
+# not vet them.
+extras=$(grok_extras 2>/dev/null) || extras=unknown
+if [ "$extras" != 0 ]; then
+  tincan_wake_refuse "grok lists plugins or hooks in the wake home ($GROK_HOME_DIR); they would run unattended, so remove them there (grok inspect --json with HOME=$WAKE_HOME GROK_HOME=$GROK_HOME_DIR shows them)"
+fi
+layers=$(grok_project_layers 2>/dev/null) || layers="(unreadable)"
+if [ -n "$layers" ]; then
+  tincan_wake_refuse "grok loads project config from $(printf '%s' "$layers" | tr '\n' ' ')for the workdir $workdir_c; its MCP servers would run with approval off, so remove it or pick another TINCAN_GROK_WORKDIR"
+fi
+rm -f "$INSPECT"
 
 toml_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"
@@ -343,8 +473,11 @@ state=$(CDPATH='' cd -P -- "$TINCAN_WAKE_STATE_DIR" && pwd -P)
 out=$state/out.$$
 err=$state/err.$$
 status=0
+# The run starts in the workdir, as the listing did, so both see the same
+# project config.
+cd "$workdir_c" || tincan_wake_refuse "cannot enter the workdir $workdir_c"
 tincan_wake_run env HOME="$WAKE_HOME" GROK_HOME="$GROK_HOME_DIR" GROK_DISABLE_AUTOUPDATER=1 \
-  "$BIN" -p "$PROMPT" --output-format json --always-approve --sandbox "$PROFILE" \
+  "$GROK_EXE" -p "$PROMPT" --output-format json --always-approve --sandbox "$PROFILE" \
   --cwd "$workdir_c" --session-id "$SID" >"$out" 2>"$err" || status=$?
 cat "$out"
 cat "$err" >&2
@@ -353,12 +486,33 @@ reported=$(sed -n 's/.*"sessionId": *"\([0-9a-f-]*\)".*/\1/p' "$out" | head -n 1
 if [ -n "$reported" ] && [ "$reported" != "$SID" ] && [ -w "$SESSIONS" ]; then
   printf '%s\n' "$reported" >>"$SESSIONS"
 fi
+# grok_error_message prints the message of each error object in Grok's
+# JSON output: only the message, since the object can also carry token
+# counts and request ids.
+grok_error_message() {
+  if [ "$JSON_TOOL" = jq ]; then
+    jq -rR 'fromjson? | select(type == "object" and .type == "error") | .message // "" | tostring' "$1"
+  else
+    python3 -c '
+import json, sys
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(d, dict) and d.get("type") == "error":
+        print(str(d.get("message") or ""))
+' "$1"
+  fi
+}
 auth=
 if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
-  # Only Grok's own error object and its stderr: a successful answer
-  # carries the model's words, which can say anything.
-  if { grep -E '^[[:space:]]*\{"type": *"error"' "$out" || true; cat "$err"; } |
-    grep -Eiq 'not logged in|not authenticated|unauthenticated|authentication (failed|required|expired)|unauthorized|401|log ?in (again|required)|sign in again|please (re-?)?(log|sign) ?in|invalid api key|XAI_API_KEY'; then
+  # Only Grok's own error message and its stderr: a successful answer
+  # carries the model's words, which can say anything. 401 counts only as
+  # a number of its own, never inside a count or after the decimal point
+  # of a timestamp (.401Z, ,401).
+  if { grok_error_message "$out" 2>/dev/null || true; cat "$err"; } |
+    grep -Eiq 'not logged in|not authenticated|unauthenticated|authentication (failed|required|expired)|unauthorized|(^|[^0-9.,])401([^0-9]|$)|log ?in (again|required)|sign in again|please (re-?)?(log|sign) ?in|invalid api key|XAI_API_KEY'; then
     auth=1
   fi
 fi

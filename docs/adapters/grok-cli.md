@@ -87,26 +87,41 @@ Set the teammate's wake to `command` in the relay's `wake.json`:
 Each nudge, the script:
 
 1. Takes the wake lock (a second nudge during a run exits and leaves requests queued; a lock left by a killed run is broken) and exits early while a backoff is in force.
-2. Checks that `grok` (`GROK_BIN` to override) is Grok Build by its `--version` (`TINCAN_GROK_VERSION_PATTERN` to override), that the wake home is not your home, and that there is a login in the wake home or an `XAI_API_KEY`.
-3. Pins identity: it runs `grok inspect --json` from the workdir with the wake home as `HOME` and `GROK_HOME`, exactly as the run will, and refuses to run unless the listing holds exactly one agent-tincan server, its `TINCAN_CONFIG` (read from the `config.toml` entry the listing points at, since the listing does not show a server's env) is the wake's own, every other server is in `TINCAN_WAKE_ALLOWED_SERVERS`, and there are no plugins or hooks. Reading the listing needs `jq` or `python3` on the listener's PATH (`TINCAN_GROK_JSON_TOOL` picks one).
-4. Writes the sandbox profile (below) to the wake home's `.grok/sandbox.toml`, replacing whatever is there.
-5. Picks a new session id and records it, with the workdir, in `~/.config/tincan/grok-cli.wake-sessions` (mode 600) before the run, so the history agent leaves the run out even if the timeout kills it.
-6. Runs, in the workdir (`TINCAN_GROK_WORKDIR`, default `<wake home>/work`), with Grok's update check off (`GROK_DISABLE_AUTOUPDATER=1`, so the binary the version check vetted is the one that runs):
+2. Pins the binary (see [The grok binary](#the-grok-binary)) and checks that it is Grok Build by its `--version` (`TINCAN_GROK_VERSION_PATTERN` to override), run with the wake's environment. It also checks that the wake home is not your home, and that there is a login in the wake home or an `XAI_API_KEY`.
+3. Refuses project MCP config: a `.grok/config.toml` or `.mcp.json` in the workdir or any directory above it, up to `/`. The wake home's own `.grok/config.toml` and your own Grok config (`~/.grok/config.toml`, which Grok reads as a user config only when `HOME` is your home) are the two exceptions.
+4. Pins identity: it runs `grok inspect --json` from the workdir with the wake home as `HOME` and `GROK_HOME`, exactly as the run will, and refuses to run unless the listing holds exactly one agent-tincan server, its `TINCAN_CONFIG` (read from the `config.toml` entry the listing points at, since the listing does not show a server's env) is the wake's own, every other server is in `TINCAN_WAKE_ALLOWED_SERVERS`, there are no plugins or hooks, and Grok reports no project config layer. The command Grok says it runs for a server must be the command in that `config.toml` entry: a project config that overrides the entry is listed with the wake home's file as its source, so a mismatch is refused. Reading the listing needs `jq` or `python3` on the listener's PATH (`TINCAN_GROK_JSON_TOOL` picks one).
+5. Writes the sandbox profile (below) to the wake home's `.grok/sandbox.toml`, replacing whatever is there.
+6. Picks a new session id and records it, with the workdir, in `~/.config/tincan/grok-cli.wake-sessions` (mode 600) before the run, so the history agent leaves the run out even if the timeout kills it.
+7. Runs the pinned binary, started in the workdir (`TINCAN_GROK_WORKDIR`, default `<wake home>/work`) as the listing was, with Grok's update check off (`GROK_DISABLE_AUTOUPDATER=1`):
 
    ```
-   grok -p <prompt> --output-format json --always-approve --sandbox tincan-wake --cwd <workdir> --session-id <id>
+   <pinned grok> -p <prompt> --output-format json --always-approve --sandbox tincan-wake --cwd <workdir> --session-id <id>
    ```
 
    The prompt tells Grok to call check_inbox, finish work waiting on replies, handle and reply to every request, and repeat until the inbox is empty.
-7. Kills the run and everything it started after `TINCAN_WAKE_TIMEOUT` seconds, counts failures, and backs off after three in a row (`TINCAN_WAKE_MAX_FAILURES`, `TINCAN_WAKE_BACKOFF`), telling `TINCAN_WAKE_OPERATOR` once. One successful run clears it.
+8. Kills the run and everything it started after `TINCAN_WAKE_TIMEOUT` seconds, counts failures, and backs off after three in a row (`TINCAN_WAKE_MAX_FAILURES`, `TINCAN_WAKE_BACKOFF`), telling `TINCAN_WAKE_OPERATOR` once. One successful run clears it.
+
+The wake keeps its lock, failure count and backoff marker in `<name>.wake-state` beside the teammate's config (`~/.config/tincan/grok-cli.wake-state`, mode 700), not under the temp directory, since the run can write the temp directories. `TINCAN_WAKE_STATE_DIR` overrides it.
 
 The header of `examples/lib/tincan-wake-lib.sh` lists the library's settings, and the header of `examples/grok-cli/grok-wake.sh` the wake's own.
+
+## The grok binary
+
+The npm package (`@xai-official/grok`) puts a node script on your PATH (for example `/opt/homebrew/bin/grok`) that runs `$GROK_HOME/bin/grok`, and installs a native binary there when it is missing. Under the wake's `GROK_HOME`, that is a file inside the wake home, which a sandboxed run can write. So the wake never runs the bootstrap. Each wake it:
+
+- resolves `grok` on PATH (or `GROK_BIN`) to one file, following symlinks;
+- when that file is the node bootstrap, uses the native binary your own Grok home points at instead: `$GROK_HOME/bin/grok` from the listener's environment, else `~/.grok/bin/grok`, resolved to its versioned file (for example `~/.grok/bin/grok-1.0.40`). With no native binary there, it refuses and asks for `GROK_BIN`;
+- refuses a binary under the wake home, the workdir or a write root, where the run could replace it;
+- removes the wake home's `.grok/bin`, if a run left one there;
+- runs that one file for the version check, `grok inspect` and the run, all with the wake's `HOME` and `GROK_HOME`, so the file it vetted is the file that runs.
+
+To pin a version by hand, set `GROK_BIN` to a native binary, for example `GROK_BIN=$HOME/.grok/bin/grok-1.0.40`. When your own Grok updates itself, `~/.grok/bin/grok` moves to the new version and the next wake vets and runs that one.
 
 ## Security posture
 
 Grok runs unattended with tool approval off (`--always-approve`): model-generated commands and tool calls execute without anyone confirming them. What confines it:
 
-- The sandbox. `tincan-wake` extends Grok's built-in `workspace` profile, which Grok enforces on its whole process with Seatbelt on macOS and Landlock on Linux. It reads anywhere your user can. It writes only in the workdir, temp directories (`/tmp`, `/var/tmp` and the macOS temp dirs), the wake home's `.grok` (where Grok keeps its `config.toml`, `sandbox.toml` and hook files write-protected, so a run cannot widen the next one) and the `read_write` directories the wake adds: the teammate's attachments folder (`attachments/<agent>` beside `TINCAN_CONFIG`, where `tincan mcp` saves the files teammates send) and the operator's write roots. Write roots are opened by the operator, not the model: `TINCAN_GROK_WRITE_ROOTS` (colon-separated absolute paths), each canonicalized and added only if it sits under `TINCAN_GROK_ALLOWED_ROOTS` (default `~/code:<workdir>`), the same checks as the Codex wake's write roots. A custom profile makes Grok refuse to start when it cannot apply it, where a built-in profile would warn and run unconfined. Network is open, as with the Codex wake, so a command the model runs can send anything it can read off the machine.
+- The sandbox. `tincan-wake` extends Grok's built-in `workspace` profile, which Grok enforces on its whole process with Seatbelt on macOS and Landlock on Linux. It reads anywhere your user can. It writes only in the workdir, temp directories (`/tmp`, `/var/tmp` and the macOS temp dirs), the wake home's `.grok` (where Grok keeps its `config.toml`, `sandbox.toml` and hook files write-protected, so a run cannot widen the next one; `.grok/bin` is not protected, which is why the wake never runs a grok from there, see [The grok binary](#the-grok-binary)) and the `read_write` directories the wake adds: the teammate's attachments folder (`attachments/<agent>` beside `TINCAN_CONFIG`, where `tincan mcp` saves the files teammates send) and the operator's write roots. Write roots are opened by the operator, not the model: `TINCAN_GROK_WRITE_ROOTS` (colon-separated absolute paths), each canonicalized and added only if it sits under `TINCAN_GROK_ALLOWED_ROOTS` (default `~/code:<workdir>`), the same checks as the Codex wake's write roots. A custom profile makes Grok refuse to start when it cannot apply it, where a built-in profile would warn and run unconfined. Network is open, as with the Codex wake, so a command the model runs can send anything it can read off the machine.
 - The identity check starts Grok wired only to this teammate: exactly one agent-tincan server, pinned to its own `TINCAN_CONFIG`, and nothing else it did not vet. That guards against misconfiguration, not against the model. Grok can read anywhere and has a shell, so it can run `tincan` with another co-located agent's `TINCAN_CONFIG` and act as that agent, or read another agent's config. Allowlists that name agents keep them apart only when they run on different machines.
 - Secrets. The wake home's Grok login (`.grok/auth.json`) and an `XAI_API_KEY` in the listener's environment are readable by the run.
 - Account. The wake runs on your Grok account and uses its plan or your API credits; every wake is a Grok session like one you started yourself.
@@ -124,6 +139,7 @@ Your own Grok CLI sessions (in `~/.grok`, or `$GROK_HOME`) are a history source,
 ## Limits
 
 - Every wake is a fresh session: the whole exchange has to finish inside one run.
+- The run can write the temp directories, so a binary installed under `/tmp` could be replaced by a run; install Grok Build (or point `GROK_BIN`) elsewhere.
 - `grok inspect` does not show a server's env, so the `TINCAN_CONFIG` check reads the `config.toml` entry the listing points at, one-line values only; an entry it cannot read is refused rather than trusted.
 - Under the sandbox, `tincan mcp` runs inside it too. It reaches the relay over the network and saves attachments to the folder the wake opens for it, but cannot save a relay move to its config file outside the workdir; `tincan doctor` reports that case.
 - Not yet verified live: that `--always-approve` lets headless Grok call the tincan MCP tools without a prompt, that Grok accepts the `tincan-wake` profile as written, and a full wake answering a teammate's ask. The binary check and the identity check were run against Grok Build 1.0.40's real `--version` and `grok inspect --json` output. Record the first live wake before relying on it.
