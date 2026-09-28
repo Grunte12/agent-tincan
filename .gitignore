@@ -5,4 +5,3 @@
 *.db-journal
 .env
 coverage.out
-/internal/wake/grokbin-*/

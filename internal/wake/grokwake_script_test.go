@@ -84,25 +84,59 @@ type grokHarness struct {
 	dir, home, config, state, argv, notice string
 	wakeHome, grokHome, workdir, sessions  string
 	// bin holds the fake grok. The wake refuses a binary in the temp
-	// directories a run can write, where t.TempDir is, so it is made in
-	// the package directory instead.
+	// directories a run can write, where t.TempDir is, so it is made under
+	// the user's cache directory instead.
 	bin string
 }
 
-// outsideTemp makes a directory outside the temp directories, removed when
-// the test ends.
+// outsideTemp makes a directory under the user's cache directory, outside
+// both the temp directories and the source tree, removed when the test
+// ends. The test is skipped when there is no such directory, or when it
+// resolves under a temp directory, since the wake would refuse a binary
+// there.
 func outsideTemp(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp(".", "grokbin-")
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("no user cache directory to hold the fake grok outside the temp directories: %v", err)
+	}
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Skipf("cannot create the user cache directory %s for the fake grok: %v", cache, err)
+	}
+	cache, err = filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Skipf("cannot resolve the user cache directory: %v", err)
+	}
+	for _, root := range tempRoots() {
+		if cache == root || strings.HasPrefix(cache, root+string(filepath.Separator)) {
+			t.Skipf("the user cache directory %s is under the temp directory %s, where the wake refuses a grok binary", cache, root)
+		}
+	}
+	d, err := os.MkdirTemp(cache, "tincan-grokbin-")
+	if err != nil {
+		t.Skipf("cannot make a directory for the fake grok in %s: %v", cache, err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(d) })
-	abs, err := filepath.Abs(d)
-	if err != nil {
-		t.Fatal(err)
+	return d
+}
+
+// tempRoots lists, resolved, the temp directories the wake treats as
+// writable by a run: TMPDIR, /tmp and /var/tmp and, on macOS, the per-user
+// temp root above TMPDIR.
+func tempRoots() []string {
+	var roots []string
+	add := func(p string) {
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != "/" {
+			roots = append(roots, filepath.Clean(r))
+		}
 	}
-	return abs
+	add(os.TempDir())
+	add("/tmp")
+	add("/var/tmp")
+	if runtime.GOOS == "darwin" {
+		add(filepath.Dir(filepath.Clean(os.TempDir())))
+	}
+	return roots
 }
 
 func newGrokHarness(t *testing.T) *grokHarness {
