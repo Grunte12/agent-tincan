@@ -26,7 +26,6 @@ func TestLaunchCheck(t *testing.T) {
 		{"closed before initialize", []mcpserver.Launch{{Started: ago(time.Minute), Ended: ago(time.Minute)}}, "fail", "without ever sending initialize"},
 		{"connected, no tools/list", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Initialized: ago(time.Minute), Framing: "content-length"}}, "fail", "never asked for the tool list"},
 		{"healthy", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Initialized: ago(time.Minute), ToolsListed: ago(time.Minute), Version: Version}}, "ok", "listed the tools"},
-		{"old build still running", []mcpserver.Launch{{Started: ago(time.Hour), Initialized: ago(time.Hour), ToolsListed: ago(time.Hour), Version: "0.1.0"}}, "warn", "running tincan 0.1.0"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -35,6 +34,47 @@ func TestLaunchCheck(t *testing.T) {
 				t.Fatalf("got %s %q, want %s containing %q", got.Status, got.Detail, c.status, c.want)
 			}
 		})
+	}
+}
+
+// Doctor names every tincan mcp still running a different build than this
+// binary, with the reload step for the app that runs it. Ended launches and
+// dead processes do not count.
+func TestBuildCheck(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	alive := func(l mcpserver.Launch) bool { return l.PID != 99 }
+	cur := Version
+	ls := []mcpserver.Launch{
+		{Started: now, PID: 10, Client: "claude-code 2.0.1", Version: "0.1.0"},
+		{Started: now, PID: 11, Client: "codex-mcp-client 0.40", Version: "0.1.0"},
+		{Started: now, PID: 12, Client: "claude-code 2.0.1", Version: cur},
+		{Started: now, PID: 13, Client: "cursor-vscode 1", Version: "0.1.0", Ended: now},
+		{Started: now, PID: 99, Client: "cursor-vscode 1", Version: "0.1.0"},
+	}
+	c := buildCheck(ls, alive)
+	if c.Status != "warn" {
+		t.Fatalf("status %s, want warn: %+v", c.Status, c)
+	}
+	for _, want := range []string{"pid 10", "pid 11", "0.1.0"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Fatalf("detail lacks %q: %s", want, c.Detail)
+		}
+	}
+	for _, not := range []string{"pid 12", "pid 13", "pid 99"} {
+		if strings.Contains(c.Detail, not) {
+			t.Fatalf("detail names %s: %s", not, c.Detail)
+		}
+	}
+	for _, want := range []string{"Claude Code", "Codex"} {
+		if !strings.Contains(c.Fix, want) {
+			t.Fatalf("fix lacks the %s reload step: %s", want, c.Fix)
+		}
+	}
+	if strings.Contains(c.Fix, "Cursor") {
+		t.Fatalf("fix names a host with no stale server: %s", c.Fix)
+	}
+	if ok := buildCheck(ls[2:], alive); ok.Status != "ok" {
+		t.Fatalf("no stale servers: got %+v", ok)
 	}
 }
 

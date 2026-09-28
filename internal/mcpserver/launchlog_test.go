@@ -3,8 +3,10 @@ package mcpserver
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRecorderNotesTheHandshake(t *testing.T) {
@@ -62,5 +64,41 @@ func TestRecorderPrunes(t *testing.T) {
 		if strings.HasPrefix(e, "20260101T000000.000000000Z") {
 			t.Fatal("oldest record was kept")
 		}
+	}
+}
+
+// A record counts as running only while its pid belongs to the process that
+// wrote it: a process that started after the record reused the pid.
+func TestLaunchRunning(t *testing.T) {
+	now := time.Now()
+	if !LaunchRunning(Launch{PID: os.Getpid(), Started: now}) {
+		t.Fatal("this process's record is not running")
+	}
+	if LaunchRunning(Launch{PID: os.Getpid(), Started: now, Ended: now}) {
+		t.Fatal("an ended record counts as running")
+	}
+	if runtime.GOOS != "windows" && LaunchRunning(Launch{PID: os.Getpid(), Started: now.Add(-24 * time.Hour)}) {
+		t.Fatal("a pid reused by a later process counts as running")
+	}
+}
+
+// Pruning keeps the record of a server that is still running, however many
+// launches came after it.
+func TestPruneKeepsRunningServers(t *testing.T) {
+	dir := t.TempDir()
+	live := fmt.Sprintf(`{"version":"old","pid":%d,"started":%q}`, os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(dir+"/20250101T000000.000000000Z-1.json", []byte(live), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range keepLaunches + 5 {
+		name := fmt.Sprintf("20260101T000000.%09dZ-1.json", i)
+		if err := os.WriteFile(dir+"/"+name, []byte(`{"version":"x"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prune(dir)
+	names := launchFiles(dir)
+	if len(names) != keepLaunches || names[0] != "20250101T000000.000000000Z-1.json" {
+		t.Fatalf("kept %d, oldest %q", len(names), names[0])
 	}
 }

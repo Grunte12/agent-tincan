@@ -12,8 +12,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
@@ -180,4 +182,32 @@ func TestUpgradeWithoutDist(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	assertUntouched(t, exe, before)
+}
+
+// After an upgrade, tincan names each tincan mcp still on the old build and
+// how its app reloads it; with none running it lists the step per app.
+func TestReloadAdvice(t *testing.T) {
+	alive := func(mcpserver.Launch) bool { return true }
+	ls := []mcpserver.Launch{
+		{PID: 10, Client: "claude-code 2.0.1", Version: "0.3.0"},
+		{PID: 11, Client: "cursor-vscode 1", Version: "0.4.0"},
+		{PID: 12, Client: "codex-mcp-client 1", Version: "0.3.0", Ended: time.Now()},
+	}
+	got := reloadAdvice(ls, "0.4.0", alive)
+	for _, want := range []string{"pid 10", "Claude Code", "Restart any long-running tincan processes"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("advice lacks %q:\n%s", want, got)
+		}
+	}
+	for _, not := range []string{"pid 11", "pid 12"} {
+		if strings.Contains(got, not) {
+			t.Fatalf("advice names %s:\n%s", not, got)
+		}
+	}
+	none := reloadAdvice(nil, "0.4.0", alive)
+	for _, want := range []string{"Claude Code", "Codex", "Cursor", "other apps"} {
+		if !strings.Contains(none, want) {
+			t.Fatalf("advice with no launches lacks %q:\n%s", want, none)
+		}
+	}
 }
