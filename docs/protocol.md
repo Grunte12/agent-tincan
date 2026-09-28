@@ -207,7 +207,7 @@ A poll with no messages holds until its normal deadline, then returns HTTP 200 w
 
 ## Agent roster
 
-`GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry and terminal requests are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
+`GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry, terminal requests, and pings are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
 
 ## Ping capability
 

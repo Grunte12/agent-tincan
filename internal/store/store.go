@@ -688,12 +688,13 @@ type QueueStat struct {
 }
 
 // QueueStats returns every agent's backlog in one grouped query. Expired and
-// finished requests, and claims whose lease ran out, are not counted.
+// finished requests, claims whose lease ran out, and pings (answered
+// automatically, never work) are not counted.
 func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	now := s.now().UnixMilli()
 	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
 		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
-		AND (status != 'claimed' OR lease_until > ?) GROUP BY to_agent, status`, now, now)
+		AND (status != 'claimed' OR lease_until > ?) AND kind != 'ping' GROUP BY to_agent, status`, now, now)
 	if err != nil {
 		return nil, err
 	}
