@@ -14,6 +14,9 @@ import (
 // the agent to handle them as it would a request from the owner, while keeping the
 // sender and chain visible.
 func FormatRequest(req envelope.Request) string {
+	if req.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Request %s from %s (your teammate), via Agent Tincan.\n", req.ID, req.From)
 	if len(req.Chain) > 1 {
@@ -46,6 +49,9 @@ const RepliesHeading = "Replies to your requests:\n"
 // FormatReply renders a reply to a request this agent sent, with what it
 // asked, since a fresh session may not remember.
 func FormatReply(r Result) string {
+	if r.Request.Kind == envelope.KindPing {
+		return ""
+	}
 	var b strings.Builder
 	from, status, body := r.Request.To, r.Status, ""
 	var atts []envelope.Attachment
@@ -118,6 +124,9 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		}
 	}
 	for _, req := range in.Requests {
+		if req.Kind == envelope.KindPing {
+			continue
+		}
 		if _, err := c.Claim(ctx, req.ID); err != nil {
 			fmt.Fprintf(&b, "(could not claim %s: %v)\n", req.ID, err)
 			continue

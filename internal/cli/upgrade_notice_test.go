@@ -38,7 +38,7 @@ func TestUpgradeInboxAndWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	in, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
+	in, _, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestWaitDoesNotEndForUpgradeAlone(t *testing.T) {
 	r, _ := client.NewRelay(srv.URL, "")
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := waitForInbox(ctx, r, 0, client.RepliesKeep); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := waitForInbox(ctx, r, 0, client.RepliesKeep); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("wait error = %v, want deadline exceeded", err)
 	}
 }

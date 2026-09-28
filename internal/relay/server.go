@@ -115,7 +115,11 @@ type Server struct {
 	// versions is the tincan build each agent last called with, from the
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
-	versions map[string]string
+	versions     map[string]string
+	pollFeatures map[string]pollFeatures
+	// pollMu orders each poll-feature update with its store write, so two
+	// overlapping polls persist in the order they changed the state.
+	pollMu sync.Mutex
 	// storedVersion is the build last written to the store for each agent,
 	// and versionWritten when. The write is throttled like last-seen, so two
 	// builds running under one name (an old listen or MCP process next to an
@@ -127,6 +131,20 @@ type Server struct {
 // persistEvery bounds how often an agent's activity is written to the store.
 const persistEvery = time.Minute
 
+// legacyPollWindow keeps mixed-version receivers from accepting unanswerable pings.
+const legacyPollWindow = 24 * time.Hour
+
+// pollFeaturesPersistEvery bounds how often a legacy poller's last-seen time
+// is written; the in-memory value is always current.
+const pollFeaturesPersistEvery = time.Hour
+
+// pollFeatures intentionally excludes advertisements from non-poll calls.
+// The legacy features column cannot establish whether a receiver supports ping.
+type pollFeatures struct {
+	Ping            bool
+	LastUnsupported time.Time
+}
+
 // New builds a relay server.
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
@@ -134,6 +152,17 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}}
 	s.storedVersion = maps.Clone(s.versions)
+	s.pollFeatures = map[string]pollFeatures{}
+	states, err := st.PollFeatures(context.Background())
+	if err != nil {
+		log.Printf("poll features: %v", err)
+	}
+	for name, state := range states {
+		var f pollFeatures
+		if json.Unmarshal([]byte(state), &f) == nil {
+			s.pollFeatures[name] = f
+		}
+	}
 	return s
 }
 
@@ -336,6 +365,37 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 		}))
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/poll" {
+		supported := false
+		for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
+			if strings.TrimSpace(f) == "ping" {
+				supported = true
+			}
+		}
+		now := s.cfg.Now()
+		s.pollMu.Lock()
+		defer s.pollMu.Unlock()
+		s.mu.Lock()
+		old := s.pollFeatures[res.Name]
+		state := old
+		if supported {
+			state.Ping = true
+		} else {
+			state.LastUnsupported = now
+		}
+		s.pollFeatures[res.Name] = state
+		// Persist only what changes the gate: support appearing, or a legacy
+		// poll after a quiet spell. Every poll hitting the database would put
+		// a write on the hot path.
+		persist := state.Ping != old.Ping || (!supported && (old.LastUnsupported.IsZero() || now.Sub(old.LastUnsupported) > pollFeaturesPersistEvery))
+		s.mu.Unlock()
+		if persist {
+			encoded, _ := json.Marshal(state)
+			if err := s.store.SetPollFeatures(r.Context(), res.Name, string(encoded)); err != nil {
+				log.Printf("poll features: %v", err)
+			}
+		}
+	}
 	return res.Name
 }
 
@@ -430,6 +490,19 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errors.New("no such agent: "+req.To))
 		return
 	}
+	if req.Kind == envelope.KindPing {
+		s.mu.Lock()
+		state := s.pollFeatures[req.To]
+		capable, version := state.Ping && (state.LastUnsupported.IsZero() || s.cfg.Now().Sub(state.LastUnsupported) > legacyPollWindow), s.versions[req.To]
+		s.mu.Unlock()
+		if !capable {
+			if version == "" {
+				version = "unknown"
+			}
+			writeErr(w, http.StatusConflict, fmt.Errorf("%s runs tincan %s and has not advertised ping support; use ask", req.To, version))
+			return
+		}
+	}
 	if err := s.prep.Prepare(r.Context(), &req); err != nil {
 		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
 		writeErr(w, statusFor(err), err)
@@ -500,13 +573,16 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			// Report what is waiting without delivering it, so a listener
 			// can nudge the agent and the agent's own check_inbox still
 			// receives it. waiting counts the replies it was asked for.
-			n, err := s.store.CountQueued(r.Context(), name)
+			n, pings, err := s.store.CountQueuedWithPings(r.Context(), name)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, err)
 				return
 			}
 			if n > 0 || len(reps) > 0 {
 				out := map[string]any{"waiting": n + len(reps) + more, "queued": n}
+				if pings > 0 {
+					out["pings"] = pings
+				}
 				if n > 0 {
 					pending, err := s.store.PendingRequests(r.Context(), name, MaxPeekPending)
 					if err != nil {
@@ -709,7 +785,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	// once the waker's grace period shows it went unread.
 	if req, _, err := s.store.Request(r.Context(), id); err == nil {
 		s.hub.notify(inboxKey(req.From))
-		if rp, ok := s.events.(Replier); ok {
+		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
 			rp.Replied(r.Context(), req)
 		}
 	} else {
@@ -936,6 +1012,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
 	delete(s.versions, in.Name)
+	delete(s.pollFeatures, in.Name)
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()
@@ -1113,7 +1190,7 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 200 {
 		limit = n
 	}
-	steps, err := s.store.RecentTraces(r.Context(), limit)
+	steps, err := s.store.RecentTraces(r.Context(), limit, r.URL.Query().Get("exclude_pings") == "true")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

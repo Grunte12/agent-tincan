@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
 func listenCmd() *cobra.Command {
@@ -63,15 +64,39 @@ var (
 
 func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) error {
 	backoff := time.Second
+	// Failed pongs retry in the background while the loop keeps peeking; the
+	// listener waits for them before it returns, --once included.
+	var retries client.PongRetries
+	defer retries.Wait()
 	for {
 		w, err := r.Peek(ctx, client.DefaultPollHold)
-		n := w.Total
+		n := w.Total - w.Pings
 		switch {
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case client.IsStatus(err, 403):
 			return err
 		case err != nil:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(jitter(backoff)):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
+		}
+		pingFailed := false
+		for _, pending := range w.Pending {
+			if pending.Kind != envelope.KindPing {
+				continue
+			}
+			_, retry, err := client.AnswerPings(ctx, r, client.Inbox{Requests: []envelope.Request{{ID: pending.ID, Kind: envelope.KindPing}}}, "listen")
+			if err != nil {
+				pingFailed = true
+			}
+			retries.Go(ctx, retry)
+		}
+		if pingFailed && n <= 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

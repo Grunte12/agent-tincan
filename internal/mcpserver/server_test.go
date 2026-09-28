@@ -864,6 +864,43 @@ func TestFetchFailureNoticeNamesGetAttachment(t *testing.T) {
 	}
 }
 
+func TestCheckInboxAutomaticallyAnswersPing(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	muse := session(t, m, "muse")
+	call(t, muse, "check_inbox", nil)
+	sender := m.Client(t, "grokbot")
+	req, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, muse, "check_inbox", nil)
+	if strings.Contains(got, req.ID) || strings.Contains(got, "pong") {
+		t.Fatalf("ping visible: %s", got)
+	}
+	result, err := sender.Get(t.Context(), req.ID, 0)
+	if err != nil || result.Reply == nil || !strings.Contains(result.Reply.Body, "answered by check_inbox") {
+		t.Fatalf("pong: %+v %v", result, err)
+	}
+}
+
+type failingPingInbox struct{ recorder }
+
+func (f *failingPingInbox) Poll(context.Context, time.Duration) (client.Inbox, error) {
+	return client.Inbox{Requests: []envelope.Request{{ID: "ping", Kind: envelope.KindPing}, {ID: "work", Kind: envelope.KindAsk, Body: "real work"}}}, nil
+}
+func (f *failingPingInbox) Claim(_ context.Context, id string) (envelope.Request, error) {
+	if id == "ping" {
+		return envelope.Request{}, errors.New("temporary ping failure")
+	}
+	return envelope.Request{ID: id, Kind: envelope.KindAsk, Body: "real work"}, nil
+}
+func TestCheckInboxPingClaimFailurePreservesWork(t *testing.T) {
+	out := call(t, connect(t, mcpserver.New(&failingPingInbox{}, "test")), "check_inbox", nil)
+	if strings.Contains(out, "ERROR:") || !strings.Contains(out, "real work") {
+		t.Fatalf("inbox: %s", out)
+	}
+}
+
 func TestListAgentsShowsBacklog(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	cs := session(t, m, "grokbot")

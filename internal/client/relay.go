@@ -27,6 +27,9 @@ const AgentHeader = "X-Tincan-Agent"
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
 
+// FeaturesHeader advertises capabilities supported by this client.
+const FeaturesHeader = "X-Tincan-Features"
+
 // PlatformHeader carries the client's os_arch (for example darwin_arm64), so
 // the relay only announces a release it holds a binary for.
 const PlatformHeader = "X-Tincan-Platform"
@@ -320,6 +323,7 @@ func (in Inbox) ReplyIDs() []string {
 
 // Waiting is what a peek saw without taking anything.
 type Waiting struct {
+	Pings            int      `json:"pings,omitempty"`
 	UpgradeAvailable string   `json:"upgrade_available,omitempty"`
 	Total            int      `json:"waiting"` // queued requests plus unseen replies
 	Queued           int      `json:"queued"`
@@ -540,6 +544,7 @@ func (r *Relay) headers(req *http.Request) {
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
+	req.Header.Set(FeaturesHeader, "ping")
 	if r.version != "" {
 		req.Header.Set(VersionHeader, r.version)
 	}
