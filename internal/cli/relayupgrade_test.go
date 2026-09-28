@@ -467,14 +467,21 @@ func TestPublishDistRollsBack(t *testing.T) {
 	orig := publishRename
 	t.Cleanup(func() { publishRename = orig })
 	publishRename = func(from, to string) error {
+		// A file the dist already has stays in place until its
+		// replacement lands, so downloads never see it missing.
+		for _, name := range []string{platformFile, "checksums.txt", "VERSION"} {
+			if _, err := os.Stat(filepath.Join(dist, name)); err != nil {
+				t.Errorf("%s missing from the dist while publishing %s", name, filepath.Base(to))
+			}
+		}
 		if filepath.Base(to) == "VERSION" {
 			return errors.New("disk full")
 		}
 		return orig(from, to)
 	}
-	err := publishDist(dist, stage, []string{platformFile, arm, "checksums.txt", "VERSION"})
-	if err == nil || !strings.Contains(err.Error(), "not changed") {
-		t.Fatalf("err = %v", err)
+	intact, err := publishDist(dist, stage, []string{platformFile, arm, "checksums.txt", "VERSION"})
+	if err == nil || !intact || !strings.Contains(err.Error(), "not changed") {
+		t.Fatalf("intact = %v, err = %v", intact, err)
 	}
 	if entries, _ := os.ReadDir(dist); len(entries) != 3 {
 		t.Fatalf("dist holds %v, want only the old files", entries)

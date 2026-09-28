@@ -444,7 +444,12 @@ func (u *relayUpgrader) fetchRelease(ctx context.Context, dist, tag string) erro
 	if err != nil {
 		return fmt.Errorf("%w: write to the dist directory %s: %v", relay.ErrUpgradeNotWritable, dist, err)
 	}
-	defer os.RemoveAll(tmpDir)
+	keep := false
+	defer func() {
+		if !keep {
+			os.RemoveAll(tmpDir)
+		}
+	}()
 	for _, name := range names {
 		f, err := os.OpenFile(filepath.Join(tmpDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
 		if err != nil {
@@ -468,7 +473,9 @@ func (u *relayUpgrader) fetchRelease(ctx context.Context, dist, tag string) erro
 	if err := os.WriteFile(filepath.Join(tmpDir, "VERSION"), []byte(strings.TrimPrefix(tag, "v")+"\n"), 0o644); err != nil {
 		return err
 	}
-	if err := publishDist(dist, tmpDir, append(names, "checksums.txt", "VERSION")); err != nil {
+	intact, err := publishDist(dist, tmpDir, append(names, "checksums.txt", "VERSION"))
+	if err != nil {
+		keep = !intact
 		return err
 	}
 	log.Printf("downloaded tincan release %s into %s", tag, dist)
@@ -476,48 +483,55 @@ func (u *relayUpgrader) fetchRelease(ctx context.Context, dist, tag string) erro
 }
 
 // publishDist moves the staged files in tmpDir into dist in order (VERSION
-// last). Each file the dist already has is set aside first, and if any move
-// fails every file is put back as it was, so a failed publish leaves the
-// dist unchanged. Each rename is atomic, so a reader sees a whole old or new
-// file, never a partial one.
-func publishDist(dist, tmpDir string, names []string) error {
+// last). Each rename replaces its file atomically, so a download sees the
+// whole old or the whole new file and never a missing one. The old files
+// are kept (hard-linked, or copied) in tmpDir first; if a move fails they
+// are renamed back. intact is false only when that restore also failed:
+// the old files are then still in tmpDir, and the caller must keep it.
+func publishDist(dist, tmpDir string, names []string) (intact bool, err error) {
 	old := filepath.Join(tmpDir, ".old")
 	if err := os.Mkdir(old, 0o700); err != nil {
-		return err
+		return true, err
 	}
 	type moved struct {
 		name    string
 		hadPrev bool
 	}
 	var done []moved
-	rollback := func() {
+	restore := func(cause error) (bool, error) {
+		var failed []string
 		for _, m := range slices.Backward(done) {
+			dst := filepath.Join(dist, m.name)
+			var err error
 			if m.hadPrev {
-				_ = os.Rename(filepath.Join(old, m.name), filepath.Join(dist, m.name))
-			} else {
-				_ = os.Remove(filepath.Join(dist, m.name))
+				err = os.Rename(filepath.Join(old, m.name), dst)
+			} else if err = os.Remove(dst); errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+			if err != nil {
+				failed = append(failed, m.name)
 			}
 		}
+		if len(failed) > 0 {
+			return false, fmt.Errorf("%w: %v; restoring %s in the dist directory also failed, the old files are in %s", relay.ErrUpgradeNotWritable, cause, strings.Join(failed, ", "), old)
+		}
+		return true, fmt.Errorf("%w: %v; the dist was not changed", relay.ErrUpgradeNotWritable, cause)
 	}
 	for _, name := range names {
 		dst := filepath.Join(dist, name)
 		hadPrev := false
-		if err := os.Rename(dst, filepath.Join(old, name)); err == nil {
+		if _, err := os.Lstat(dst); err == nil {
+			if err := keepBackup(dst, filepath.Join(old, name)); err != nil {
+				return restore(fmt.Errorf("keep the old %s: %w", name, err))
+			}
 			hadPrev = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			rollback()
-			return fmt.Errorf("%w: set aside %s in the dist directory: %v; the dist was not changed", relay.ErrUpgradeNotWritable, name, err)
 		}
 		if err := publishRename(filepath.Join(tmpDir, name), dst); err != nil {
-			if hadPrev {
-				_ = os.Rename(filepath.Join(old, name), dst)
-			}
-			rollback()
-			return fmt.Errorf("%w: move %s into the dist directory: %v; the dist was not changed", relay.ErrUpgradeNotWritable, name, err)
+			return restore(fmt.Errorf("move %s into the dist directory: %w", name, err))
 		}
 		done = append(done, moved{name, hadPrev})
 	}
-	return nil
+	return true, nil
 }
 
 // publishRename moves one staged file into the dist. A var so tests can make
