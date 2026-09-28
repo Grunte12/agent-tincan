@@ -36,6 +36,7 @@ const (
 	SourceChatGPT    Source = "chatgpt"
 	SourceClaudeAI   Source = "claude-ai"
 	SourceGrok       Source = "grok"
+	SourceGemini     Source = "gemini"
 	SourceGrokCLI    Source = "grok-cli"
 )
 

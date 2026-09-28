@@ -30,6 +30,16 @@ const (
 	DefaultClaudeStableFor   = 10 * time.Second
 )
 
+// DefaultGeminiStablePolls and DefaultGeminiStableFor: Gemini's detail
+// has no finished marker, and Gemini can hold its text still for a long
+// while as it thinks or searches mid-answer, so its reply counts as
+// finished only once the same text is read on 4 consecutive polls
+// spanning at least 45 seconds (claude.ai's window is 10).
+const (
+	DefaultGeminiStablePolls = 4
+	DefaultGeminiStableFor   = 45 * time.Second
+)
+
 // A 429 while waiting for a reply waits the site's Retry-After, or backs
 // off from RateLimitBackoffStart, doubling up to RateLimitBackoffMax.
 const (
@@ -117,7 +127,7 @@ func (w *WebAgent) stableRule() *stableRule {
 // waitReply reads the conversation on the poll schedule until the reply
 // to this request's message is finished, and returns that read and the id
 // of this request's user message. On a site with a text-stability rule
-// (claude.ai), a reply without a stop_reason counts as finished once the
+// (claude.ai, Gemini), a reply without a stop_reason counts as finished once the
 // same reply is read on the rule's number of consecutive polls spanning
 // at least its time (see stableRule). onBind, when set,
 // is called once with the user message id when it is first seen. Errors

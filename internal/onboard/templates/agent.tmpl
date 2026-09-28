@@ -8,7 +8,7 @@ Service.
 Never print a secret value. Name the wake.json field that holds a secret and
 say to set it in the file only. Wake messages carry only the waiting counts.
 Fresh-session kinds (freshSession in onboard.go: hermes, openclaw, codex,
-grok-cli) must carry instructions.fresh. They also commonly share a machine with another
+gemini-cli, grok-cli) must carry instructions.fresh. They also commonly share a machine with another
 agent, so every tincan command in their join, setup and self-heal lines
 carries a per-agent TINCAN_CONFIG (template "cfg"), their MCP entries set that
 env, and their rejoin names the agent; OwnConfig is set for them.
@@ -18,7 +18,7 @@ TINCAN_CONFIG like the fresh-session kinds, their blocks have no standing
 instructions, and their config path is always ~/.config/tincan/<kind>.json:
 history.json (the history service's default config), or the one tincan web
 install's service definition sets for the web agents (chatgpt-web,
-claude-web, grok-web).
+claude-web, grok-web, gemini-web).
 */ -}}
 
 {{- define "cfgpath"}}~/.config/tincan/{{if .Service}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
@@ -105,16 +105,21 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{template "instructions.fresh" .}}
 {{- end -}}
 
+{{- define "instructions.gemini-cli" -}}
+You are started by tincan listen with a check-inbox prompt whenever teammates' requests, or replies to your own requests, are waiting.
+{{template "instructions.fresh" .}}
+{{- end -}}
+
 {{- define "instructions.grok-cli" -}}
 {{template "instructions.codex" .}}
 {{- end -}}
 
 {{- define "instructions.history" -}}
-{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
-{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
-{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else}}chatgpt{{end}}{{end -}}
+{{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
+{{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else}}chatgpt{{end}}{{end -}}
 
 {{- define "instructions.web" -}}
 {{.Name}} is a service (tincan web serve), not a model, so there is nothing to paste into a model. Ask it anything and it asks {{template "website" .}} in {{.OwnerPoss}} logged-in browser, then replies with the answer and any generated images attached. The message is sent as {{.Owner}}. Put "new chat" or "conversation: <id>" on the first line to pick the conversation; otherwise it continues the one you used last. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
@@ -122,6 +127,7 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- define "instructions.chatgpt-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.claude-web"}}{{template "instructions.web" .}}{{end -}}
 {{- define "instructions.grok-web"}}{{template "instructions.web" .}}{{end -}}
+{{- define "instructions.gemini-web"}}{{template "instructions.web" .}}{{end -}}
 
 {{- define "instructions.generic" -}}
 {{- if eq .Wake "webhook" -}}
@@ -205,6 +211,19 @@ On the relay host, in wake.json: set {{.Name}} to method "command". No secret fi
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}
 
+{{- define "setup.gemini-cli" -}}
+The normal setup uses {{.OwnerPoss}} Google account and no API key: agy (Antigravity CLI), the default engine. Install it (curl -fsSL https://antigravity.google/cli/install.sh | bash) and run agy once in a terminal to log in with {{.OwnerPoss}} Google account.
+Add tincan to agy with agy mcp add: a server named agent-tincan that runs tincan mcp with {{template "mcpenv" .}} (agy mcp add --help shows the flags), then check it with agy mcp list. The wake reads agy's MCP config from ~/.gemini/config/mcp_config.json (set TINCAN_AGY_MCP_CONFIG on the listener command if agy mcp list shows another file).
+Get the wake script: copy examples/gemini-cli/gemini-wake.sh and examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in the release downloads) into ~/bin, and chmod +x ~/bin/gemini-wake.sh. It takes a lock, backs off and tells TINCAN_WAKE_OPERATOR once when runs keep failing or the login expires, and refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's TINCAN_CONFIG.
+On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
+Opt in to unconfined runs: the wake refuses to run agy until {{.Owner}} sets TINCAN_GEMINI_ALLOW_UNCONFINED=1. agy documents no sandbox, so it runs with tool approval off and nothing limits its writes to {{.OwnerPoss}} user's files; the wake still pins identity and times out. The wake reads the variable only from the listener's environment (not from wake.json or any config file), so set it on the command that starts the listener, and restart the listener after changing it. If the wake already refused, also remove ${TMPDIR:-/tmp}/tincan-gemini-cli-wake/backoff. See "Set up with a Google account (no API key)" in docs/adapters/gemini-cli.md.
+Keep the listener running on that machine (a terminal or tmux; under a launchd or systemd service you write, put the variable in its environment): TINCAN_GEMINI_ALLOW_UNCONFINED=1 {{template "cfg" .}}tincan listen --exec ~/bin/gemini-wake.sh
+The listener runs the script whenever requests or replies are waiting; the script tells the engine to run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty.
+Verify: {{template "cfg" .}}tincan doctor, then from another agent tincan ask {{.Name}} "Tincan test: reply ok." The listener's log shows "running agy unconfined" before the run; "refusing to run" means the listener started without the variable.
+Only with a paid Gemini API key: Gemini CLI (Google stopped accepting Google account logins in it on 2026-06-18) runs in its --sandbox (seatbelt on macOS), writing only in TINCAN_GEMINI_WORKDIR (default ~/tincan-gemini) and write roots opened with TINCAN_GEMINI_WRITE_ROOTS, and needs no opt-in. Add tincan with gemini mcp add -s user -e TINCAN_CONFIG=<full path of {{template "cfgpath" .}}> --trust agent-tincan tincan mcp (it writes ~/.gemini/settings.json with trust true so tool calls are not held for confirmation), and put TINCAN_GEMINI_ENGINE=gemini and GEMINI_API_KEY on the listener command instead of the opt-in; the key goes in the listener's environment only, never in chat.
+Put the standing instructions in the context file the engine reads in its working directory (GEMINI.md for Gemini CLI), or in the prompt the listener passes.
+{{- end -}}
+
 {{- define "setup.grok-cli" -}}
 Install xAI's Grok Build CLI (grok) on that machine. grok --version must print "grok X.Y.Z (<commit>)"; the community grok-cli npm package is a different tool, and the wake refuses it.
 Make the wake home, where grok runs with HOME and GROK_HOME of its own so it never loads {{.OwnerPoss}} Claude Code or Cursor MCP servers: mkdir -p ~/.config/tincan/{{.Name}}.wake/.grok, then add tincan there: HOME=~/.config/tincan/{{.Name}}.wake GROK_HOME=~/.config/tincan/{{.Name}}.wake/.grok grok mcp add agent-tincan -e TINCAN_CONFIG=<full path of {{template "cfgpath" .}}> -- tincan mcp (MCP configs do not expand ~; if the listener's PATH lacks tincan, give its full path). Its .grok/config.toml must hold only that server.
@@ -244,10 +263,16 @@ Threading: a first line "new chat" starts a new conversation, "conversation: <id
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
 Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
-{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else}}chatgpt.com{{end}}{{end -}}
+{{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else if eq .Kind "grok-web"}}grok.com{{else if eq .Kind "gemini-web"}}gemini.google.com{{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.claude-web"}}{{template "setup.web" .}}{{end -}}
 {{- define "setup.grok-web"}}{{template "setup.web" .}}{{end -}}
+{{- define "setup.gemini-web"}}{{template "setup.web" .}}
+Gemini is an optional site in the extension: grant it once on the extension's options page (chrome://extensions > Agent Tincan History > Details > Extension options > Grant next to Gemini; it also grants lh3.googleusercontent.com, where Gemini's images are served). Until then tincan web serve --site gemini waits while the extension is connected, checking again every minute, and starts serving as soon as the grant appears; requests get a reply naming the options page.
+Account risk: Google's terms do not allow automated access to Gemini. {{.Name}} acts as {{.Owner}} on {{.OwnerPoss}} own account at a human pace, one request at a time, but Google enforcement is not limited to Gemini and can reach the whole Google account. Decide whether that risk is acceptable before starting it.
+Data reach: Gemini answers can draw on the Google apps connected to {{.OwnerPoss}} account (Gmail, Drive and Calendar among them), so any agent allowed to ask {{.Name}} can read that data through it. Create ~/.config/tincan/{{.Kind}}-allow.txt listing only the agents that should, or disconnect those apps in Gemini's settings.
+It uses the first Google account signed in to Chrome (gemini.google.com/app, not /u/1/); conversations of another signed-in account are not found.
+{{- end -}}
 
 {{- define "setup.generic" -}}
 {{template "setup.tools" .}}
@@ -265,9 +290,11 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
 {{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
+{{- define "title.gemini-cli"}}Gemini through Antigravity CLI or Gemini CLI, woken by tincan listen{{end -}}
 {{- define "title.grok-cli"}}xAI Grok Build CLI woken by tincan listen{{end -}}
-{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Codex, Claude Code and Grok CLI chats{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI chats{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}
+{{- define "title.gemini-web"}}Gemini (gemini.google.com) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

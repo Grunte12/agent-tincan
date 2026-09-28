@@ -77,7 +77,7 @@ Add ChatGPT and Claude to my Agent Tincan team.
 Follow https://agenttincan.com/agents.txt, part C.
 ```
 
-That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). A fourth, `gemini-web`, is optional; read its [account risk and data note](docs/adapters/web-agents.md#gemini) first. You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
 
 ### By hand
 
@@ -112,6 +112,8 @@ Claude Code. Claude Code runs in a terminal on your Mac and gets the Tincan tool
 
 Codex. The Codex CLI has no background process of its own, so a small listener (`tincan listen`, kept running by launchd on the Mac) waits for requests. When something is waiting, it starts an unattended `codex exec` run that works through the inbox and replies, inside Codex's workspace sandbox.
 
+Gemini CLI agent (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.
+
 Grok CLI. xAI's Grok Build CLI (`grok`) is woken the same way as Codex: the listener starts an unattended headless `grok -p` run that works through the inbox and replies, inside Grok's own sandbox. It runs in a wake home of its own, so it never picks up the MCP servers your other tools have configured.
 
 Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tincan mcp`. Hermes has its own webhook gateway, so the relay wakes it with a webhook signed with HMAC, and each wake starts a fresh Hermes session that works through the inbox.
@@ -120,9 +122,11 @@ OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP ser
 
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox only while you are chatting with it; nothing can wake it.
 
-History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai and Grok history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
+History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
 ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first.
+
+Gemini on the web (gemini-web). The same for your Gemini account, once you grant Gemini on the extension's options page. Google's terms do not allow automated access and its enforcement can reach your whole Google account, and Gemini answers can draw on Gmail, Drive and Calendar if they are connected, so give it an allowlist ([details](docs/adapters/web-agents.md#gemini)).
 
 Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
 
@@ -135,15 +139,16 @@ In one table:
 | muse | Muse, an AI agent in a sandbox with no inbound connections | Reaches the relay through its proxy tunnel; keeps a `tincan wait` loop open | Nothing to wake: its wait loop is already listening |
 | claude-code | Claude Code on your Mac | `tincan mcp` as an MCP server; channel mode pushes requests into the open session | Channel: requests appear in the open Claude Code session |
 | codex | OpenAI Codex CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended `codex exec` run when something is waiting |
+| gemini-cli | Gemini as a coding agent on your Mac, through Antigravity CLI (`agy`) or Gemini CLI | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts an unattended `agy` or `gemini` run when something is waiting |
 | grok-cli | xAI Grok Build CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended, sandboxed `grok -p` run when something is waiting |
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
-| history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai and Grok history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
-
+| gemini-web | Your own Gemini account, as a teammate | Same as chatgpt-web, on gemini.google.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
 The plumbing, in plain words:
 
 - Relay: the one server every agent talks to. It holds requests and replies, knows who is who from Tailscale, and wakes agents that are asleep.
@@ -153,7 +158,7 @@ The plumbing, in plain words:
 - AgentMail email: for agents that cannot keep anything running. Today only Instinct uses it. The relay itself (not another agent) sends a short email from an AgentMail inbox you own, for example Grok Bot's, to the agent's email address, and the agent's platform wakes it on new mail. Only the relay needs the AgentMail API key; no other agent needs an AgentMail account.
 - Listener (`tincan listen`): a small background process on a computer that starts the agent when requests arrive.
 - Wait loop (`tincan wait`): the agent keeps a connection open to the relay and gets requests the moment they land.
-- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT, claude.ai and (once you grant it) Grok, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
+- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT, claude.ai and (once you grant them) Grok and Gemini, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
 
 ## How it works end to end
 
@@ -395,9 +400,9 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 |---|---|---|---|
 | `webhook` | relay | The relay POSTs `{"source":"agent-tincan","message":"<count text>","text":"<same>"}` to the agent's URL, with `Authorization: Bearer <bearer_token>` or an `X-Hub-Signature-256` HMAC signature (`hmac_secret`, the GitHub scheme). OpenClaw's entry sets `"format": "openclaw"` and uses the bearer token, no HMAC. | Grok Bot, Hermes, OpenClaw |
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
-| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, the Claude Code cmux fallback, the Hermes fallback |
+| `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. | Claude Code |
-| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web |
+| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, gemini-web |
 | `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
 
 Notes that apply to every method:
@@ -416,12 +421,13 @@ Notes that apply to every method:
 | Muse-style proxy-only sandbox | `proxy-sandbox` | wait | [proxy-sandbox.md](docs/adapters/proxy-sandbox.md) |
 | Claude Code | `claude-code` | channel (or command) | [claude-code.md](docs/adapters/claude-code.md) |
 | OpenAI Codex CLI | `codex` | command | [codex.md](docs/adapters/codex.md) |
+| Gemini through Antigravity CLI or Gemini CLI | `gemini-cli` | command | [gemini-cli.md](docs/adapters/gemini-cli.md) |
 | xAI Grok Build CLI | `grok-cli` | command | [grok-cli.md](docs/adapters/grok-cli.md) |
 | Hermes Agent | `hermes` | webhook (or command) | [hermes.md](docs/adapters/hermes.md) |
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
-| ChatGPT, Claude and Grok web agents | `chatgpt-web`, `claude-web`, `grok-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
+| ChatGPT, Claude, Grok and Gemini web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 
 Any other agent can use kind `generic` with whichever wake fits.
 
@@ -648,6 +654,57 @@ Add the MCP entry above (see [examples/codex/config-snippet.toml](examples/codex
 
 [docs/adapters/codex.md](docs/adapters/codex.md)
 
+### Gemini through Antigravity CLI or Gemini CLI (tincan listen wake script)
+
+#### What it is
+
+The `gemini-cli` teammate runs Gemini as a headless coding agent, woken like Codex. It has two engines: Antigravity CLI (`agy`, the default), which uses your Google account after one interactive login, and Gemini CLI (`gemini`), which needs a paid `GEMINI_API_KEY` because Google stopped accepting Google account logins in Gemini CLI on 2026-06-18. Choose with `TINCAN_GEMINI_ENGINE=agy|gemini` in the listener's environment.
+
+Without an API key, the setup is agy with an opt-in: agy has no sandbox, so the wake runs it only when the listener is started with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`. With that set, agy runs with tool approval off and nothing limits its writes to your user's files; the wake still pins identity and times out. The adapter doc's first section, [Set up with a Google account (no API key)](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key), walks through it step by step.
+
+#### How it joins
+
+```bash
+tincan invite gemini-cli --kind gemini-cli
+TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan join <code> --relay http://<relay>
+```
+
+#### How it wakes
+
+Command, through [examples/gemini-cli/gemini-wake.sh](examples/gemini-cli/gemini-wake.sh) and the shared wake library [examples/lib/tincan-wake-lib.sh](examples/lib/tincan-wake-lib.sh). Copy both into one folder you keep:
+
+```bash
+mkdir -p ~/bin && cp examples/gemini-cli/gemini-wake.sh examples/lib/tincan-wake-lib.sh ~/bin/ && chmod +x ~/bin/gemini-wake.sh   # from a repo checkout
+TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan listen --exec ~/bin/gemini-wake.sh
+```
+
+The wake reads the opt-in only from the listener's environment, which `tincan listen` passes to the script, so it goes on that command (or in the environment of a launchd or systemd service you run the listener under), not in `wake.json` or a config file. Restart the listener after changing it. With the gemini engine, put `TINCAN_GEMINI_ENGINE=gemini` and `GEMINI_API_KEY` there instead.
+
+The script takes a lock, refuses to run unless the engine's MCP config holds exactly one agent-tincan server with this teammate's `TINCAN_CONFIG`, runs the engine with a drain-the-inbox prompt under a hard timeout, and backs off (telling `TINCAN_WAKE_OPERATOR` once) after repeated failures, an expired agy login, or a missing API key. Requests stay queued meanwhile.
+
+- agy: `agy --output-format json --dangerously-skip-permissions -p <prompt>`. agy documents no sandbox, so the wake runs it only with `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes.
+- gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan -p <prompt>`. Writes stay in `TINCAN_GEMINI_WORKDIR` (default `$HOME/tincan-gemini`) operator write roots (`TINCAN_GEMINI_WRITE_ROOTS`, checked against `TINCAN_GEMINI_ALLOWED_ROOTS`), and the attachments directory beside `TINCAN_CONFIG`.
+
+#### How it sends and receives
+
+`tincan mcp` as the engine's MCP server, with env `TINCAN_CONFIG` set to the full path of `~/.config/tincan/gemini-cli.json`: `agy mcp add` for agy (the normal setup), or `gemini mcp add -s user -e TINCAN_CONFIG=... --trust agent-tincan tincan mcp` for Gemini CLI (`--trust` spares you confirmations when you run Gemini CLI yourself; the wake's `--approval-mode=yolo` approves tincan tool calls either way).
+
+#### One-time setup
+
+Install agy and log in once with your Google account, add the MCP server with `agy mcp add`, copy the wake script and library, set `{ "gemini-cli": { "method": "command" } }` in `wake.json`, start the listener with `TINCAN_GEMINI_ALLOW_UNCONFINED=1` on its command line as above, and check with `tincan doctor` and a test ask. With a Gemini API key, use Gemini CLI instead and skip the opt-in.
+
+#### Limits and gotchas
+
+- Every wake is a fresh session, so each run must drain the whole inbox.
+- agy's MCP config location (`~/.gemini/config/mcp_config.json`) comes from a secondary source; confirm it with `agy mcp list` and set `TINCAN_AGY_MCP_CONFIG` if it differs.
+- The wake needs `jq` or `python3` on the listener's PATH to read the engines' JSON configs.
+- The history agent cannot read gemini-cli runs yet.
+- Not yet verified live against a relay.
+
+#### Adapter doc
+
+[docs/adapters/gemini-cli.md](docs/adapters/gemini-cli.md)
+
 ### Grok CLI (command wake, wake home of its own)
 
 #### What it is
@@ -830,7 +887,7 @@ The same MCP tools, served through the gateway. It sees images it receives, but 
 
 A Go service, `tincan history serve`, not a model. It answers teammates' questions about what the owner asked in four places, and replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments:
 
-- ChatGPT (chatgpt.com) and claude.ai, read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
+- ChatGPT (chatgpt.com), claude.ai and Gemini (gemini.google.com, once granted), read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
 - Codex (CLI and desktop app) and Claude Code, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, and `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`).
 
 Ask it things like "what was the last thing I asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
@@ -857,7 +914,7 @@ For each request it:
 3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|codex|claude-code|grok-cli>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|gemini|codex|claude-code|grok-cli>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -879,19 +936,19 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 - It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex or grok-cli wake) can read local Codex, Claude Code and Grok CLI history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
-- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Codex, Claude Code or Grok CLI".
+- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI".
 - "Grok" means grok.com and "Grok CLI" means Grok Build sessions on this machine (`~/.grok`); grok-cli wake runs are left out unless `--all`.
-- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai and Grok read at most 100 conversations whatever the window says.
+- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai, Grok and Gemini read at most 100 conversations whatever the window says.
 
 #### Adapter doc
 
 [docs/adapters/history.md](docs/adapters/history.md)
 
-### The ChatGPT, Claude and Grok web agents (chatgpt-web, claude-web and grok-web)
+### The ChatGPT, Claude, Grok and Gemini web agents (chatgpt-web, claude-web, grok-web and gemini-web)
 
 #### What it is
 
-A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site grok`), that makes chatgpt.com, claude.ai or grok.com a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT, Claude or Grok history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice. xAI's terms prohibit automated access to Grok: grok-web acts as the owner on the owner's own account, one request at a time at a human pace, but xAI can still limit or suspend the account, so turn it on only if you accept that.
+A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site grok`, `--site gemini`), that makes chatgpt.com, claude.ai, grok.com or gemini.google.com a teammate. `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It types into the owner's logged-in account, as the owner, so the chats show in the owner's ChatGPT, Claude, Grok or Gemini history, count against the owner's plan, and follow the site's own memory, custom instructions and model choice. xAI's terms prohibit automated access to Grok: grok-web acts as the owner on the owner's own account, one request at a time at a human pace, but xAI can still limit or suspend the account, so turn it on only if you accept that.
 
 #### How it joins
 
@@ -900,7 +957,7 @@ tincan invite chatgpt-web --kind chatgpt-web                                    
 TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <code> --relay http://tincan-relay
 ```
 
-For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Grok, `grok-web`, `--kind grok-web` and `~/.config/tincan/grok-web.json`. A relay older than the `grok-web` kind refuses it and the CLI says so: upgrade the relay, or invite without `--kind` and use `tincan onboard --kind grok-web=grok-web`. Like history, it refuses to start unless the relay confirms its name.
+For Claude use `claude-web`, `--kind claude-web` and `~/.config/tincan/claude-web.json`; for Grok, `grok-web`, `--kind grok-web` and `~/.config/tincan/grok-web.json`; for Gemini, `gemini-web`, `--kind gemini-web` and `~/.config/tincan/gemini-web.json`. A relay older than the `grok-web` or `gemini-web` kind refuses it and the CLI says so: upgrade the relay, or invite without `--kind` and use `tincan onboard --kind <name>=<kind>`. Like history, it refuses to start unless the relay confirms its name.
 
 #### How it wakes
 
@@ -910,11 +967,11 @@ Wait: the service long-polls. Set its method to `wait` in `wake.json`.
 
 For each request, one at a time:
 
-1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt` or `grok-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
+1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt`, `grok-web-allow.txt` or `gemini-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
 2. Reads the optional threading line. A first line `new chat` starts a new conversation; `conversation: <id>` (or a conversation URL) continues that one; otherwise it continues the conversation this asker used last with this agent. Each asker has its own thread. The ids live in `~/.config/tincan/<agent>-state.json` (0600, ids only). Every reply ends with the conversation id so the asker can come back.
 3. Has the extension type the message into a background tab the extension opens itself (`active: false`). The extension fills the message box, clicks send, and returns once the conversation id is in the tab's address (at most 60 seconds). It never touches a tab the owner opened.
-4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Grok: the answer marked `partial: false` with nothing left in flight). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again; so does a Grok answer that ends on the plan's usage limit, which also holds Grok back for 15 minutes. Each site's cooldown is its own. While it waits, the agent keeps its relay presence fresh without claiming new requests.
-5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A Grok image the extension cannot fetch is left out and the reply says so. A tab nobody closes is closed after 10 minutes.
+4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds; Grok: the answer marked `partial: false` with nothing left in flight; Gemini: the same text on 4 reads spanning at least 45 seconds, since Gemini pauses while it thinks). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again; so does a Grok answer that ends on the plan's usage limit, which also holds Grok back for 15 minutes. Each site's cooldown is its own. While it waits, the agent keeps its relay presence fresh without claiming new requests.
+5. Replies with the answer text (up to 64 KB) and the generated images (up to 8) as attachments, then has the extension close the tab. A Grok or Gemini image the extension cannot fetch is left out and the reply says so. A tab nobody closes is closed after 10 minutes.
 
 Send journal: right after a send is confirmed, the agent records the request id, conversation id and send time in `~/.config/tincan/<agent>-journal.json` (0600, no message text). If the relay requeues the request after its 30 minute claim lease, the agent reads the answer from the journaled conversation instead of sending again. Entries are dropped after 90 minutes.
 
@@ -928,13 +985,14 @@ tincan web install --site chatgpt
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.chatgpt.plist
 ```
 
-For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Grok: first grant Grok on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options), then `tincan web install --site grok` and `com.agenttincan.web.grok.plist`; `tincan web serve --site grok` refuses to start while the extension is connected without that grant. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`, `tincan-grok-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. For Grok: first grant Grok on the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options), then `tincan web install --site grok` and `com.agenttincan.web.grok.plist`; `tincan web serve --site grok` refuses to start while the extension is connected without that grant. For Gemini: grant Gemini on the extension's options page first, then `tincan web install --site gemini` and `com.agenttincan.web.gemini.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`, `tincan-grok-web.log`, `tincan-gemini-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
 - It acts as the owner, and by default any joined agent may ask it to. Write its allowlist file to restrict that. The answer can include what the site remembers about the owner, and it is untrusted model output: the web agents pass it back as is.
 - The extension checks the site session before opening a tab, so a logged-out browser never sends anonymously.
-- Both sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
+- Gemini: Google's terms do not allow automated access, and Google's enforcement can reach the owner's whole Google account, not only Gemini. Gemini answers can draw on Google apps connected to the account (Gmail, Drive, Calendar), so any agent allowed to ask `gemini-web` can read that data; write `~/.config/tincan/gemini-web-allow.txt` or disconnect those apps. Its images are captured from the send tab, with a worker fetch as the fallback; when neither works the reply says the images could not be attached. See [web-agents.md](docs/adapters/web-agents.md#gemini).
+- All four sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
 - The send operations need extension version 0.3.0 or later.
 
 #### Adapter doc
@@ -943,11 +1001,11 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 
 ## The Tincan Chrome extension
 
-A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT, claude.ai and Grok through the owner's own logged-in Chrome.
+A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan History" in its manifest) that lets the history agent read, and the web agents send to, ChatGPT, claude.ai and (once granted) Grok and Gemini through the owner's own logged-in Chrome.
 
 What it can do:
 
-- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai and grok.com, `chatgpt.send`, `claudeai.send` and `grok.send`, `chatgpt.close`, `claudeai.close` and `grok.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
+- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai, grok.com and gemini.google.com, `chatgpt.send`, `claudeai.send`, `grok.send` and `gemini.send`, `chatgpt.close`, `claudeai.close`, `grok.close` and `gemini.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
 - Open, fill and close its own background tabs for sends.
 
 What it cannot do:
@@ -955,7 +1013,7 @@ What it cannot do:
 - It accepts nothing outside that operation set and never runs code from a message or a page. A message is passed as data to a fixed function in an isolated content script and inserted as text.
 - No cookie or token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
-- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok on the extension's options page (optional host permissions, so installing or updating asks nothing for Grok).
+- Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok, and gemini.google.com and `lh3.googleusercontent.com` only after the owner grants Gemini, on the extension's options page (optional host permissions, so installing or updating asks nothing for either).
 
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
@@ -983,7 +1041,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

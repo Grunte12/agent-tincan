@@ -20,6 +20,8 @@ func TestOpsResolveToTheirOwnSite(t *testing.T) {
 		OpClaudeAISend: SourceClaudeAI, OpClaudeAIClose: SourceClaudeAI,
 		OpGrokList: SourceGrok, OpGrokDetail: SourceGrok, OpGrokFile: SourceGrok,
 		OpGrokSend: SourceGrok, OpGrokClose: SourceGrok,
+		OpGeminiList: SourceGemini, OpGeminiDetail: SourceGemini, OpGeminiFile: SourceGemini,
+		OpGeminiSend: SourceGemini, OpGeminiClose: SourceGemini,
 	}
 	for op, want := range cases {
 		if got := op.source(); got != want {
@@ -79,7 +81,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("perplexity")
-	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai or grok)` {
+	if err == nil || err.Error() != `unknown site "perplexity" (want chatgpt, claude-ai, grok or gemini)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -141,16 +143,17 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai or grok" || WebAgentNames() != "chatgpt-web, claude-web or grok-web" || LiveSourcesLabel() != "ChatGPT, claude.ai and Grok" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok or gemini" || WebAgentNames() != "chatgpt-web, claude-web, grok-web or gemini-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok and Gemini" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, grok, codex, claude-code or grok-cli" {
+	if SourceNames() != "chatgpt, claude-ai, grok, gemini, codex, claude-code or grok-cli" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
 		SourceChatGPT:  {"chatgpt-web", "ChatGPT", "chatgpt.com"},
 		SourceClaudeAI: {"claude-web", "claude.ai", "claude.ai"},
 		SourceGrok:     {"grok-web", "Grok", "grok.com"},
+		SourceGemini:   {"gemini-web", "Gemini", "gemini.google.com"},
 	}
 	for src, w := range want {
 		if got := [3]string{WebAgentName(src), siteLabel(src), siteOf(src)}; got != w {

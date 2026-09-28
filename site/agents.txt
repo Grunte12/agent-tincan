@@ -93,8 +93,11 @@ A5. Join this machine's own agent (you), if you are one of the team:
         tincan join <CODE> --relay http://tincan-relay
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
-    claude-code, chatgpt, hermes, openclaw, codex, grok-cli, history,
-    chatgpt-web, claude-web, grok-web, generic.
+    claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
+    history, chatgpt-web, claude-web, grok-web, gemini-web, generic.
+    (gemini-cli, grok-cli, grok-web and gemini-web need a relay from this
+    release or later; on an older relay invite without --kind and run
+    tincan onboard --kind <name>=<kind>.)
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
     muse, instinct, codex, claude-code, hermes). For each one:
@@ -152,6 +155,17 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Claude Code:   claude mcp add --scope user agent-tincan -- tincan mcp --channel
     - Codex:         codex mcp add agent-tincan -- tincan mcp
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
+    - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env
+                     TINCAN_CONFIG=<full path of your config>. This is the gemini-cli
+                     teammate's normal setup (a Google account, no API key). Its wake
+                     runs agy only when the listener is started with the opt-in on its
+                     command line, since agy has no sandbox and nothing limits its writes:
+                     TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=<your config> \
+                       tincan listen --exec ~/bin/gemini-wake.sh
+                     (see "Set up with a Google account (no API key)" in
+                     docs/adapters/gemini-cli.md)
+    - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
+                     (only with a paid Gemini API key)
     - Grok Build CLI (grok-cli teammate): not in ~/.grok. It runs in a wake home of
                      its own (~/.config/tincan/<your-name>.wake); follow the setup
                      steps in your onboard block (B4) and docs/adapters/grok-cli.md.
@@ -251,6 +265,28 @@ C6. Grok (optional). Tell your owner first: xAI's terms prohibit automated
 
     - Test: `tincan ask grok-web "Tincan test: say hello in five words."` and
       `tincan ask history "what was the last thing I asked Grok?"`.
+
+C7. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
+    they agree: Google's terms do not allow automated access, and Google's
+    enforcement can reach their whole Google account, not only Gemini. Gemini
+    answers can also draw on Google apps connected to their account (Gmail,
+    Drive, Calendar), so any agent allowed to ask gemini-web can read that
+    data through it. Then:
+    - Ask your owner to grant Gemini on the extension's options page
+      (chrome://extensions > Agent Tincan History > Details > Extension
+      options > Grant next to Gemini). It is not granted by default.
+    - Make sure your owner is signed in to gemini.google.com in this same
+      Chrome before continuing.
+    - Get an invite code with kind gemini-web and join and install it:
+
+        TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan join <CODE5> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan web install --site gemini
+
+    - Write ~/.config/tincan/gemini-web-allow.txt with only the agents your
+      owner wants to reach their Gemini (one name per line), or have them
+      disconnect Gmail, Drive and Calendar in Gemini's settings.
+    - Test: `tincan ask gemini-web "Tincan test: say hello in five words."`
+
 
 The history agent also reads the owner's Grok CLI (Grok Build) sessions on that
 Mac, from ~/.grok: `tincan ask history "what did I last ask Grok CLI?"`. "Grok"

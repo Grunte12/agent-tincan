@@ -32,16 +32,18 @@ const (
 	KindHermes       = "hermes"
 	KindOpenClaw     = "openclaw"
 	KindCodex        = "codex"
+	KindGeminiCLI    = "gemini-cli"
 	KindGrokCLI      = "grok-cli"
 	KindHistory      = "history"
 	KindChatGPTWeb   = "chatgpt-web"
 	KindClaudeWeb    = "claude-web"
 	KindGrokWeb      = "grok-web"
+	KindGeminiWeb    = "gemini-web"
 	KindGeneric      = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -64,11 +66,13 @@ var runtimeNames = map[string]string{
 	"hermes":      KindHermes,
 	"openclaw":    KindOpenClaw,
 	"codex":       KindCodex,
+	"gemini-cli":  KindGeminiCLI,
 	"grok-cli":    KindGrokCLI,
 	"history":     KindHistory,
 	"chatgpt-web": KindChatGPTWeb,
 	"claude-web":  KindClaudeWeb,
 	"grok-web":    KindGrokWeb,
+	"gemini-web":  KindGeminiWeb,
 }
 
 // defaultWake is the wake method a kind normally uses.
@@ -81,11 +85,13 @@ var defaultWake = map[string]string{
 	KindHermes:       "webhook",
 	KindOpenClaw:     "webhook",
 	KindCodex:        "command",
+	KindGeminiCLI:    "command",
 	KindGrokCLI:      "command",
 	KindHistory:      "wait",
 	KindChatGPTWeb:   "wait",
 	KindClaudeWeb:    "wait",
 	KindGrokWeb:      "wait",
+	KindGeminiWeb:    "wait",
 	KindGeneric:      "none",
 }
 
@@ -95,10 +101,11 @@ var defaultWake = map[string]string{
 // carry a per-agent TINCAN_CONFIG and their rejoin names the agent. A new
 // command-woken CLI kind is added here, not to template conditions.
 var freshSession = map[string]bool{
-	KindHermes:   true,
-	KindOpenClaw: true,
-	KindCodex:    true,
-	KindGrokCLI:  true,
+	KindHermes:    true,
+	KindOpenClaw:  true,
+	KindCodex:     true,
+	KindGeminiCLI: true,
+	KindGrokCLI:   true,
 }
 
 // Member is one roster entry as the relay reports it.
@@ -285,7 +292,7 @@ func isService(kind string) bool {
 
 // isWebKind reports whether kind is one of the web agents.
 func isWebKind(kind string) bool {
-	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb
+	return kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb
 }
 
 func agentBlock(d agentData) (AgentBlock, error) {

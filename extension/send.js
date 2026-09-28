@@ -1,13 +1,15 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send, grok.send) and the matching close operations
-// (chatgpt.close, claudeai.close, grok.close).
+// claudeai.send, grok.send, gemini.send) and the matching close operations
+// (chatgpt.close, claudeai.close, grok.close, gemini.close), plus the
+// in-page image capture gemini.file asks for (capture).
 //
 // ChatGPT, claude.ai and grok.com guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
 // background tab the extension opens itself (never one of the user's tabs):
 //
 //   1. open https://chatgpt.com/ (or /c/<id>), https://claude.ai/new (or
-//      /chat/<id>) or https://grok.com/ (or /c/<id>) with
+//      /chat/<id>), https://grok.com/ (or /c/<id>) or
+//      https://gemini.google.com/app (or /app/<id>) with
 //      chrome.tabs.create({active: false});
 //   2. inject the fixed page functions below with chrome.scripting
 //      (isolated world, func + args only) to fill the composer, verify the
@@ -24,11 +26,16 @@
 // finishing the reply. A tab nobody closes is closed after keepMs anyway.
 // A send that fails closes its tab at once.
 //
+// While that tab is still open, capture fetches one of Gemini's images
+// from inside it (the isolated world's fetch, with the page's cookies), so
+// the image host sees the same request the page's own would make. It never
+// draws the page's <img> onto a canvas: a cross-origin image taints it.
+//
 // The message is data only: it is passed as an argument to a fixed function
 // and inserted as text. Nothing from a message or a page is ever executed.
 // Selectors drift, so every one lives in SELECTORS, each with fallbacks.
 
-import { OpError } from './ops.js';
+import { OpError, GEMINI_IMAGE_PREFIX, MAX_FILE_BYTES } from './ops.js';
 
 export const SEND_TIMEOUT_MS = 5 * 60 * 1000;
 // ID_WAIT_MS bounds the wait for the conversation id after the send.
@@ -79,6 +86,18 @@ export const SELECTORS = Object.freeze({
     loginPaths: ['/sign-in', '/sign-up'],
     blocked: ['#challenge-form', 'iframe[src*="challenges.cloudflare.com"]', '#cf-challenge-running'],
   }),
+  // Gemini's composer is a Quill editor inside rich-textarea; the send
+  // button only appears once there is text.
+  gemini: Object.freeze({
+    composer: ['div.ql-editor[aria-label="Enter a prompt for Gemini"]', 'rich-textarea div.ql-editor[contenteditable="true"]', 'div.ql-editor[contenteditable="true"]'],
+    send: ['button[aria-label*="Send" i]', 'button.send-button'],
+    stop: ['button[aria-label*="Stop" i]'],
+    streaming: [],
+    assistant: ['model-response', 'message-content'],
+    user: ['user-query'],
+    login: ['a[href*="accounts.google.com/ServiceLogin"]', 'a[href*="accounts.google.com/v3/signin"]'],
+    loginPaths: [],
+  }),
 });
 
 // SITES says where each site's pages are and how to read a conversation id
@@ -98,6 +117,13 @@ export const SITES = Object.freeze({
     newURL: 'https://grok.com/',
     convURL: (id) => `https://grok.com/c/${encodeURIComponent(id)}`,
     idFrom: /^https:\/\/grok\.com\/c\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
+  }),
+  // A Gemini id is the hex in /app/<id>; a Gem's chat shows it as
+  // /gem/<name>/<id>, another signed-in account under /u/<n>/.
+  gemini: Object.freeze({
+    newURL: 'https://gemini.google.com/app',
+    convURL: (id) => `https://gemini.google.com/app/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/gemini\.google\.com\/(?:u\/\d{1,2}\/)?(?:app|gem\/[A-Za-z0-9_-]{1,128})\/([0-9a-f]{8,64})(?:[/?#]|$)/,
   }),
 });
 
@@ -248,6 +274,49 @@ export function pageSubmit(sel) {
   return { ok: true, how: 'enter' };
 }
 
+// pageFetchImage fetches url with the page's cookies and returns it as
+// base64, or why it could not. Only an image under maxBytes is returned:
+// a declared size over it is refused unread, and the body is read a chunk
+// at a time and cancelled as soon as it passes maxBytes, so a large answer
+// never sits whole in the tab's memory. It runs in the page, so it uses
+// nothing from this module.
+export async function pageFetchImage(url, maxBytes) {
+  try {
+    const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    if (!res.ok) return { ok: false, status: res.status };
+    const mime = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!mime.startsWith('image/')) return { ok: false, code: 'not_image' };
+    if (!res.body) return { ok: false, code: 'size' };
+    const reader = res.body.getReader();
+    const tooBig = async () => {
+      try {
+        await reader.cancel();
+      } catch {
+        // Already closed.
+      }
+      return { ok: false, code: 'size' };
+    };
+    if (Number(res.headers.get('content-length') || 0) > maxBytes) return tooBig();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) return tooBig();
+      parts.push(value);
+    }
+    if (total === 0) return { ok: false, code: 'size' };
+    const buf = new Uint8Array(total);
+    for (let off = 0, i = 0; i < parts.length; off += parts[i].length, i++) buf.set(parts[i], off);
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    return { ok: true, mime, data: btoa(bin) };
+  } catch {
+    return { ok: false, code: 'network' };
+  }
+}
+
 // ---- The sender, run in the service worker.
 
 function str(v, n) {
@@ -270,8 +339,21 @@ function cleanProbe(r) {
   };
 }
 
+// elsewhere returns url as a URL when it is an http(s) address on another
+// host than site's, else null (about:blank and the like while loading).
+function elsewhere(url, site) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  return u.host === new URL(site).host ? null : u;
+}
+
 // createSender returns {send(site, args), close(site, conversationId),
-// busy(), closeAllKept()}.
+// capture(site, conversationId, url), busy(), closeAllKept()}.
 // tabs and scripting are chrome.tabs and chrome.scripting (or fakes). Sends
 // to one site run one at a time, each in its own background tab. A
 // successful send leaves its tab open for close (or the keepMs timer).
@@ -288,6 +370,7 @@ export function createSender({
   sendConfirmMs = 15000,
   idWaitMs = ID_WAIT_MS,
   keepMs = KEEP_TAB_MS,
+  settleMs = 1500,
 }) {
   // owned: tabs being driven by a send, the only ones that may be
   // scripted. kept: finished sends' tabs, tab id -> {site, id, timer},
@@ -298,8 +381,10 @@ export function createSender({
   // inflight counts sends accepted and not yet settled, queued ones too.
   let inflight = 0;
 
-  async function inject(tabId, func, args) {
-    if (!owned.has(tabId)) throw new OpError('internal', 'refusing to script a tab the extension did not open');
+  // inject runs func in tabId's isolated world. Only a tab a send is
+  // driving may be scripted, or, with keptOK, a finished send's tab.
+  async function inject(tabId, func, args, keptOK = false) {
+    if (!owned.has(tabId) && !(keptOK && kept.has(tabId))) throw new OpError('internal', 'refusing to script a tab the extension did not open');
     let res;
     try {
       res = await scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func, args });
@@ -360,13 +445,29 @@ export function createSender({
     const tab = await tabs.create({ url: target, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('send_failed', 'could not open a tab');
     owned.add(tab.id);
+    // onSite reads the tab's address and fails when the site sent the tab
+    // to another host: Google's /sorry/ anti-bot page is blocked, anything
+    // else (a sign-in page) not_logged_in. Nothing is typed there. Every
+    // poll after the page loaded goes through it, so a redirect in the
+    // middle of a send stops the send too.
+    const onSite = async () => {
+      const t = await tabURL(tab.id);
+      const away = elsewhere(t.url, cfg.newURL);
+      if (away) throw new OpError(away.pathname.startsWith('/sorry/') ? 'blocked' : 'not_logged_in', `the page went to ${away.host}`);
+      return t;
+    };
     // urlId is the conversation id in the tab's address right now, '' when
-    // there is none.
+    // there is none; it checks the host first (onSite).
     const urlId = async () => {
-      const m = cfg.idFrom.exec((await tabURL(tab.id)).url);
+      const m = cfg.idFrom.exec((await onSite()).url);
       return m ? m[1] : '';
     };
     let done = false;
+    // clicked: the page took a click on the send button. Any failure after
+    // it (a redirect to a sign-in page or /sorry/, no confirmation, no id)
+    // is marked clicked: the message may have been sent, and sending it
+    // again could post it twice.
+    let clicked = false;
     try {
       // 1. Page load, then a composer (or a login page).
       const loadBy = Math.min(deadline, start + loadMs);
@@ -378,7 +479,11 @@ export function createSender({
       let page = null;
       let blocked = false;
       for (;;) {
-        const t = await tabURL(tab.id);
+        // While loading, a tab on another host gets one short settle before
+        // it fails: a logged-in Google session can pass through
+        // accounts.google.com and come straight back.
+        if (elsewhere((await tabURL(tab.id)).url, cfg.newURL)) await sleep(settleMs);
+        const t = await onSite();
         blocked = false;
         if (t.status === 'complete') {
           page = cleanProbe(await inject(tab.id, pageProbe, [sel]));
@@ -424,21 +529,26 @@ export function createSender({
       let submittedAt;
       let base;
       for (;;) {
-        if (existing && (await urlId()) !== existing) throw new OpError('not_found', 'conversation not found');
+        const cur = await urlId();
+        if (existing && cur !== existing) throw new OpError('not_found', 'conversation not found');
         base = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (base.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (base.blocked) throw blockedErr();
         if (base.generating) throw answering();
         submittedAt = now();
         const r = await inject(tab.id, pageSubmit, [sel]);
-        if (r && r.ok === true) break;
+        if (r && r.ok === true) {
+          clicked = true;
+          break;
+        }
         if (r && r.code === 'composer_not_found') throw new OpError('composer_not_found', 'the message box went away');
         if (now() >= confirmBy) throw new OpError('send_failed', 'the send button stayed disabled');
         await sleep(pollMs);
       }
       for (;;) {
         await sleep(pollMs);
-        if (!existing && (await urlId())) break;
+        const cur = await urlId();
+        if (!existing && cur) break;
         const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (p.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (p.blocked) throw blockedErr();
@@ -460,6 +570,9 @@ export function createSender({
       done = true;
       keep(tab.id, site, id);
       return { conversation_id: id, url: cfg.convURL(id), submitted_at: submittedAt };
+    } catch (e) {
+      if (clicked && e instanceof OpError) e.clicked = true;
+      throw e;
     } finally {
       owned.delete(tab.id);
       if (!done) await removeTab(tab.id);
@@ -484,6 +597,23 @@ export function createSender({
     // and only those. It reports how many it closed.
     async close(site, conversationId) {
       return closeKept((k) => k.site === site && k.id === conversationId);
+    },
+    // capture fetches an image from inside the tab a finished send to
+    // conversationId left open (pageFetchImage), for the image host that
+    // expects the page's own request. It returns the page's answer
+    // ({ok, mime, data}) or null when there is no such tab or the page
+    // could not fetch it; it never throws. Only Gemini image URLs are
+    // fetched.
+    async capture(site, conversationId, url, maxBytes = MAX_FILE_BYTES) {
+      if (typeof url !== 'string' || !url.startsWith(GEMINI_IMAGE_PREFIX)) return null;
+      const entry = [...kept].find(([, k]) => k.site === site && k.id === conversationId);
+      if (!entry) return null;
+      try {
+        const r = await inject(entry[0], pageFetchImage, [url, maxBytes], true);
+        return r && r.ok === true ? r : null;
+      } catch {
+        return null;
+      }
     },
     // busy reports whether a send is queued or driving a tab, or a
     // finished send's tab is still waiting for its close: state a reload

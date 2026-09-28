@@ -1,0 +1,41 @@
+[
+  [
+    [
+      ["c_00000000000000a1", "r_00000000000000c2"],
+      null,
+      [["draw an ochre sea star"], 1, null, 0, "dummy", 0],
+      [
+        [
+          [
+            "rc_00000000000000b2",
+            ["Here is your sea star.\nhttp://googleusercontent.com/image_generation_content/0"],
+            [],
+            null, null, null, null, null, null, null, null, null,
+            [null, null, null, null, null, null, null, [[[null, null, null, [null, 1, "star.png", "https://lh3.googleusercontent.com/gg/dummy-star-1"]]]]]
+          ]
+        ],
+        null,
+        null,
+        "rc_00000000000000b2"
+      ],
+      [1790074800, 0]
+    ],
+    [
+      ["c_00000000000000a1", "r_00000000000000c1"],
+      null,
+      [["what lives in tide pools"], 1, null, 0, "dummy", 0],
+      [
+        [
+          ["rc_00000000000000b0", ["A draft the owner did not pick."], []],
+          ["rc_00000000000000b1", ["Anemones, hermit crabs and sea stars."], []]
+        ],
+        null,
+        null,
+        "rc_00000000000000b1"
+      ],
+      [1790074740, 0]
+    ]
+  ],
+  null,
+  null
+]
