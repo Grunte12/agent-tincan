@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -150,39 +151,23 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	closeStore := sync.OnceFunc(func() {
+		if err := st.Close(); err != nil {
+			log.Printf("close store: %v", err)
+		}
+	})
+	defer closeStore()
 	approval, err := policy.LoadApproval(filepath.Join(f.stateDir, "approval.json"))
 	if err != nil {
 		return err
 	}
 
-	var ln net.Listener
-	var who *identity.LocalResolver
-	if f.listen != "" {
-		who = identity.NewLocalResolverAt("")
-		if err := who.Probe(ctx); err != nil {
-			return fmt.Errorf("refusing to start without WhoIs: %w", err)
-		}
-		ln, err = net.Listen("tcp", listenAt)
-		if err != nil {
-			return err
-		}
-	} else {
-		ts := &tsnet.Server{Hostname: f.hostname, Dir: filepath.Join(f.stateDir, "tsnet"), AuthKey: os.Getenv("TS_AUTHKEY")}
-		defer ts.Close()
-		if _, err := ts.Up(ctx); err != nil {
-			return fmt.Errorf("tsnet up: %w", err)
-		}
-		lc, err := ts.LocalClient()
-		if err != nil {
-			return err
-		}
-		who = identity.NewLocalResolver(lc)
-		ln, err = ts.Listen("tcp", fmt.Sprintf(":%d", f.port))
-		if err != nil {
-			return err
-		}
+	ln, who, closeNetFn, err := openRelayNet(ctx, f, listenAt)
+	if err != nil {
+		return err
 	}
+	closeNet := sync.OnceFunc(closeNetFn)
+	defer closeNet()
 	if len(f.admins) == 0 {
 		log.Printf("no --admin machines set: invites only work from the local admin socket")
 	}
@@ -214,7 +199,16 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
 		log.Printf("reschedule reply wakes: %v", err) // replies stay unseen for the agent's next check
 	}
-	go srv.Run(ctx)
+	if err := resumeRequestWakes(ctx, st, waker); err != nil {
+		log.Printf("reschedule request wakes: %v", err) // requests stay queued for the agent's next check
+	}
+	runCtx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		srv.Run(runCtx)
+	}()
 
 	api := client.Configure(&http.Server{Handler: srv.Handler()}, client.RelayAPI)
 	adminSock := filepath.Join(f.stateDir, "admin.sock")
@@ -230,13 +224,15 @@ func runRelay(ctx context.Context, f relayFlags) error {
 
 	errc := make(chan error, 3)
 	servers := []*http.Server{api, admin}
+	closeGW := func() {}
 	go func() { errc <- api.Serve(ln) }()
 	go func() { errc <- admin.Serve(aln) }()
 	if f.gateway {
-		gln, base, closeGW, err := gatewayListener(ctx, f)
+		gln, base, closeGWFn, err := gatewayListener(ctx, f)
 		if err != nil {
 			return fmt.Errorf("chatgpt gateway: %w", err)
 		}
+		closeGW = sync.OnceFunc(closeGWFn)
 		defer closeGW()
 		oauth, err := gateway.NewOAuth(st.DB(), nil)
 		if err != nil {
@@ -250,21 +246,58 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	}
 	log.Printf("tincan relay serving on %s (admin socket %s)", ln.Addr(), adminSock)
 
+	var served error
 	select {
 	case <-ctx.Done():
-	case err := <-errc:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
+	case served = <-errc:
+		if errors.Is(served, http.ErrServerClosed) {
+			served = nil
 		}
 	}
-	shutdown(servers)
-	return nil
+	// From here a second SIGINT or SIGTERM gets the default handling and
+	// ends the process at once.
+	stop()
+	log.Printf("tincan relay shutting down")
+	var step atomic.Value
+	watchdog := time.AfterFunc(relayExitTimeout, func() {
+		log.Printf("tincan relay: shutdown stuck in %s after %s; exiting now", step.Load(), relayExitTimeout)
+		os.Exit(1)
+	})
+	defer watchdog.Stop()
+	for _, s := range []struct {
+		name string
+		do   func()
+	}{
+		// Held long polls and waits answer "nothing yet" first, so the
+		// drain below only waits for calls that are really working.
+		{"ending held polls", srv.Stop},
+		{"draining connections", func() { shutdown(servers) }},
+		{"stopping sweeps", func() { stopRun(); <-ran }},
+		{"stopping wakes", waker.Stop},
+		{"closing the gateway", closeGW},
+		{"closing the tailnet listener", closeNet},
+		{"closing the store", closeStore},
+	} {
+		step.Store(s.name)
+		s.do()
+	}
+	log.Printf("tincan relay stopped")
+	return served
 }
 
-// shutdown drains servers gracefully so held long-polls finish rather than
-// being severed on restart, falling back to Close if the drain times out.
+// relayDrainTimeout bounds how long shutdown waits for calls in flight
+// before closing their connections. Held long polls do not count: they
+// answer as soon as shutdown starts.
+var relayDrainTimeout = 10 * time.Second
+
+// relayExitTimeout bounds the whole shutdown. A relay still stuck after it
+// (a tailnet node that will not close, say) logs the step and exits anyway.
+var relayExitTimeout = relayDrainTimeout + 10*time.Second
+
+// shutdown drains servers, closing whatever is still open when
+// relayDrainTimeout runs out.
 func shutdown(servers []*http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), client.DefaultPollHold+5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), relayDrainTimeout)
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, s := range servers {
@@ -275,6 +308,48 @@ func shutdown(servers []*http.Server) {
 		})
 	}
 	wg.Wait()
+}
+
+// relayResolver is what the relay needs from its tailnet: caller identity,
+// node liveness for rebinds, and the URLs it advertises.
+type relayResolver interface {
+	identity.Resolver
+	identity.NodeStatus
+	SelfURLs(ctx context.Context, port int) []string
+}
+
+// openRelayNet opens the relay's agent API listener and identity resolver:
+// the host tailnet address through tailscaled with --listen, or its own
+// tsnet node. Tests replace it to serve on loopback with a fake tailnet.
+var openRelayNet = func(ctx context.Context, f relayFlags, listenAt string) (net.Listener, relayResolver, func(), error) {
+	if f.listen != "" {
+		who := identity.NewLocalResolverAt("")
+		if err := who.Probe(ctx); err != nil {
+			return nil, nil, nil, fmt.Errorf("refusing to start without WhoIs: %w", err)
+		}
+		ln, err := net.Listen("tcp", listenAt)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return ln, who, func() {}, nil
+	}
+	ts := &tsnet.Server{Hostname: f.hostname, Dir: filepath.Join(f.stateDir, "tsnet"), AuthKey: os.Getenv("TS_AUTHKEY")}
+	fail := func(err error) (net.Listener, relayResolver, func(), error) {
+		ts.Close()
+		return nil, nil, nil, err
+	}
+	if _, err := ts.Up(ctx); err != nil {
+		return fail(fmt.Errorf("tsnet up: %w", err))
+	}
+	lc, err := ts.LocalClient()
+	if err != nil {
+		return fail(err)
+	}
+	ln, err := ts.Listen("tcp", fmt.Sprintf(":%d", f.port))
+	if err != nil {
+		return fail(err)
+	}
+	return ln, identity.NewLocalResolver(lc), func() { ts.Close() }, nil
 }
 
 // gatewayListener returns the public listener and base URL for the ChatGPT
@@ -316,6 +391,22 @@ func resumeReplyWakes(ctx context.Context, st *store.Store, w *wake.Waker) error
 	}
 	for _, a := range agents {
 		w.ReplyWaiting(a)
+	}
+	return nil
+}
+
+// resumeRequestWakes schedules a request wake for every agent that still has
+// queued requests. A nudge scheduled before a restart lived only in the old
+// process, so without this a webhook or email agent sent a request just
+// before the relay stopped would never be woken for it. Each wake counts the
+// queued requests when it fires and is dropped if a poller took them.
+func resumeRequestWakes(ctx context.Context, st *store.Store, w *wake.Waker) error {
+	agents, err := st.AgentsWithQueuedRequests(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range agents {
+		w.RequestsWaiting(a)
 	}
 	return nil
 }

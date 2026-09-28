@@ -360,3 +360,73 @@ func TestUrgentPullsPendingWakeForward(t *testing.T) {
 		t.Fatalf("wakes = %d", rc.count())
 	}
 }
+
+// Stop drops scheduled nudges, cuts short one waiting to retry, and
+// schedules nothing afterwards, so a stopping relay is not held up by its
+// wakes.
+func TestStopDropsAndEndsNudges(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	cfg := Config{"grokbot": {Method: Webhook, URL: ts.URL}, "muse": {Method: Webhook, URL: ts.URL}}
+	w := New(cfg, st, Options{Debounce: time.Hour, RetryDelay: time.Hour})
+	queued(w, "grokbot", 1) // waits out the hour-long debounce
+	rc.fail.Store(1)
+	w.Queued(context.Background(), envelope.Request{ID: "ru", To: "muse", Urgent: true}) // fails, then waits an hour to retry
+	deadline := time.Now().Add(5 * time.Second)
+	for rc.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	w.Stop()
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("Stop took %v", took)
+	}
+	queued(w, "grokbot", 1)
+	w.ReplyWaiting("muse")
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("webhook calls = %d, want only the failed urgent one", rc.count())
+	}
+	if got := strings.Join(events(t, st), ","); got != "wake_failed" {
+		t.Fatalf("audit = %s, want the cut-short nudge recorded as failed", got)
+	}
+}
+
+// A restarted relay re-arms the request wakes the old process lost. The
+// nudge counts the queued requests when it fires, so one a poller took in
+// the meantime wakes nobody, and agents woken by their own side are skipped.
+func TestRequestsWaitingCountsAtFireTime(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var queuedN atomic.Int32
+	queuedN.Store(2)
+	cfg := Config{"grokbot": {Method: Webhook, URL: ts.URL}, "muse": {Method: Command}}
+	w := New(cfg, nil, Options{Debounce: time.Millisecond, Queued: func(string) int { return int(queuedN.Load()) }})
+	w.RequestsWaiting("grokbot")
+	w.RequestsWaiting("muse")
+	w.Flush()
+	if rc.count() != 1 || !strings.Contains(rc.bodies[0], "2 requests") {
+		t.Fatalf("wakes = %q, want one for grokbot's 2 requests", rc.bodies)
+	}
+	queuedN.Store(0) // a poller took them before the nudge fired
+	w.RequestsWaiting("grokbot")
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("woke %d times for requests already taken", rc.count())
+	}
+}
+
+// A request queued while a re-armed wake is pending does not hide the older
+// backlog: the nudge names every request still waiting.
+func TestRequestsWaitingCountsWholeBacklog(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{Debounce: 50 * time.Millisecond, Queued: func(string) int { return 3 }})
+	w.RequestsWaiting("grokbot")
+	queued(w, "grokbot", 1)
+	w.Flush()
+	if rc.count() != 1 || !strings.Contains(rc.bodies[0], "3 requests") {
+		t.Fatalf("wakes = %q, want one naming all 3 requests", rc.bodies)
+	}
+}
