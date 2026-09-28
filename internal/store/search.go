@@ -57,6 +57,9 @@ func (s *Store) migrateSearch() error {
 
 // backfillSearchBatch commits the index and its checkpoint together. Triggers
 // may already have indexed rows beyond the checkpoint; replacing them is safe.
+// A request whose clarification question was answered has no reply row, so
+// its latest question is indexed as the reply text, as the insert trigger
+// left it.
 func (s *Store) backfillSearchBatch() (bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -75,7 +78,7 @@ func (s *Store) backfillSearchBatch() (bool, error) {
 		return false, tx.Commit()
 	}
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO requests_fts(rowid, request_id, trace_id, body, reply_body)
- SELECT r.rowid, r.id, r.trace_id, r.body, COALESCE(p.body, '') FROM requests r
+ SELECT r.rowid, r.id, r.trace_id, r.body, COALESCE(p.body, json_extract(r.exchanges, '$[#-1].question'), '') FROM requests r
  LEFT JOIN replies p ON p.request_id = r.id WHERE r.rowid > ? AND r.rowid <= ?`, high, end); err != nil {
 		return false, err
 	}

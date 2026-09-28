@@ -304,3 +304,32 @@ func TestSearchLabelsClarificationQuestions(t *testing.T) {
 		t.Fatalf("expired: %+v, %v", hits, err)
 	}
 }
+
+// Backfill rebuilds an index entry from the stored rows. An answered
+// question has no reply row left, so backfill takes it from the request's
+// exchanges and search still finds it as a question.
+func TestSearchBackfillKeepsAnsweredQuestion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, _ := open(t, path)
+	ctx := t.Context()
+	req := ask(t, s, "a", "b", "book dinner")
+	if _, err := s.Claim(ctx, req.ID, "b", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reply(ctx, req.ID, "b", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which restaurant?"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Answer(ctx, req.ID, "a", "Nopa"); err != nil {
+		t.Fatal(err)
+	}
+	// Leave this request past the checkpoint, as an unfinished backfill would.
+	if _, err := s.db.Exec(`UPDATE search_backfill SET high_water = 0`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, _ = open(t, path)
+	hits, err := s.Search(ctx, "restaurant", "a", 20)
+	if err != nil || len(hits) != 1 || hits[0].RequestID != req.ID || hits[0].ReplySnippet != "" || !strings.Contains(hits[0].QuestionSnippet, "[restaurant]") {
+		t.Fatalf("after backfill: %+v, %v", hits, err)
+	}
+}
