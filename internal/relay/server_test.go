@@ -16,6 +16,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/identity/identitytest"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 const (
@@ -641,6 +642,49 @@ func TestSweepPrefersRequeuedHook(t *testing.T) {
 	}
 }
 
+func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		name := "delivery"
+		if claimed {
+			name = "claim"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, Config{})
+			var req envelope.Request
+			h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"urgent","urgent":true}`, http.StatusCreated, &req)
+			ctx := t.Context()
+			if claimed {
+				if _, err := h.st.Claim(ctx, req.ID, "muse", -time.Second); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				got, err := h.st.Deliver(ctx, "muse", 1, -time.Second)
+				if err != nil || len(got) != 1 {
+					t.Fatalf("deliver = %v, %v", got, err)
+				}
+			}
+			woken := make(chan struct{}, 1)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				woken <- struct{}{}
+			}))
+			defer ts.Close()
+			waker := wake.New(wake.Config{"muse": {Method: wake.Webhook, URL: ts.URL}}, h.st, wake.Options{Debounce: 2 * time.Second})
+			defer waker.Flush()
+			h.srv.SetEvents(waker)
+			h.srv.Sweep(ctx)
+			select {
+			case <-woken:
+			case <-time.After(time.Second):
+				t.Fatal("urgent requeue waited for debounce")
+			}
+			stored, status, err := h.st.Request(ctx, req.ID)
+			if err != nil || status != envelope.StatusQueued || !stored.Urgent {
+				t.Fatalf("requeued request = %+v, %s, %v", stored, status, err)
+			}
+		})
+	}
+}
+
 func TestPingGateTracksReceivingPollers(t *testing.T) {
 	for _, pollPath := range []string{"/v1/poll?hold=0", "/v1/poll?peek=1&hold=0"} {
 		t.Run(pollPath, func(t *testing.T) {
@@ -679,6 +723,44 @@ func TestPingGateTracksReceivingPollers(t *testing.T) {
 			h.srv.mu.Unlock()
 			ping(201)
 		})
+	}
+}
+
+type refundingPreparer struct{ refunded []envelope.Request }
+
+func (p *refundingPreparer) Prepare(_ context.Context, req *envelope.Request) error {
+	return newChain{}.Prepare(context.Background(), req)
+}
+
+func (p *refundingPreparer) Refund(req envelope.Request) { p.refunded = append(p.refunded, req) }
+
+func TestFailedSendIsRefunded(t *testing.T) {
+	h := newHarness(t, Config{})
+	prep := &refundingPreparer{}
+	h.srv.SetPreparer(prep)
+	h.srv.SetAttachmentDir(t.TempDir())
+	// An attachment id that was never uploaded fails at queue time, after Prepare.
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"x","urgent":true,"attachments":[{"id":"missing"}]}`, http.StatusBadRequest, nil)
+	if len(prep.refunded) != 1 || !prep.refunded[0].Urgent || prep.refunded[0].From != "grokbot" {
+		t.Fatalf("refunded = %+v", prep.refunded)
+	}
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"x","urgent":true}`, http.StatusCreated, nil)
+	if len(prep.refunded) != 1 {
+		t.Fatalf("a queued send was refunded: %+v", prep.refunded)
+	}
+}
+
+func TestPeekCountsAllUrgentRequests(t *testing.T) {
+	h := newHarness(t, Config{})
+	for range MaxPeekPending + 5 {
+		if _, err := h.st.Enqueue(context.Background(), envelope.Request{From: "grokbot", To: "muse", Kind: envelope.KindAsk, Body: "x", Urgent: true}, time.Hour); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	var out client.Waiting
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, &out)
+	if out.Urgent != MaxPeekPending+5 || len(out.Pending) != MaxPeekPending {
+		t.Fatalf("peek = urgent %d, pending %d", out.Urgent, len(out.Pending))
 	}
 }
 

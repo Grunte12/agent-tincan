@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS requests (
   updated_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
   lease_until INTEGER NOT NULL DEFAULT 0,
+  urgent INTEGER NOT NULL DEFAULT 0,
   reply_seen_at INTEGER NOT NULL DEFAULT 0,
   attachments TEXT NOT NULL DEFAULT ''
 );
@@ -146,11 +147,27 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate attachments: %w", err)
 	}
+	if err := s.migrateUrgent(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate urgent: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
 	}
 	return s, nil
+}
+
+func (s *Store) migrateUrgent() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'urgent')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 // Path is the database file the store was opened on, or "" for an
@@ -544,10 +561,10 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, urgent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.Urgent)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -561,7 +578,7 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time.Duration) ([]envelope.Request, error) {
 	now := s.now()
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
-		WHERE id IN (SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at LIMIT ?)
+		WHERE id IN (SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at LIMIT ?)
 		RETURNING `+requestCols,
 		string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
 		agent, string(envelope.StatusQueued), now.UnixMilli(), limit)
@@ -573,7 +590,7 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 	if err != nil {
 		return nil, err
 	}
-	sortByCreated(out)
+	sortByPriority(out)
 	return out, nil
 }
 
@@ -582,6 +599,14 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
+	return n, err
+}
+
+// CountUrgentQueued returns how many of agent's queued requests are urgent.
+func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
 	return n, err
 }
@@ -628,11 +653,11 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	return out, rows.Err()
 }
 
-// PendingRequests names up to limit of agent's queued requests, oldest
-// first, without delivering them or reading their bodies.
+// PendingRequests names up to limit of agent's queued requests, urgent
+// first and then oldest, without delivering them or reading their bodies.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind FROM requests
-		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT ?`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
 	if err != nil {
 		return nil, err
@@ -641,7 +666,7 @@ func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([
 	var out []envelope.Pending
 	for rows.Next() {
 		var p envelope.Pending
-		if err := rows.Scan(&p.ID, &p.From, &p.Kind); err != nil {
+		if err := rows.Scan(&p.ID, &p.From, &p.Kind, &p.Urgent); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -803,6 +828,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 
 // Transition is one state change made by Sweep.
 type Transition struct {
+	Urgent  bool
 	ID      string
 	TraceID string
 	From    string
@@ -824,7 +850,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		for rows.Next() {
 			var t Transition
 			var st string
-			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st); err != nil {
+			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st, &t.Urgent); err != nil {
 				return err
 			}
 			t.Status = envelope.Status(st)
@@ -837,13 +863,13 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	// Deliver rejects.
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
 		WHERE (status IN (?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
-		RETURNING id, trace_id, from_agent, to_agent, status`,
+		RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered),
 		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
+		WHERE status IN (?, ?) AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
 		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
 		return nil, err
 	}
@@ -874,7 +900,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, urgent`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -882,7 +908,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
 	var chain, kind, status, atts string
 	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &r.Urgent); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
@@ -917,8 +943,16 @@ func (s *Store) lookup(ctx context.Context, id string) (envelope.Request, envelo
 	return r, st, err
 }
 
-func sortByCreated(rs []envelope.Request) {
-	slices.SortStableFunc(rs, func(a, b envelope.Request) int { return a.CreatedAt.Compare(b.CreatedAt) })
+func sortByPriority(rs []envelope.Request) {
+	slices.SortStableFunc(rs, func(a, b envelope.Request) int {
+		if a.Urgent != b.Urgent {
+			if a.Urgent {
+				return -1
+			}
+			return 1
+		}
+		return a.CreatedAt.Compare(b.CreatedAt)
+	})
 }
 
 func randomID() string {

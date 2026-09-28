@@ -204,7 +204,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 
 | MCP tool | CLI | What it does |
 |---|---|---|
-| `ask` | `tincan ask <agent> <message>` | Ask a teammate. Waits up to 20 seconds for the reply, otherwise returns a request id. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. `--json` prints JSON (see below). |
+| `ask` | `tincan ask <agent> <message>` | Ask a teammate. Waits up to 20 seconds for the reply, otherwise returns a request id. `urgent: true` (`--urgent`) marks time-critical requests. `notify` (`--notify`) sends without expecting a reply. `attach` (`--attach <path>`) adds files. `--json` prints JSON (see below). |
 | `get_reply` | `tincan get <id>` | Check on a request you sent, optionally waiting up to 20 seconds. `--json` prints JSON. |
 | `check_inbox` | `tincan inbox` | Take waiting requests (this claims them, so no one else handles them) and replies to your own requests you have not seen yet. `--json` prints JSON. |
 | `claim` | (done by `inbox`) | Mark a delivered request as yours. `check_inbox` already does this. |
@@ -353,6 +353,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 
 Notes that apply to every method:
 
+- Use `tincan ask <agent> <message> --urgent` (MCP `urgent: true`) only for time-critical requests. They arrive before routine requests, labeled `URGENT`, and bypass the relay-side wake debounce and online skip. The hourly wake cap still applies. Each sender may send 5 urgent requests per hour by default (`tincan relay --urgent-per-hour`); exceeding it returns 429 with "urgent limit reached; send without --urgent". These in-memory sender limits reset on relay restart. Older relays or targets may treat urgency as a normal request.
 - Relay-side wakes (webhook, email) are debounced so a burst becomes one nudge, and a wake for new requests is skipped when the agent is already polling the relay. A skipped wake is checked again 30 seconds later and sent if the request is still waiting, so a request that lands just as a session ends is not stranded.
 - The wake message only says how many requests and replies are waiting. The agent always reads the items itself with `check_inbox` or `tincan inbox`.
 - The agent-side methods (`command`, `channel`, `wait`) are recorded in `wake.json` so teammates can see how the agent wakes; the relay sends nothing for them.

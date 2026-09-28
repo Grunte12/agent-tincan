@@ -24,7 +24,7 @@ import (
 func TestRejoinSavesConfigAndNextCommandWorks(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	m.Server.SetURLs([]string{"http://tincan-relay"})
-	if _, err := m.Client(t, "grokbot").Ask(t.Context(), "instinct", "summarize the report", "", 0); err != nil {
+	if _, err := m.Client(t, "grokbot").Ask(t.Context(), "instinct", "summarize the report", "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	url := m.Rebuild(t, "instinct", "instinct")

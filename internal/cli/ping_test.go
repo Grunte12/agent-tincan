@@ -27,7 +27,7 @@ func TestWaitAnswersPingAndKeepsWaiting(t *testing.T) {
 	if _, err := target.Peek(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
-	ping, err := sender.Send(ctx, "muse", "", envelope.KindPing, "")
+	ping, err := sender.Send(ctx, "muse", "", envelope.KindPing, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestWaitAnswersPingAndKeepsWaiting(t *testing.T) {
 		t.Fatalf("wait ended on ping: %+v", in)
 	default:
 	}
-	ask, err := sender.Send(ctx, "muse", "real work", envelope.KindAsk, "")
+	ask, err := sender.Send(ctx, "muse", "real work", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestListenAnswersPingsWithoutExec(t *testing.T) {
 	var last envelope.Request
 	for range 12 {
 		var err error
-		last, err = sender.Send(ctx, "muse", "", envelope.KindPing, "")
+		last, err = sender.Send(ctx, "muse", "", envelope.KindPing, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +82,7 @@ func TestListenAnswersPingsWithoutExec(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("exec ran for ping: %v", err)
 	}
-	if _, err := sender.Send(ctx, "muse", "real work", envelope.KindAsk, ""); err != nil {
+	if _, err := sender.Send(ctx, "muse", "real work", envelope.KindAsk, "", false); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -171,11 +171,11 @@ func TestInboxJSONFiltersPingAmongWork(t *testing.T) {
 	if _, err := target.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
-	ping, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "")
+	ping, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ask, err := sender.Send(t.Context(), "muse", "real work", envelope.KindAsk, "")
+	ask, err := sender.Send(t.Context(), "muse", "real work", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +194,11 @@ func TestTraceFilterBeforeLimit(t *testing.T) {
 	if _, err := target.Peek(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}
-	ask, err := sender.Send(t.Context(), "muse", "real work", envelope.KindAsk, "")
+	ask, err := sender.Send(t.Context(), "muse", "real work", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, ""); err != nil {
+	if _, err := sender.Send(t.Context(), "muse", "", envelope.KindPing, "", false); err != nil {
 		t.Fatal(err)
 	}
 	var out struct {

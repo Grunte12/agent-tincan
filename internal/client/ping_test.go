@@ -17,13 +17,13 @@ func TestPingCapabilityAndAutomaticReply(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	sender, target := m.Client(t, "grokbot"), m.Client(t, "muse")
 	ctx := t.Context()
-	if _, err := sender.Send(ctx, "muse", "", envelope.KindPing, ""); !client.IsStatus(err, 409) {
+	if _, err := sender.Send(ctx, "muse", "", envelope.KindPing, "", false); !client.IsStatus(err, 409) {
 		t.Fatalf("unadvertised ping: %v", err)
 	}
 	if _, err := target.Peek(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
-	req, err := sender.Send(ctx, "muse", "", envelope.KindPing, "")
+	req, err := sender.Send(ctx, "muse", "", envelope.KindPing, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestPingCapabilityAndAutomaticReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if _, err := sender.Send(ctx, "muse", "", envelope.KindPing, ""); !client.IsStatus(err, 409) {
+	if _, err := sender.Send(ctx, "muse", "", envelope.KindPing, "", false); !client.IsStatus(err, 409) {
 		t.Fatalf("old client ping: %v", err)
 	}
 	features, err := m.Store.AgentFeatures(ctx)

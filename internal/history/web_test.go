@@ -243,7 +243,7 @@ func newWebRigWith(t *testing.T, cfg relay.Config, attachments bool) *webRig {
 func (r *webRig) ask(t *testing.T, from, body string) client.Result {
 	t.Helper()
 	c := r.mesh.Client(t, from)
-	req, err := c.Send(t.Context(), "chatgpt-web", body, envelope.KindAsk, "")
+	req, err := c.Send(t.Context(), "chatgpt-web", body, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1057,7 +1057,7 @@ func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
 	})}
 	ctx := t.Context()
 	grok := rig.mesh.Client(t, "grokbot")
-	sent, err := grok.Send(ctx, "chatgpt-web", "only once, please", envelope.KindAsk, "")
+	sent, err := grok.Send(ctx, "chatgpt-web", "only once, please", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1124,7 +1124,7 @@ func TestWebRequeuedAnsweredRequestRepliesWithoutSending(t *testing.T) {
 	rig.ask(t, "grokbot", "hello") // conv-1, user message u0
 	ctx := t.Context()
 	grok := rig.mesh.Client(t, "grokbot")
-	sent, err := grok.Send(ctx, "chatgpt-web", "hello", envelope.KindAsk, "")
+	sent, err := grok.Send(ctx, "chatgpt-web", "hello", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1217,7 +1217,7 @@ func TestWebAnswersPingWithoutHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	sender := rig.mesh.Client(t, "grokbot")
-	req, err := sender.Send(t.Context(), "chatgpt-web", "", envelope.KindPing, "")
+	req, err := sender.Send(t.Context(), "chatgpt-web", "", envelope.KindPing, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

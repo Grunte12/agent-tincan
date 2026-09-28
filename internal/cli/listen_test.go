@@ -76,7 +76,7 @@ func TestListenKeepsPresenceWhileCommandRuns(t *testing.T) {
 	grokbot := m.Client(t, "grokbot")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	first, err := grokbot.Send(ctx, "muse", "call Joe's Garage", envelope.KindAsk, "")
+	first, err := grokbot.Send(ctx, "muse", "call Joe's Garage", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestListenKeepsPresenceWhileCommandRuns(t *testing.T) {
 	}()
 	waitForFile(t, running)
 	start := time.Now()
-	second, err := grokbot.Send(ctx, "muse", "and the dentist", envelope.KindAsk, "")
+	second, err := grokbot.Send(ctx, "muse", "and the dentist", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

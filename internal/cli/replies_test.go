@@ -29,7 +29,7 @@ func answered(t *testing.T, m *testrelay.Mesh, ask, answer string) envelope.Requ
 	t.Helper()
 	ctx := context.Background()
 	muse := m.Client(t, "muse")
-	req, err := m.Client(t, "grokbot").Send(ctx, "muse", ask, envelope.KindAsk, "")
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", ask, envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestInboxPrintsRepliesThenRequests(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := context.Background()
 	req := answered(t, m, "call the garage", "Tue 3pm works")
-	incoming, _ := m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+	incoming, _ := m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "", false)
 
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
 	cmd := inboxCmd()
@@ -90,14 +90,14 @@ func TestInboxReplyTellsAgentToFinishParent(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := context.Background()
 	codex, hermes, claude := m.Client(t, "grokbot"), m.Client(t, "instinct"), m.Client(t, "muse")
-	parent, err := codex.Send(ctx, "instinct", "book the flight to Tokyo", envelope.KindAsk, "")
+	parent, err := codex.Send(ctx, "instinct", "book the flight to Tokyo", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := hermes.Claim(ctx, parent.ID); err != nil {
 		t.Fatal(err)
 	}
-	child, err := hermes.Send(ctx, "muse", "which airline does Matt prefer?", envelope.KindAsk, "")
+	child, err := hermes.Send(ctx, "muse", "which airline does Matt prefer?", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestListenFiresForUnseenReply(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	answered(t, m, "call the garage", "Tue 3pm works")
-	m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+	m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "", false)
 	out := filepath.Join(t.TempDir(), "nudged")
 	if err := listen(ctx, m.Client(t, "grokbot"), `echo "$TINCAN_WAITING" > `+out, true); err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 	ctx := context.Background()
 	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
 
-	res, err := grok.Ask(ctx, "muse", "call the garage and book a slot", "", time.Second)
+	res, err := grok.Ask(ctx, "muse", "call the garage and book a slot", "", time.Second, false)
 	if err != nil || res.Reply != nil {
 		t.Fatalf("inline ask = %+v, %v; want no reply yet", res, err)
 	}
@@ -295,7 +295,7 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 			muse.Reply(ctx, r.ID, "quick answer", envelope.StatusAnswered)
 		}
 	}()
-	res, err = grok.Ask(ctx, "muse", "quick one", "", 5*time.Second)
+	res, err = grok.Ask(ctx, "muse", "quick one", "", 5*time.Second, false)
 	if err != nil || res.Reply == nil {
 		t.Fatalf("inline ask = %+v, %v; want the reply inline", res, err)
 	}
@@ -359,7 +359,7 @@ func TestFormatWaitWithRequestAndReply(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := context.Background()
 	answered(t, m, "call the garage", "Tue 3pm works")
-	incoming, _ := m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+	incoming, _ := m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "", false)
 	grok := m.Client(t, "grokbot")
 	in, err := grok.PollReplies(ctx, 0, client.RepliesKeep)
 	if err != nil || len(in.Requests) != 1 || len(in.Replies) != 1 {
@@ -441,7 +441,7 @@ func TestResumeReplyWakesAfterRestart(t *testing.T) {
 	if err := m.Client(t, "grokbot").AckReplies(ctx, []string{read.ID}); err != nil {
 		t.Fatal(err)
 	}
-	inst, _ := m.Client(t, "instinct").Send(ctx, "muse", "book a table", envelope.KindAsk, "")
+	inst, _ := m.Client(t, "instinct").Send(ctx, "muse", "book a table", envelope.KindAsk, "", false)
 	muse := m.Client(t, "muse")
 	muse.Claim(ctx, inst.ID)
 	muse.Reply(ctx, inst.ID, "7pm", envelope.StatusAnswered) // instinct's, unseen, but wait-method

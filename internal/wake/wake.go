@@ -269,14 +269,14 @@ func (w *Waker) WakeMethod(agent string) string {
 // Queued implements relay.Events. Relay-side methods schedule a debounced
 // nudge; agent-side methods need nothing from the relay.
 func (w *Waker) Queued(_ context.Context, req envelope.Request) {
-	w.schedule(req.To, true)
+	w.schedule(req.To, true, req.Urgent)
 }
 
 // Requeued implements relay.Requeuer. A requeue means the agent's own
 // delivery or claim lease ran out, so a recent poll does not prove a poller
 // holds the request; relay-side methods are nudged without the online check.
 func (w *Waker) Requeued(_ context.Context, req envelope.Request) {
-	w.schedule(req.To, false)
+	w.schedule(req.To, false, req.Urgent)
 }
 
 // Replied implements relay.Replier: it schedules a nudge for the asker,
@@ -305,11 +305,11 @@ func (w *Waker) ReplyWaiting(agent string) {
 
 // schedule debounces a relay-side nudge for agent. checkOnline skips agents
 // whose poller already has the request.
-func (w *Waker) schedule(agent string, checkOnline bool) {
+func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 	if !w.relaySide(agent) {
 		return
 	}
-	if checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
+	if !urgent && checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
 		// Its poller should have it, but a session that just polled may be
 		// ending: look again later and wake only if it is still waiting.
 		if w.opts.Queued != nil {
@@ -323,7 +323,11 @@ func (w *Waker) schedule(agent string, checkOnline bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.nudgeFor(agent).requests++
-	w.arm(agent, w.opts.Debounce)
+	if urgent {
+		w.arm(agent, 0)
+	} else {
+		w.arm(agent, w.opts.Debounce)
+	}
 }
 
 // relaySide reports whether the relay itself wakes agent.

@@ -290,7 +290,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent string
-	var notify, asJSON bool
+	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent> <message...>",
@@ -308,7 +308,7 @@ func askCmd() *cobra.Command {
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids)
+				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
@@ -318,7 +318,7 @@ func askCmd() *cobra.Command {
 				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
 				return nil
 			}
-			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
+			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait), urgent)
 			if err != nil {
 				return err
 			}
@@ -331,6 +331,7 @@ func askCmd() *cobra.Command {
 	}
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
+	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")

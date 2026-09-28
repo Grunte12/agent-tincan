@@ -29,7 +29,7 @@ func pingCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), wait)
 			defer cancel()
 			start := time.Now()
-			req, err := r.Send(ctx, args[0], "", envelope.KindPing, "")
+			req, err := r.Send(ctx, args[0], "", envelope.KindPing, "", false)
 			if err != nil {
 				return err
 			}

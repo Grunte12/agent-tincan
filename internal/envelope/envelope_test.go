@@ -191,6 +191,41 @@ func TestAttachmentJSONShape(t *testing.T) {
 	}
 }
 
+func TestParseSendUrgent(t *testing.T) {
+	for _, tc := range []struct {
+		raw    string
+		urgent bool
+	}{
+		{`{"to":"target","body":"x","urgent":true}`, true},
+		{`{"to":"target","body":"x"}`, false},
+	} {
+		req, err := ParseSend([]byte(tc.raw), "sender", DefaultMaxBody)
+		if err != nil || req.Urgent != tc.urgent {
+			t.Fatalf("request = %+v, %v", req, err)
+		}
+	}
+	if _, err := ParseSend([]byte(`{"to":"target","body":"x","urgent":"true"}`), "sender", DefaultMaxBody); err == nil {
+		t.Fatal("accepted non-boolean urgent")
+	}
+}
+
+func TestPendingUrgentJSONShape(t *testing.T) {
+	for _, urgent := range []bool{false, true} {
+		raw, err := json.Marshal(Pending{ID: "r1", From: "sender", Urgent: urgent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["urgent"]
+		if present != urgent || (urgent && value != true) {
+			t.Fatalf("urgent=%v: unexpected JSON %s", urgent, raw)
+		}
+	}
+}
+
 func TestParsePing(t *testing.T) {
 	for _, raw := range []string{
 		`{"to":"other","kind":"ping","parent_id":"parent"}`,
