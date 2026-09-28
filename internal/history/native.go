@@ -177,6 +177,11 @@ const (
 	OpGeminiFile   Op = "gemini.file"
 	OpGeminiSend   Op = "gemini.send"
 	OpGeminiClose  Op = "gemini.close"
+	// Perplexity (www.perplexity.ai) fronts a web agent only: it has no
+	// list or file operation.
+	OpPerplexityDetail Op = "perplexity.detail"
+	OpPerplexitySend   Op = "perplexity.send"
+	OpPerplexityClose  Op = "perplexity.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -468,7 +473,7 @@ func clampRetryAfterSeconds(secs int) time.Duration {
 const DefaultRateLimitCooldown = 30 * time.Second
 
 // DefaultBlockedCooldown is how long every request to a site with a
-// blockedCooldown (Gemini) is refused locally after it showed an anti-bot
+// blockedCooldown (Gemini, Perplexity) is refused locally after it showed an anti-bot
 // check: time for the owner to clear it in Chrome, without the agent
 // tripping it again meanwhile.
 const DefaultBlockedCooldown = 5 * time.Minute

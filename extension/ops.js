@@ -31,6 +31,13 @@
 // and picks the image by response and position (see geminiImageURL), then
 // asks the sender to capture it in the tab its send left open, and falls
 // back to fetching it here.
+//
+// Perplexity (www.perplexity.ai) fronts a web agent only: there is no
+// list or file operation. perplexity.detail reads one thread with GET
+// /rest/thread/<slug>, a page at a time, and returns only the entry fields
+// the Go side reads (never the thread's read_write_token). Perplexity
+// answers signed-out visitors too, so perplexity.send first asks
+// /api/auth/session for a signed-in user and opens no tab without one.
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
@@ -69,6 +76,7 @@ export const SITE_ACCESS = Object.freeze({
   claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
   grok: Object.freeze({ label: 'Grok', origins: Object.freeze(['https://grok.com/*', 'https://assets.grok.com/*']), pageOrigins: Object.freeze(['https://grok.com/*']), required: false }),
   gemini: Object.freeze({ label: 'Gemini', origins: Object.freeze(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']), pageOrigins: Object.freeze(['https://gemini.google.com/*']), required: false }),
+  perplexity: Object.freeze({ label: 'Perplexity', origins: Object.freeze(['https://www.perplexity.ai/*']), pageOrigins: Object.freeze(['https://www.perplexity.ai/*']), required: false }),
 });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
@@ -114,6 +122,25 @@ const GROK_FILE_RE = /^([A-Za-z0-9][A-Za-z0-9-]{0,99})_(0|[1-9][0-9]?)$/;
 const GEMINI = 'https://gemini.google.com';
 // GEMINI_ID_RE is a Gemini conversation id as its URL shows it.
 const GEMINI_ID_RE = /^[0-9a-f]{8,64}$/;
+const PERPLEXITY = 'https://www.perplexity.ai';
+// perplexity.detail reads PERPLEXITY_PAGE_SIZE entries a page and at most
+// PERPLEXITY_MAX_PAGES pages of one thread.
+export const PERPLEXITY_PAGE_SIZE = 10;
+export const PERPLEXITY_MAX_PAGES = 20;
+// PERPLEXITY_ENTRY_FIELDS are the thread entry fields perplexity.detail
+// returns; everything else in an entry (its read_write_token among them)
+// stays here.
+export const PERPLEXITY_ENTRY_FIELDS = Object.freeze(['uuid', 'backend_uuid', 'status', 'query_str', 'thread_title', 'thread_url_slug', 'text', 'entry_created_datetime', 'entry_updated_datetime', 'updated_datetime', 'blocks']);
+
+// perplexityEntry keeps only PERPLEXITY_ENTRY_FIELDS of a thread entry.
+export function perplexityEntry(e) {
+  if (!isPlainObject(e)) throw new OpError('endpoint_changed', 'unexpected thread entry');
+  const out = {};
+  for (const k of PERPLEXITY_ENTRY_FIELDS) {
+    if (Object.hasOwn(e, k)) out[k] = e[k];
+  }
+  return out;
+}
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -141,6 +168,9 @@ const SPEC = Object.freeze({
   'gemini.file': Object.freeze({ file_id: 'id', conversation_id: 'id' }),
   'gemini.send': SEND_SPEC,
   'gemini.close': CLOSE_SPEC,
+  'perplexity.detail': Object.freeze({ id: 'id' }),
+  'perplexity.send': SEND_SPEC,
+  'perplexity.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -754,6 +784,57 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     }
   }
 
+  // perplexityJSON is the one place www.perplexity.ai's JSON is fetched:
+  // from this worker, with the owner's cookies. If Perplexity ever refuses
+  // reads from the extension's origin, this is the function to swap for a
+  // fixed read in the isolated world of an extension-opened tab, the way
+  // send.js runs its page functions; nothing else changes.
+  async function perplexityJSON(url, init, notFound = false) {
+    return getJSON(url, init, notFound);
+  }
+
+  // perplexitySession fails not_logged_in unless /api/auth/session names a
+  // signed-in user (an object with an id); signed out it answers {}.
+  // Perplexity lets a signed-out page ask anonymously, so the send never
+  // opens a tab without it. The user's fields are only checked, never
+  // returned or kept. The send tab's login probe (send.js) is the second
+  // gate and runs before anything is typed.
+  async function perplexitySession() {
+    const s = await perplexityJSON(`${PERPLEXITY}/api/auth/session`, {});
+    const user = isPlainObject(s) ? s.user : null;
+    if (!isPlainObject(user) || typeof user.id !== 'string' || user.id === '') {
+      throw new OpError('not_logged_in', 'no www.perplexity.ai session');
+    }
+  }
+
+  // perplexityThread reads thread slug a page at a time, oldest entry
+  // first, following next_cursor while has_next_page says there is more.
+  // Stopping at PERPLEXITY_MAX_PAGES with more left sets more.
+  async function perplexityThread(slug) {
+    const entries = [];
+    let cursor = '';
+    let more = false;
+    for (let page = 0; page < PERPLEXITY_MAX_PAGES; page++) {
+      const q = new URLSearchParams({ with_parent_info: 'true', with_schematized_response: 'true', version: '2.18', source: 'default', limit: String(PERPLEXITY_PAGE_SIZE) });
+      if (cursor) {
+        q.set('cursor', cursor);
+      } else {
+        q.set('offset', '0');
+        q.set('from_first', 'true');
+      }
+      const r = await perplexityJSON(`${PERPLEXITY}/rest/thread/${encodeURIComponent(slug)}?${q}`, {}, true);
+      if (!isPlainObject(r) || !Array.isArray(r.entries)) throw new OpError('endpoint_changed', 'unexpected thread answer');
+      for (const e of r.entries) entries.push(perplexityEntry(e));
+      const next = typeof r.next_cursor === 'string' ? r.next_cursor : '';
+      more = r.has_next_page === true && next !== '' && next !== cursor;
+      if (!more) break;
+      cursor = next;
+    }
+    const result = { slug, entries };
+    if (more) result.more = true;
+    return result;
+  }
+
   // geminiRead reads conversation id (URL hex) with hNvQHb.
   async function geminiRead(id) {
     return geminiRPC('hNvQHb', [`c_${geminiId(id)}`, 10, null, 1, [0], [4], null, 1]);
@@ -932,6 +1013,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       await geminiAuth(true);
       return sender.send('gemini', a);
     },
+    async 'perplexity.detail'(a) {
+      return perplexityThread(a.id);
+    },
+    // The session check runs first, so a signed-out browser never gets a
+    // tab and never asks anonymously.
+    async 'perplexity.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      await perplexitySession();
+      return sender.send('perplexity', a);
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -948,6 +1039,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'gemini.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('gemini', a.conversation_id);
+    },
+    async 'perplexity.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('perplexity', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).

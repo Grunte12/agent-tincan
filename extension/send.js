@@ -1,7 +1,8 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send, grok.send, gemini.send) and the matching close operations
-// (chatgpt.close, claudeai.close, grok.close, gemini.close), plus the
-// in-page image capture gemini.file asks for (capture).
+// claudeai.send, grok.send, gemini.send, perplexity.send) and the matching
+// close operations (chatgpt.close, claudeai.close, grok.close,
+// gemini.close, perplexity.close), plus the in-page image capture
+// gemini.file asks for (capture).
 //
 // ChatGPT, claude.ai and grok.com guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
@@ -9,7 +10,8 @@
 //
 //   1. open https://chatgpt.com/ (or /c/<id>), https://claude.ai/new (or
 //      /chat/<id>), https://grok.com/ (or /c/<id>) or
-//      https://gemini.google.com/app (or /app/<id>) with
+//      https://gemini.google.com/app (or /app/<id>) or
+//      https://www.perplexity.ai/ (or /search/<slug>) with
 //      chrome.tabs.create({active: false});
 //   2. inject the fixed page functions below with chrome.scripting
 //      (isolated world, func + args only) to fill the composer, verify the
@@ -98,6 +100,22 @@ export const SELECTORS = Object.freeze({
     login: ['a[href*="accounts.google.com/ServiceLogin"]', 'a[href*="accounts.google.com/v3/signin"]'],
     loginPaths: [],
   }),
+  // Perplexity's composer is the contenteditable #ask-input (seen live);
+  // its submit button appears once there is text, and Enter submits when
+  // no button is found. A signed-out page still offers anonymous asks, so
+  // the session probe in ops.js runs before any tab opens; login here is
+  // the second gate.
+  perplexity: Object.freeze({
+    composer: ['div#ask-input[contenteditable="true"]', '#ask-input[contenteditable="true"]', 'textarea#ask-input'],
+    send: ['button[aria-label="Submit"]', 'button[data-testid="submit-button"]', 'button[aria-label*="Submit" i]'],
+    stop: ['button[aria-label*="Stop" i]', 'button[data-testid="stop-generating-response-button"]'],
+    streaming: [],
+    assistant: ['[id^="markdown-content-"]'],
+    user: ['[data-testid="user-query"]', 'h1[class*="query"]'],
+    login: ['a[href^="/auth/signin"]', 'a[href^="/login"]', 'button[data-testid="login-button"]'],
+    loginPaths: ['/auth/signin', '/auth/signup', '/login'],
+    blocked: ['#challenge-form', 'iframe[src*="challenges.cloudflare.com"]', '#cf-challenge-running'],
+  }),
 });
 
 // SITES says where each site's pages are and how to read a conversation id
@@ -124,6 +142,13 @@ export const SITES = Object.freeze({
     newURL: 'https://gemini.google.com/app',
     convURL: (id) => `https://gemini.google.com/app/${encodeURIComponent(id)}`,
     idFrom: /^https:\/\/gemini\.google\.com\/(?:u\/\d{1,2}\/)?(?:app|gem\/[A-Za-z0-9_-]{1,128})\/([0-9a-f]{8,64})(?:[/?#]|$)/,
+  }),
+  // A Perplexity thread is /search/<slug>; new threads' slugs are
+  // uuid-shaped.
+  perplexity: Object.freeze({
+    newURL: 'https://www.perplexity.ai/',
+    convURL: (id) => `https://www.perplexity.ai/search/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/www\.perplexity\.ai\/search\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
   }),
 });
 

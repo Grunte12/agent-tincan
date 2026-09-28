@@ -1,6 +1,6 @@
 # Chrome Web Store upload
 
-Steps for publishing the Agent Tincan History extension on the Chrome Web Store. Store review for these permissions (native messaging, scripting, host access to chatgpt.com and claude.ai, and optional host access to grok.com, assets.grok.com, gemini.google.com and lh3.googleusercontent.com) usually takes several days, so launch uses the unpacked install ([docs/adapters/history.md](adapters/history.md#install)) in the meantime. Nothing in the docs changes to point at the store until the listing is live.
+Steps for publishing the Agent Tincan History extension on the Chrome Web Store. Store review for these permissions (native messaging, scripting, host access to chatgpt.com and claude.ai, and optional host access to grok.com, assets.grok.com, gemini.google.com, lh3.googleusercontent.com and www.perplexity.ai) usually takes several days, so launch uses the unpacked install ([docs/adapters/history.md](adapters/history.md#install)) in the meantime. Nothing in the docs changes to point at the store until the listing is live.
 
 ## 1. Build the store zip
 
@@ -24,18 +24,18 @@ The listing was submitted on September 24, 2026 as item `goldflchpojcjmifnljlfkg
 
 Name (from the manifest): `Agent Tincan History`
 
-Short description (the manifest `description`, 118 characters; the store limit is 132):
+Short description (the manifest `description`, 130 characters; the store limit is 132):
 
-> Lets your Agent Tincan agents read and send to ChatGPT, claude.ai, Grok and Gemini through your own logged-in browser.
+> Lets your Agent Tincan agents read and send to ChatGPT, claude.ai, Grok, Gemini and Perplexity through your own logged-in browser.
 
 Detailed description:
 
 > Agent Tincan lets your AI agents ask each other to do things over your own private Tailscale network. This extension is the browser half of two Agent Tincan agents that run on your own computer:
 >
 > - The history agent answers your agents' questions about your past conversations, such as "what did I ask ChatGPT about the lease last week?", including images from those chats.
-> - The ChatGPT, Claude and Gemini web agents let your agents send a message to ChatGPT, Claude or Gemini as you and get the answer back. Gemini is optional: the extension has no access to it until you grant it on the extension's options page.
+> - The ChatGPT, Claude, Grok, Gemini and Perplexity web agents let your agents send a message to those sites as you and get the answer back (Perplexity's with its source links). Grok, Gemini and Perplexity are optional: the extension has no access to them until you grant them on the extension's options page.
 >
-> These sites' terms (Google's for Gemini) do not allow automated access. The web agents act as you, on your own account, at a human pace, one request at a time; whether to use them is your decision, and Google's enforcement can reach your whole Google account, not only Gemini. Gemini answers can also draw on Google apps connected to your account (Gmail, Drive, Calendar), so limit who may ask the Gemini web agent with its allowlist.
+> These sites' terms (Google's for Gemini, Perplexity's for Perplexity) do not allow automated access. The web agents act as you, on your own account, at a human pace, one request at a time; whether to use them is your decision, and Google's enforcement can reach your whole Google account, not only Gemini. Gemini answers can also draw on Google apps connected to your account (Gmail, Drive, Calendar), so limit who may ask the Gemini web agent with its allowlist.
 >
 > The extension works through the session you are already logged in with. It runs only a fixed set of operations (list conversations, read a conversation, fetch its images, send a message in a background tab it opens itself, close that tab) and only when the Agent Tincan helper on your computer asks. It talks only to that helper, over Chrome native messaging. No data is sent to Agent Tincan or any other third party, there is no analytics or advertising, and no cookie or token leaves your browser.
 >
@@ -55,7 +55,7 @@ Account terms: OpenAI, Anthropic and xAI prohibit automated access to their apps
 
 Single purpose:
 
-> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's ChatGPT, claude.ai, Grok and Gemini conversations and send messages to ChatGPT, Claude, Grok and Gemini, using the user's existing logged-in browser session.
+> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's ChatGPT, claude.ai, Grok and Gemini conversations and send messages to ChatGPT, Claude, Grok, Gemini and Perplexity (reading back the answer), using the user's existing logged-in browser session.
 
 Permission justifications (the dashboard asks for each one):
 
@@ -63,7 +63,7 @@ Permission justifications (the dashboard asks for each one):
 | --- | --- |
 | `nativeMessaging` | The extension's only output channel. It receives operation requests from, and returns results to, the Agent Tincan helper installed on the user's computer (native host `com.agenttincan.history`). No data is sent anywhere else. |
 | `alarms` | A once-a-minute alarm reconnects to the local helper if it is not running yet or restarted, so the service worker picks the connection back up without user action. |
-| `scripting` | To send a message, the extension opens its own background tab on chatgpt.com, claude.ai, grok.com or gemini.google.com and injects fixed functions (bundled in the package) that type the message into the message box and click send. For Gemini, one more fixed function fetches an image Gemini generated from inside that same tab, before it closes. It never scripts a tab the user opened. |
+| `scripting` | To send a message, the extension opens its own background tab on chatgpt.com, claude.ai, grok.com, gemini.google.com or www.perplexity.ai and injects fixed functions (bundled in the package) that type the message into the message box and click send. For Gemini, one more fixed function fetches an image Gemini generated from inside that same tab, before it closes. It never scripts a tab the user opened. |
 | `https://chatgpt.com/*` | Lists and reads the user's ChatGPT conversations and their files through ChatGPT's own endpoints with the user's session, and opens the background tab used to send a message. |
 | `https://*.oaiusercontent.com/*` | ChatGPT stores generated and uploaded images behind signed download links on this domain. The extension downloads those images, without cookies or credentials, when the user's agent asks for a conversation's images. |
 | `https://claude.ai/*` | Lists and reads the user's claude.ai conversations and their files through claude.ai's own endpoints with the user's session, and opens the background tab used to send a message. |
@@ -71,7 +71,8 @@ Permission justifications (the dashboard asks for each one):
 | `https://assets.grok.com/*` (optional) | Granted together with grok.com: Grok serves the images it generates from this host. The extension downloads an image only when the user's agent asks for a conversation's images, looking its address up from the conversation itself. |
 | `https://gemini.google.com/*` (optional) | Granted by the user from the options page. Lists and reads the user's Gemini conversations through the Gemini app's own endpoint with the user's session, and opens the background tab used to send a message. |
 | `https://lh3.googleusercontent.com/*` (optional) | Granted together with Gemini. Gemini serves the images it generates from this domain; the extension fetches an image only when the user's agent asks for a Gemini answer's images, and only an image that conversation shows. |
-Site access is also checked at run time. Before any operation (other than closing its own tab) the extension asks Chrome whether it holds the site's own page origins (for ChatGPT, `chatgpt.com`; the `*.oaiusercontent.com` file host is needed only by the image downloads that reach it), and refuses with `permission_missing` when it does not (for example when the user withheld the site in Chrome's site access settings). The extension's options page (`options.html`, reached from `chrome://extensions` > Agent Tincan History > Details > Extension options) lists each site, shows whether it is granted, and has a Grant button that calls `chrome.permissions.request` from the click, so Chrome shows its own prompt. Sites added in later versions go under `optional_host_permissions` and are granted there, so an update that adds a site does not disable the extension or prompt users who do not use that site. The optional sites are Grok (grok.com and assets.grok.com) and Gemini (gemini.google.com and its image host lh3.googleusercontent.com): installing or updating asks nothing for them, and nothing touches either site until the user clicks its Grant button. Their page origins are `grok.com` and `gemini.google.com`; `assets.grok.com` and `lh3.googleusercontent.com` are needed only by the image downloads. The options page is a packaged extension page with no inline script and no remote code.
+| `https://www.perplexity.ai/*` (optional) | Granted by the user from the options page. Checks that the user is signed in, opens the background tab used to send a message, and reads back that one thread (the answer and its source links) through Perplexity's own endpoint with the user's session. It does not list or export the user's Perplexity history. |
+Site access is also checked at run time. Before any operation (other than closing its own tab) the extension asks Chrome whether it holds the site's own page origins (for ChatGPT, `chatgpt.com`; the `*.oaiusercontent.com` file host is needed only by the image downloads that reach it), and refuses with `permission_missing` when it does not (for example when the user withheld the site in Chrome's site access settings). The extension's options page (`options.html`, reached from `chrome://extensions` > Agent Tincan History > Details > Extension options) lists each site, shows whether it is granted, and has a Grant button that calls `chrome.permissions.request` from the click, so Chrome shows its own prompt. Sites added in later versions go under `optional_host_permissions` and are granted there, so an update that adds a site does not disable the extension or prompt users who do not use that site. The optional sites are Grok (grok.com and assets.grok.com), Gemini (gemini.google.com and its image host lh3.googleusercontent.com) and Perplexity (www.perplexity.ai): installing or updating asks nothing for them, and nothing touches any of them until the user clicks its Grant button. Their page origins are `grok.com`, `gemini.google.com` and `www.perplexity.ai`; `assets.grok.com` and `lh3.googleusercontent.com` are needed only by the image downloads. The options page is a packaged extension page with no inline script and no remote code.
 
 Remote code: No, I am not using remote code. (All code is in the package; messages are inserted as text, never executed.)
 
@@ -79,7 +80,7 @@ Data usage, what to tick:
 
 - Personally identifiable information: tick. Conversations can contain names and other personal details.
 - Personal communications: tick. The extension reads the user's chat conversations and sends messages.
-- Website content: tick. It reads conversation text and images from chatgpt.com, claude.ai and (once granted) grok.com and gemini.google.com.
+- Website content: tick. It reads conversation text and images from chatgpt.com, claude.ai and (once granted) grok.com, gemini.google.com and www.perplexity.ai.
 - Leave the rest unticked: health, financial and payment, authentication information (the ChatGPT session token is used only inside the extension for the current request and never collected or transmitted), location, web history, user activity.
 
 Certify all three statements:
@@ -96,7 +97,7 @@ Visibility: Public (or Unlisted if you want to share the link before announcing)
 
 ## 6. Test instructions for the reviewer (optional field)
 
-> The extension needs the Agent Tincan helper (`tincan history install`) and a logged-in chatgpt.com, claude.ai or (once granted) grok.com or gemini.google.com session to do anything. Without the helper it only retries a local native messaging connection once a minute. See https://agenttincan.com/privacy for exactly what it accesses.
+> The extension needs the Agent Tincan helper (`tincan history install`) and a logged-in chatgpt.com, claude.ai or (once granted) grok.com, gemini.google.com or www.perplexity.ai session to do anything. Without the helper it only retries a local native messaging connection once a minute. See https://agenttincan.com/privacy for exactly what it accesses.
 
 ## 7. Screenshots
 

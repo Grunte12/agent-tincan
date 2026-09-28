@@ -66,7 +66,7 @@ class El {
 let convSeq = 0;
 
 // CONV_PATH matches a conversation page's address on any of the sites.
-const CONV_PATH = /\/(?:c|chat|app)\/([A-Za-z0-9_-]+)/;
+const CONV_PATH = /\/(?:c|chat|app|search)\/([A-Za-z0-9_-]+)/;
 
 // FakeSite simulates one chatgpt.com or claude.ai page. opts.match picks
 // which selector in the table the page answers to for each role, so tests
@@ -191,7 +191,7 @@ class FakeSite {
     if (!CONV_PATH.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
       const id = this.site === 'gemini' ? (++convSeq).toString(16).padStart(16, '0') : `new-conv-${++convSeq}`;
       this.newID = id;
-      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}`, gemini: `https://gemini.google.com/app/${id}` }[this.site];
+      this.href = { chatgpt: `https://chatgpt.com/c/${id}`, claudeai: `https://claude.ai/chat/${id}`, grok: `https://grok.com/c/${id}`, gemini: `https://gemini.google.com/app/${id}`, perplexity: `https://www.perplexity.ai/search/${id}` }[this.site];
     }
     const last = this.messages.at(-1);
     if (last.role !== 'assistant') this.messages.push({ role: 'assistant', text: 'Part' });
@@ -958,4 +958,96 @@ test('pageFetchImage stops reading once an image passes maxBytes, and refuses a 
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+// ---- Perplexity.
+
+test('perplexity new chat: opens www.perplexity.ai in a background tab, types into #ask-input, returns the /search/<slug>', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { sendAfterText: true, neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('perplexity', { message: 'What is a tin can telephone?', new_chat: true });
+  assert.equal(fc.log.created[0].url, 'https://www.perplexity.ai/');
+  assert.equal(fc.log.created[0].active, false);
+  assert.deepEqual(page.submitted, ['What is a tin can telephone?']);
+  assert.equal(r.conversation_id, page.newID);
+  assert.equal(r.url, `https://www.perplexity.ai/search/${page.newID}`);
+  assertOnlyFixedScripts(fc.log);
+  assert.equal(SELECTORS.perplexity.composer[0], 'div#ask-input[contenteditable="true"]');
+  assert.deepEqual(await s.close('grok', r.conversation_id), { closed: 0 }, 'close is per site');
+  assert.deepEqual(await s.close('perplexity', r.conversation_id), { closed: 1 });
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('perplexity continues /search/<slug>; with no submit button it presses Enter', async () => {
+  const id = '0e1d0000-0000-4000-8000-0000000000a1';
+  const fc = fakeChrome((url) => new FakeSite('perplexity', url, { sendAfterText: true }));
+  const r = await sender(fc).send('perplexity', { message: 'and how long can the string be?', conversation_id: id });
+  assert.equal(fc.log.created[0].url, `https://www.perplexity.ai/search/${id}`);
+  assert.equal(r.conversation_id, id);
+
+  let page;
+  const fc2 = fakeChrome((url) => (page = new FakeSite('perplexity', url, { noSendButton: true })));
+  const r2 = await sender(fc2).send('perplexity', { message: 'enter please' });
+  assert.deepEqual(page.submitted, ['enter please']);
+  assert.equal(r2.conversation_id, page.newID);
+  assert.match(SITES.perplexity.idFrom.exec(`https://www.perplexity.ai/search/${id}?q=1`)[1], /^0e1d/);
+  assert.equal(SITES.perplexity.idFrom.exec(`https://perplexity.ai.example.com/search/${id}`), null);
+});
+
+test('perplexity page showing a Cloudflare challenge is blocked: nothing typed, tab closed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { challenge: true })));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('perplexity', { message: 'x' }), (e) => e.code === 'blocked');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+  assert.deepEqual(page.submitted, []);
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('perplexity signed-out page, sign-in path or a move to another host: not_logged_in, nothing typed, tab closed', async () => {
+  for (const opts of [{ loggedOut: true }, { redirectTo: 'https://www.perplexity.ai/auth/signin?redirect=%2F' }, { redirectTo: 'https://accounts.example.com/login' }]) {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, opts)));
+    await assert.rejects(sender(fc).send('perplexity', { message: 'x' }), (e) => e.code === 'not_logged_in', JSON.stringify(opts));
+    assert.deepEqual(page.submitted, []);
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+});
+
+test('runner: perplexity.send checks for a signed-in user first; signed out opens no tab even though the page has a composer', async () => {
+  const SESSION_URL = 'https://www.perplexity.ai/api/auth/session';
+  for (const [name, res, code] of [
+    ['signed out {}', () => jsonResponse({}), 'not_logged_in'],
+    ['no user id', () => jsonResponse({ user: { email: 'owner@example.com' } }), 'not_logged_in'],
+    ['401', () => jsonResponse({}, 401), 'not_logged_in'],
+  ]) {
+    // The page itself would take an anonymous ask.
+    const fc = fakeChrome((url) => new FakeSite('perplexity', url));
+    const calls = [];
+    const r = createRunner({ fetch: async (u) => (calls.push(String(u)), res()), sender: sender(fc) });
+    await assert.rejects(r.run('perplexity.send', { message: 'x' }, () => {}), (e) => e.code === code, name);
+    assert.deepEqual(calls, [SESSION_URL], name);
+    assert.equal(fc.log.created.length, 0, `${name}: no tab`);
+  }
+  // Signed in per the session, but the tab shows a signed-out page: the
+  // second gate refuses before anything is typed.
+  {
+    let page;
+    const fc = fakeChrome((url) => (page = new FakeSite('perplexity', url, { loggedOut: true })));
+    const r = createRunner({ fetch: async () => jsonResponse({ user: { id: 'dummy-user-id' } }), sender: sender(fc) });
+    await assert.rejects(r.run('perplexity.send', { message: 'x' }, () => {}), (e) => e.code === 'not_logged_in');
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0);
+    assert.deepEqual(page.submitted, []);
+    assert.deepEqual(fc.log.removed, [100]);
+  }
+  const fc = fakeChrome((url) => new FakeSite('perplexity', url, { neverFinish: true }));
+  const r = createRunner({ fetch: async () => jsonResponse({ user: { id: 'dummy-user-id' } }), sender: sender(fc) });
+  const frames = [];
+  await r.run('perplexity.send', { message: 'hi perplexity' }, (f) => frames.push(f));
+  assert.match(frames[0].result.conversation_id, /^new-conv-/);
+  const closed = [];
+  await r.run('perplexity.close', { conversation_id: frames[0].result.conversation_id }, (f) => closed.push(f));
+  assert.deepEqual(closed, [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(fc.log.removed, [100]);
 });

@@ -1,20 +1,20 @@
 # Agent Tincan History extension
 
 Manifest V3 extension that lets the `history` agent read ChatGPT, claude.ai,
-Grok and Gemini conversations, and the `chatgpt-web`, `claude-web`, `grok-web`
-and `gemini-web` agents send to them, through the user's own logged-in Chrome. Its service worker runs a fixed set of
+Grok and Gemini conversations, and the `chatgpt-web`, `claude-web`, `grok-web`,
+`gemini-web` and `perplexity-web` agents send to them (and to Perplexity), through the user's own logged-in Chrome. Its service worker runs a fixed set of
 operations (`ops.js`) for the native host `com.agenttincan.history`
 (`tincan history native-host`) and returns JSON, with images as base64 in
 chunks of at most 384 KiB. It accepts nothing else and never runs code from a
 message or a page. The ChatGPT access token is read from `/api/auth/session`
 inside the worker and never leaves it.
 
-The send operations (`chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, in `send.js`) open a
+The send operations (`chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `perplexity.send`, in `send.js`) open a
 background tab of their own, fill the message box through fixed page functions
 injected with `chrome.scripting` (message as an argument, isolated world),
 click send, and return once the conversation id is in the tab's address. They
 never watch the page for the answer: the Go side reads the conversation until
-the answer is finished, then calls `chatgpt.close`, `claudeai.close`, `grok.close` or `gemini.close`, which
+the answer is finished, then calls `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close` or `perplexity.close`, which
 close only the tab a send left open for that conversation (any such tab is
 closed after 10 minutes regardless). A send tab the site moves to another
 host is never typed into: Google's `/sorry/` page is `blocked`, any other host
@@ -68,7 +68,7 @@ upgrade asks for nothing new; the owner can still withhold them in Chrome's
 site access settings. Sites added later go under `optional_host_permissions`
 (Grok: `https://grok.com/*` and `https://assets.grok.com/*`, granted together;
 Gemini: `https://gemini.google.com/*` and `https://lh3.googleusercontent.com/*`,
-its image host, granted together) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
+its image host, granted together; Perplexity: `https://www.perplexity.ai/*`) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in
 `SITE_ACCESS`, shows whether all its origins are granted (a site with only
 its page origins granted shows as granted with images and files needing
@@ -114,6 +114,23 @@ shows the worker's requests are refused, the fetch can move into an
 extension-opened tab's isolated world: `geminiRPC` is the one place it
 happens.
 
+## Perplexity
+
+Perplexity fronts the `perplexity-web` agent only: it has no list or file
+operation and is not a history source.
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `perplexity.detail` | `id` (the thread slug) | Reads `GET /rest/thread/<slug>?with_parent_info=true&with_schematized_response=true&version=2.18&source=default&limit=10&offset=0&from_first=true`, then follows `next_cursor` (as `cursor`) while `has_next_page` is true, at most 20 pages. Returns `{slug, entries}` with only the fields in `PERPLEXITY_ENTRY_FIELDS` of each entry (never its `read_write_token`), and `more: true` when it stopped at the page cap. A 404 is `not_found`; an answer without an `entries` list is `endpoint_changed`. |
+| `perplexity.send` | `message`, `conversation_id?`, `new_chat?` | Asks `GET /api/auth/session` first and opens no tab unless it names a signed-in `user` with an `id` (signed out it answers `{}`; the user's fields are only checked). Then types into `#ask-input` on `https://www.perplexity.ai/` or `/search/<slug>` in a background tab, checking the page for a sign-in link or address before typing, and returns the slug from the tab's address. |
+| `perplexity.close` | `conversation_id` | Closes the tab a Perplexity send left open. |
+
+`perplexityJSON` is the one place Perplexity's JSON is fetched (from the
+worker, with the owner's cookies); if Perplexity ever refuses the worker's
+reads, a fixed read in an extension-opened tab's isolated world goes there.
+The entry shape, the send button and the page's other selectors are to be
+confirmed in a live round trip.
+
 ## Failure codes
 
 Besides `not_logged_in`, `not_found`, `rate_limited` and the rest, the fetch
@@ -121,7 +138,8 @@ check reports anti-bot pages as `blocked`: a Cloudflare challenge (the
 `cf-mitigated` header, or a "Just a moment..." page), a 403 JSON refusal that
 names anti-bot rules or a captcha, and a redirect to Google's `/sorry/`
 interstitial. A plain 401 stays `not_logged_in`. A session probe (ChatGPT's
-`/api/auth/session`, claude.ai's organizations) that was redirected to
+`/api/auth/session`, claude.ai's organizations, Perplexity's
+`/api/auth/session`) that was redirected to
 another host is a sign-in page, so it is `not_logged_in` and no send follows.
 
 On connect the worker sends the host a hello with its version, its granted
