@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,18 +44,34 @@ for another session or a later check. Start Claude Code with:
 				return err
 			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
+			watch := mcpserver.Watch(mcpserver.NewBuildWatch(ownBinary(), Version))
 			if !channel {
-				return mcpserver.New(r, Version, files).Run(cmd.Context(), mcpserver.StdioRecorded(rec))
+				return mcpserver.New(r, Version, files, watch).Run(cmd.Context(), mcpserver.StdioRecorded(rec))
 			}
 			t := mcpserver.NewChannelTransport(mcpserver.StdioRecorded(rec))
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			go pushWaiting(ctx, r, t)
-			return mcpserver.NewWithOptions(r, Version, mcpserver.ChannelOptions(), files).Run(ctx, t)
+			return mcpserver.NewWithOptions(r, Version, mcpserver.ChannelOptions(), files, watch).Run(ctx, t)
 		},
 	}
 	cmd.Flags().BoolVar(&channel, "channel", false, "announce waiting teammate requests and replies in a running Claude Code session (channels preview)")
 	return cmd
+}
+
+// ownBinary is the path of the running tincan binary with symlinks
+// resolved, or "" when it cannot be found. It is read at startup: on Linux
+// the path is gone from /proc/self/exe once an upgrade renames a new file
+// over it.
+func ownBinary() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return exe
 }
 
 // channelPusher is the part of the channel transport pushWaiting uses.
@@ -110,7 +128,8 @@ func pushWaiting(ctx context.Context, r *client.Relay, t channelPusher) {
 			continue
 		}
 		backoff = time.Second
-		if err := client.ReportUpgradeOn(client.UpgradeSurfaceChannel, w.UpgradeAvailable, func(line string) error {
+		// Channels are Claude Code's, so the reload step is its.
+		if err := client.ReportUpgradeReload(client.UpgradeSurfaceChannel, w.UpgradeAvailable, mcpserver.ReloadStep(mcpserver.HostClaudeCode), func(line string) error {
 			return t.Push(ctx, line, map[string]string{"kind": "upgrade", "upgrade_available": w.UpgradeAvailable})
 		}); err != nil {
 			log.Printf("tincan channel: push upgrade: %v", err)

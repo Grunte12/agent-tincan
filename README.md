@@ -414,6 +414,23 @@ tincan upgrade                                                  # agent: downloa
 
 The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
 
+A `tincan mcp` server keeps running the build it started with, because the app that launched it owns the process; tincan never restarts it mid-session. Each app reloads it its own way:
+
+| App | Reload step |
+|---|---|
+| Claude Code | quit Claude Code and start it again (or reconnect the tincan server from `/mcp`) |
+| Codex | end the Codex session and start a new one, since Codex starts `tincan mcp` with each session |
+| Cursor | turn the tincan server off and on in Cursor Settings > MCP, or restart Cursor |
+| Other apps | reload the tincan MCP server in the app's settings, or quit and reopen the app |
+
+`tincan upgrade` lists each running `tincan mcp` still on the old build (from the launch records) with its app's reload step, or the table above when none is recorded. On the agent's own machine, `check_inbox` and the channel notice name the reload step for the app they run in, in place of the generic restart line. A running `tincan mcp` also notices when its binary is replaced: at most once a minute, on a tool call, it compares the file's size and modification time with what it saw at startup, and only when they changed runs `<binary> version`. If that build differs from the one it runs, the next tool result, `check_inbox` included, carries one line per new version:
+
+```text
+Agent Tincan: these tools keep running tincan 0.6.0, but /usr/local/bin/tincan is now tincan 0.7.0 (upgraded after this server started). To use the new build, quit Claude Code and start it again (or reconnect the tincan server from /mcp).
+```
+
+`tincan doctor` reports the same thing under `mcp builds`: every recorded `tincan mcp` that is still running on an older build than the binary, with the reload step for its app.
+
 ### When an agent's tincan tools go missing
 
 Run `tincan doctor` on the agent's machine. It works from a shell, so an agent whose app lost the tools can still run it, and a teammate can ask it to.
@@ -423,7 +440,7 @@ tincan doctor          # report with a fix line for every problem
 tincan doctor --json   # the same, for an agent to read
 ```
 
-It checks the saved join and the relay, whether the binary is the relay's current release, a self-test of `tincan mcp` in both stdio framings (newline JSON and Content-Length), the MCP config entries that run tincan (wrong path, `mcp` in the command instead of args, names with spaces, duplicates, disabled entries), and whether the app has actually been starting `tincan mcp`. Every `tincan mcp` records its start next to the agent config (`mcp-launches/`, the last 20): which app started it, the framing, and whether the app initialized, listed the tools and called one. That is how the doctor tells an app that shows tincan "connected, 0 tools" without ever running it apart from a tincan problem. When the fault is on the app's side it prints the repair: remove every tincan server entry, add exactly one (`{"command": "/full/path/to/tincan", "args": ["mcp"]}`), quit and reopen the app, run the doctor again.
+It checks the saved join and the relay, whether the binary is the relay's current release, a self-test of `tincan mcp` in both stdio framings (newline JSON and Content-Length), the MCP config entries that run tincan (wrong path, `mcp` in the command instead of args, names with spaces, duplicates, disabled entries), whether the app has actually been starting `tincan mcp`, and whether a running `tincan mcp` is still on an older build than the binary (`mcp builds`). Every `tincan mcp` records its start next to the agent config (`mcp-launches/`, the last 20): which app started it, the framing, and whether the app initialized, listed the tools and called one. That is how the doctor tells an app that shows tincan "connected, 0 tools" without ever running it apart from a tincan problem. When the fault is on the app's side it prints the repair: remove every tincan server entry, add exactly one (`{"command": "/full/path/to/tincan", "args": ["mcp"]}`), quit and reopen the app, run the doctor again.
 
 ### When the relay's address changes
 

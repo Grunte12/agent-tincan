@@ -53,8 +53,10 @@ the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, a self-test of tincan mcp in both stdio framings,
-the MCP config entries that point at tincan, and whether the app has
-actually been starting tincan mcp (every tincan mcp records its launch).
+the MCP config entries that point at tincan, whether the app has
+actually been starting tincan mcp (every tincan mcp records its launch),
+and whether a running tincan mcp is still on an older build than this
+binary, as after tincan upgrade until the app reloads it.
 
 Exit status is 1 when a check fails.`,
 		Args: cobra.NoArgs,
@@ -163,11 +165,15 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	add(configCheck(rep.Configs, exe))
 
 	// 5. Whether an app has been starting tincan mcp at all.
-	rep.Launches = mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath()))
+	launches := mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath()))
+	rep.Launches = launches
 	if len(rep.Launches) > 5 {
 		rep.Launches = rep.Launches[:5]
 	}
 	add(launchCheck(rep.Launches, time.Now()))
+
+	// 6. tincan mcp servers left on an older build by an upgrade.
+	add(buildCheck(launches, mcpserver.ProcessAlive))
 
 	rep.OK = true
 	hostProblem := false
@@ -401,10 +407,57 @@ func launchCheck(ls []mcpserver.Launch, now time.Time) check {
 		}
 		return check{name, "warn", detail, "If the tools are missing now, the app has not started tincan since. Restart the app."}
 	}
-	if l.Version != "" && l.Version != Version {
-		return check{name, "warn", detail + fmt.Sprintf(" (running tincan %s, this binary is %s)", l.Version, Version), "Restart the app so it runs the current build."}
-	}
 	return check{name, "ok", detail, ""}
+}
+
+// buildCheck finds tincan mcp servers still running with an older build
+// than this binary, the state tincan upgrade leaves behind until each app
+// reloads its server: the tools keep the old behavior, and a host can show
+// 0 tools after a partial restart. alive says whether a recorded pid still
+// runs.
+func buildCheck(ls []mcpserver.Launch, alive func(int) bool) check {
+	const name = "mcp builds"
+	var stale []string
+	var steps []string
+	seen := map[string]bool{}
+	for _, l := range ls {
+		if !l.Ended.IsZero() || l.Version == "" || l.Version == Version || !alive(l.PID) {
+			continue
+		}
+		who := l.Client
+		if who == "" {
+			who = "an app"
+		}
+		stale = append(stale, fmt.Sprintf("%s (pid %d) runs tincan %s", who, l.PID, l.Version))
+		kind := mcpserver.HostKind(l.Client)
+		if !seen[kind] {
+			seen[kind] = true
+			steps = append(steps, hostLabel(kind)+": "+mcpserver.ReloadStep(kind))
+		}
+	}
+	if len(stale) == 0 {
+		return check{name, "ok", "no running tincan mcp is on an older build than this binary (" + Version + ")", ""}
+	}
+	servers := "servers are"
+	if len(stale) == 1 {
+		servers = "server is"
+	}
+	return check{name, "warn", fmt.Sprintf("%d running tincan mcp %s on an older build than this binary (%s): %s",
+		len(stale), servers, Version, strings.Join(stale, "; ")),
+		"Reload each so it starts the new build. " + strings.Join(steps, ". ") + "."}
+}
+
+// hostLabel names a host kind for people.
+func hostLabel(kind string) string {
+	switch kind {
+	case mcpserver.HostClaudeCode:
+		return "Claude Code"
+	case mcpserver.HostCodex:
+		return "Codex"
+	case mcpserver.HostCursor:
+		return "Cursor"
+	}
+	return "other apps"
 }
 
 // hostFix is the repair for an app that lists tincan but does not run it.
