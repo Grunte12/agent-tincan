@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1093,6 +1095,50 @@ func TestNotesRequestLifecycleOverThirtyDays(t *testing.T) {
 	h.srv.Sweep(context.Background())
 	if s := statusOf(t, h, grokAddr, notes.ID); s != envelope.StatusExpired {
 		t.Fatalf("past 30d = %s, want expired", s)
+	}
+}
+
+// lockedBuffer collects log output written from any goroutine.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A failed recipient lookup must not cut a notes request to 24h: the relay
+// logs the failure and keeps the longer notes window, on send and approve.
+func TestRequestTTLLookupErrorKeepsNotesWindow(t *testing.T) {
+	h, _ := ttlHarness(t, Config{})
+	logs, prev := &lockedBuffer{}, log.Writer()
+	log.SetOutput(logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	failing := errors.New("directory unavailable")
+	h.srv.lookupAgent = func(context.Context, string) (identity.Agent, bool, error) {
+		return identity.Agent{}, false, failing
+	}
+	sent := h.send(grokAddr, "muse", "save this")
+	if got := ttlOf(t, h, sent.ID); got != 30*24*time.Hour {
+		t.Errorf("send ttl on lookup error = %v, want 720h", got)
+	}
+	h.srv.SetPreparer(holdAll{})
+	held := h.send(grokAddr, "muse", "save that")
+	h.do(macAddr, "POST", "/v1/admin/requests/"+held.ID+"/approve", "", http.StatusOK, nil)
+	if got := ttlOf(t, h, held.ID); got != 30*24*time.Hour {
+		t.Errorf("approve ttl on lookup error = %v, want 720h", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "muse") || !strings.Contains(out, failing.Error()) {
+		t.Errorf("lookup failure not logged: %q", out)
 	}
 }
 

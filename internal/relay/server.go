@@ -101,18 +101,21 @@ type Replier interface {
 
 // Server is the relay.
 type Server struct {
-	cfg    Config
-	dir    *identity.Directory
-	store  *store.Store
-	hub    *hub
-	prep   Preparer
-	events Events
-	wake   WakeNamer
-	conn   Connector
-	dist   *dist
-	blobs  string   // attachment directory, "" when attachments are off
-	key    string   // relay key, proves this relay's identity to its agents (hello)
-	urls   []string // addresses advertised to agents in whoami
+	cfg Config
+	dir *identity.Directory
+	// lookupAgent is how requestTTL reads the recipient's kind; it is
+	// dir.Agent, replaced in tests to simulate a failed lookup.
+	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
+	store       *store.Store
+	hub         *hub
+	prep        Preparer
+	events      Events
+	wake        WakeNamer
+	conn        Connector
+	dist        *dist
+	blobs       string   // attachment directory, "" when attachments are off
+	key         string   // relay key, proves this relay's identity to its agents (hello)
+	urls        []string // addresses advertised to agents in whoami
 
 	// upgrader installs the dist release over the relay binary; nil when off.
 	upgrader SelfUpgrader
@@ -168,6 +171,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}, stopping: make(chan struct{})}
+	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
 	states, err := st.PollFeatures(context.Background())
@@ -1436,9 +1440,16 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 
 // requestTTL is how long a request to agent lives unanswered: notes agents
 // get NotesRequestTTL so an add survives the notes Mac being offline for
-// days; every other kind, and an unknown or failed lookup, gets RequestTTL.
+// days; every other kind, and an unknown agent, gets RequestTTL. A failed
+// lookup is logged and gets NotesRequestTTL: keeping a non-notes request
+// longer than needed is cheaper than expiring a note after a day.
 func (s *Server) requestTTL(ctx context.Context, agent string) time.Duration {
-	if a, ok, err := s.dir.Agent(ctx, agent); err == nil && ok && a.Kind == onboard.KindNotes {
+	a, ok, err := s.lookupAgent(ctx, agent)
+	if err != nil {
+		log.Printf("request ttl: look up %s: %v (using notes ttl %v)", agent, err, s.cfg.NotesRequestTTL)
+		return s.cfg.NotesRequestTTL
+	}
+	if ok && a.Kind == onboard.KindNotes {
 		return s.cfg.NotesRequestTTL
 	}
 	return s.cfg.RequestTTL
