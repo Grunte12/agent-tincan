@@ -55,8 +55,10 @@ exit "${FAKE_EXIT:-0}"
 `
 
 // fakeTincan records each call's argv on one line, and can hang
-// (FAKE_NOTIFY_SLEEP seconds) first.
+// (FAKE_NOTIFY_SLEEP seconds) first. It lifts any file-size limit the
+// driver set, so a test that fills the disk still sees the notice.
 const fakeTincan = `#!/bin/sh
+ulimit -S -f unlimited 2>/dev/null || true
 [ -z "${FAKE_NOTIFY_SLEEP:-}" ] || sleep "$FAKE_NOTIFY_SLEEP"
 printf '%s\n' "$*" >> "$NOTICES"
 `
@@ -639,6 +641,40 @@ func TestWakeLibUnwritableStateDir(t *testing.T) {
 	}
 	if h.exists(h.config + ".wake-notified") {
 		t.Fatal("successful run left the state-dir notice marker")
+	}
+}
+
+// A lock whose bound or pid cannot be written (the state directory's disk
+// is full, say) would let a later wake break it early, so the wake gives the
+// lock back and refuses to run. A file-size limit of zero stands in for the
+// full disk: the lock directory can be made, but nothing can be written.
+func TestWakeLibUnrecordableLockRefuses(t *testing.T) {
+	h := newLibHarness(t)
+	body := strings.Replace(driver, "tincan_wake_begin\n",
+		"trap '' XFSZ\nulimit -S -f 0\ntincan_wake_begin\nulimit -S -f unlimited\n", 1)
+	env := []string{"TINCAN_WAKE_OPERATOR=ops"}
+	r := h.run(body, env...)
+	if code := exitCode(r.err); code != 1 {
+		t.Fatalf("exit = %d (%v), want 1\nstderr:\n%s", code, r.err, r.stderr)
+	}
+	if strings.Contains(r.stderr, "in progress") || !strings.Contains(r.stderr, "cannot record the lock") {
+		t.Fatalf("lock-record failure not reported as such:\n%s", r.stderr)
+	}
+	if n := h.count(h.runs); n != 0 {
+		t.Fatalf("CLI ran %d times without a recorded lock", n)
+	}
+	if h.exists(h.lockDir()) {
+		t.Fatal("unrecorded lock left behind")
+	}
+	if n := h.count(h.notices); n != 1 {
+		t.Fatalf("operator notices = %d, want 1", n)
+	}
+	// Once writes work again, the next nudge runs and clears the notice.
+	if r := h.run(driver, env...); r.err != nil || h.count(h.runs) != 1 {
+		t.Fatalf("run after the disk frees up: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+	if h.exists(h.config + ".wake-notified") {
+		t.Fatal("successful run left the notice marker")
 	}
 }
 

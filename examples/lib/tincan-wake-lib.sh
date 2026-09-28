@@ -94,7 +94,8 @@ tincan_wake_log() {
 # tincan_wake_begin takes the lock and checks the backoff marker. When a run
 # is already in progress, or the wake is backing off, it exits 0 and the
 # requests stay queued for a later nudge. When the state directory cannot
-# be made, it tells the operator and exits 1.
+# be made, or the lock cannot be recorded in it, it tells the operator and
+# exits 1.
 tincan_wake_begin() {
   _tw_rc=0
   tincan_wake_lock || _tw_rc=$?
@@ -104,6 +105,13 @@ tincan_wake_begin() {
     # beside this teammate's config, and a successful run removes it.
     _tw_marker=${TINCAN_CONFIG:+$TINCAN_CONFIG.wake-notified}
     tincan_wake_notify "The $_tw_name wake cannot create or secure its state directory $_tw_state, so it is not running. Requests to it stay queued. Fix the directory's permissions or set TINCAN_WAKE_STATE_DIR on its machine."
+    exit 1
+  fi
+  if [ "$_tw_rc" -eq 3 ]; then
+    tincan_wake_log "cannot record the lock in $_tw_lock (is the disk holding $_tw_state full?); released it, not running"
+    # The state directory may be full, so the marker goes beside the config.
+    _tw_marker=${TINCAN_CONFIG:+$TINCAN_CONFIG.wake-notified}
+    tincan_wake_notify "The $_tw_name wake cannot write its lock in $_tw_state, so it is not running. Requests to it stay queued. Check that the disk holding it has space and that the directory is writable, or set TINCAN_WAKE_STATE_DIR on its machine."
     exit 1
   fi
   if [ "$_tw_rc" -ne 0 ]; then
@@ -124,7 +132,9 @@ tincan_wake_begin() {
 # run's, so a wake configured with shorter timeouts does not break a longer
 # run's lock early; only a lock without one (left by an older library) falls
 # back to this run's own (_tw_lock_max_minutes). Returns 1 when a live run
-# holds it, 2 when the state directory cannot be made.
+# holds it, 2 when the state directory cannot be made, and 3 when the bound
+# or the pid cannot be written: the lock is then released rather than held
+# unrecorded, since a later wake could break it early or find no pid.
 tincan_wake_lock() {
   { mkdir -p "$_tw_state" && chmod 700 "$_tw_state"; } 2>/dev/null || return 2
   trap '_tw_cleanup' EXIT
@@ -155,8 +165,10 @@ tincan_wake_lock() {
     mkdir "$_tw_lock" 2>/dev/null || return 1
   fi
   # The bound goes in before the pid, so a lock with a pid has its bound.
-  _tw_lock_max_minutes >"$_tw_lock/max"
-  echo $$ >"$_tw_lock/pid"
+  if ! { _tw_lock_max_minutes >"$_tw_lock/max" && echo $$ >"$_tw_lock/pid"; } 2>/dev/null; then
+    rm -rf "$_tw_lock"
+    return 3
+  fi
   _tw_locked=1
 }
 
