@@ -85,7 +85,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 				return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
 			}
 			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
-				return fmt.Errorf("--release-url must be an https URL (or empty to turn off downloads), got %q", f.releaseURL)
+				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
 			}
 			err := runRelay(cmd.Context(), f)
 			if rs, ok := errors.AsType[*errRelayRestart](err); ok {
@@ -105,7 +105,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
-	cmd.Flags().StringVar(&f.releaseURL, "release-url", defaultReleaseURL, "where tincan relay-upgrade --from-github downloads releases (<url>/<tag>/<file>); empty turns downloads off")
+	cmd.Flags().StringVar(&f.releaseURL, "release-url", "", "let tincan relay-upgrade --from-github download releases from <url>/<tag>/<file> (for this project: "+GitHubReleaseURL+"); off when empty")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
 	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")

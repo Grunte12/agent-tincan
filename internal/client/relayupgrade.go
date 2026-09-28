@@ -1,6 +1,9 @@
 package client
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // RelayUpgradeRequest asks a relay to install a release over its own binary.
 type RelayUpgradeRequest struct {
@@ -21,11 +24,15 @@ type RelayUpgradeResult struct {
 // RelayUpgradePath is the admin route for a relay self-upgrade.
 const RelayUpgradePath = "/v1/admin/relay/upgrade"
 
-// RelayUpgrade asks the relay (admin only) to upgrade itself. The relay may
-// download a release first, so the call gets the dist download timeout. It
-// is never retried at a relocated address: the relay may be restarting.
+// RelayUpgradeTimeout bounds a relay self-upgrade call. It outlasts the
+// relay's own budget for the whole upgrade (a release download, then the
+// install), so the admin sees the relay's answer rather than a timeout.
+const RelayUpgradeTimeout = DistDownloadTimeout + 5*time.Minute
+
+// RelayUpgrade asks the relay (admin only) to upgrade itself. It is never
+// retried at a relocated address: the relay may be restarting.
 func (r *Relay) RelayUpgrade(ctx context.Context, in RelayUpgradeRequest) (RelayUpgradeResult, error) {
 	var out RelayUpgradeResult
-	err := r.callOnce(ctx, r.withTimeout(DistDownloadTimeout), "POST", RelayUpgradePath, in, &out)
+	err := r.callOnce(ctx, r.withTimeout(RelayUpgradeTimeout), "POST", RelayUpgradePath, in, &out)
 	return out, err
 }

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,10 +28,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 )
 
-// defaultReleaseURL is where tincan relay-upgrade --from-github downloads a
-// release: <url>/<tag>/<file>. The repo is fixed here; only the relay
-// operator can change it, with tincan relay --release-url.
-const defaultReleaseURL = "https://github.com/mvanhorn/agent-tincan/releases/download"
+// GitHubReleaseURL is the value to pass to tincan relay --release-url for
+// this project's GitHub releases. The relay makes no outbound download
+// unless its operator sets --release-url; callers can never choose it.
+const GitHubReleaseURL = "https://github.com/mvanhorn/agent-tincan/releases/download"
 
 // exitRestart is the relay's exit status after an upgrade with
 // --upgrade-exit: EX_TEMPFAIL, nonzero so systemd's Restart=on-failure
@@ -66,8 +67,10 @@ with --upgrade-exit, exits with status 75 for its supervisor (systemd or a
 keep-alive loop) to start the new build.
 
 With --from-github vX.Y.Z the relay first downloads that release's binaries
-and checksums.txt from GitHub into its dist directory, checking each binary
-against the release's checksums.txt, so no one needs a shell on the relay host.
+and checksums.txt into its dist directory, checking each binary against the
+release's checksums.txt, so no one needs a shell on the relay host. The relay
+must have been started with --release-url (for this project,
+https://github.com/mvanhorn/agent-tincan/releases/download); it never downloads otherwise.
 
 A release that is not newer than the relay's build is refused unless --force.
 The relay user must be able to replace its own binary.`,
@@ -104,6 +107,9 @@ func relayUpgradeRun(ctx context.Context, r *client.Relay, in client.RelayUpgrad
 		}
 		if client.IsStatus(err, http.StatusConflict) && strings.Contains(err.Error(), "not newer") {
 			return fmt.Errorf("%w. Pass --force to reinstall it anyway", err)
+		}
+		if _, ok := errors.AsType[*client.APIError](err); !ok {
+			return fmt.Errorf("%w. The relay may still have finished the upgrade: check its build with tincan agents (the first line) before trying again", err)
 		}
 		return err
 	}
@@ -237,7 +243,7 @@ func (u *relayUpgrader) Upgrade(ctx context.Context, dist string, in client.Rela
 	}
 	if in.FromGitHub != "" {
 		if u.releaseURL == "" {
-			return res, fmt.Errorf("%w: this relay does not download releases (its operator turned it off with --release-url \"\")", relay.ErrUpgradeUnavailable)
+			return res, fmt.Errorf("%w: this relay does not download releases; its operator must start it with --release-url %s (or upgrade from what is already in --dist)", relay.ErrUpgradeUnavailable, GitHubReleaseURL)
 		}
 		if !releaseTag.MatchString(in.FromGitHub) {
 			return res, fmt.Errorf("%w: %q is not a release tag", relay.ErrUpgradeUnavailable, in.FromGitHub)
@@ -462,14 +468,61 @@ func (u *relayUpgrader) fetchRelease(ctx context.Context, dist, tag string) erro
 	if err := os.WriteFile(filepath.Join(tmpDir, "VERSION"), []byte(strings.TrimPrefix(tag, "v")+"\n"), 0o644); err != nil {
 		return err
 	}
-	for _, name := range append(names, "checksums.txt", "VERSION") {
-		if err := os.Rename(filepath.Join(tmpDir, name), filepath.Join(dist, name)); err != nil {
-			return fmt.Errorf("move %s into the dist directory: %w", name, err)
-		}
+	if err := publishDist(dist, tmpDir, append(names, "checksums.txt", "VERSION")); err != nil {
+		return err
 	}
 	log.Printf("downloaded tincan release %s into %s", tag, dist)
 	return nil
 }
+
+// publishDist moves the staged files in tmpDir into dist in order (VERSION
+// last). Each file the dist already has is set aside first, and if any move
+// fails every file is put back as it was, so a failed publish leaves the
+// dist unchanged. Each rename is atomic, so a reader sees a whole old or new
+// file, never a partial one.
+func publishDist(dist, tmpDir string, names []string) error {
+	old := filepath.Join(tmpDir, ".old")
+	if err := os.Mkdir(old, 0o700); err != nil {
+		return err
+	}
+	type moved struct {
+		name    string
+		hadPrev bool
+	}
+	var done []moved
+	rollback := func() {
+		for _, m := range slices.Backward(done) {
+			if m.hadPrev {
+				_ = os.Rename(filepath.Join(old, m.name), filepath.Join(dist, m.name))
+			} else {
+				_ = os.Remove(filepath.Join(dist, m.name))
+			}
+		}
+	}
+	for _, name := range names {
+		dst := filepath.Join(dist, name)
+		hadPrev := false
+		if err := os.Rename(dst, filepath.Join(old, name)); err == nil {
+			hadPrev = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			rollback()
+			return fmt.Errorf("%w: set aside %s in the dist directory: %v; the dist was not changed", relay.ErrUpgradeNotWritable, name, err)
+		}
+		if err := publishRename(filepath.Join(tmpDir, name), dst); err != nil {
+			if hadPrev {
+				_ = os.Rename(filepath.Join(old, name), dst)
+			}
+			rollback()
+			return fmt.Errorf("%w: move %s into the dist directory: %v; the dist was not changed", relay.ErrUpgradeNotWritable, name, err)
+		}
+		done = append(done, moved{name, hadPrev})
+	}
+	return nil
+}
+
+// publishRename moves one staged file into the dist. A var so tests can make
+// a move fail.
+var publishRename = os.Rename
 
 // download streams url into w, at most limit bytes.
 func (u *relayUpgrader) download(ctx context.Context, rawURL string, w io.Writer, limit int64) error {

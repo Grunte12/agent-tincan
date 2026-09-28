@@ -209,7 +209,7 @@ A poll with no messages holds until its normal deadline, then returns HTTP 200 w
 
 `POST /v1/admin/relay/upgrade` installs a release over the relay's own binary. Only admin devices and the local admin socket may call it; agents and other callers get 403. The optional body is `{"force": false, "from_github": "v0.8.0"}`.
 
-With `from_github`, the relay first downloads that tag's `checksums.txt` and every `tincan_<os>_<arch>` it lists from its release URL (`tincan relay --release-url`, GitHub releases for this project by default; the request cannot change it), checks each binary against it, and moves them into `--dist`, `VERSION` last. Then it reads `--dist/VERSION`, checks `tincan_<its os>_<its arch>` against `--dist/checksums.txt`, keeps the old binary as `<binary>.<old version>`, and renames the new one into place.
+With `from_github`, the relay first downloads that tag's `checksums.txt` and every `tincan_<os>_<arch>` it lists from its release URL (`tincan relay --release-url`; the request cannot change it, and without the flag the relay refuses `from_github` with 422), checks each binary against it, and moves them into `--dist`, `VERSION` last, restoring the old files if a move fails. Then it reads `--dist/VERSION`, checks `tincan_<its os>_<its arch>` against `--dist/checksums.txt`, keeps the old binary as `<binary>.<old version>`, and renames the new one into place.
 
 Success returns `{"from": "0.7.0", "to": "0.8.0", "restart": "re-exec"}` (or `"exit"` for a relay started with `--upgrade-exit`), writes a `relay_upgraded` audit event with the two versions and the source (`dist` or `github`), and only then restarts the relay: it drains, closes its store, and re-executes itself or exits with status 75. Errors change nothing:
 

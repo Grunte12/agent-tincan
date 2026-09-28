@@ -445,3 +445,43 @@ func TestParseChecksums(t *testing.T) {
 		t.Fatalf("parsed = %v", got)
 	}
 }
+
+// A publish that fails part way puts every dist file back as it was.
+func TestPublishDistRollsBack(t *testing.T) {
+	arm := "tincan_linux_arm64"
+	if platformFile == arm {
+		arm = "tincan_darwin_arm64"
+	}
+	dist := t.TempDir()
+	for name, body := range map[string]string{platformFile: "old build", "checksums.txt": "old sums", "VERSION": "0.7.0\n"} {
+		if err := os.WriteFile(filepath.Join(dist, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage := t.TempDir()
+	for name, body := range map[string]string{platformFile: "new build", arm: "new other build", "checksums.txt": "new sums", "VERSION": "0.8.0\n"} {
+		if err := os.WriteFile(filepath.Join(stage, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := publishRename
+	t.Cleanup(func() { publishRename = orig })
+	publishRename = func(from, to string) error {
+		if filepath.Base(to) == "VERSION" {
+			return errors.New("disk full")
+		}
+		return orig(from, to)
+	}
+	err := publishDist(dist, stage, []string{platformFile, arm, "checksums.txt", "VERSION"})
+	if err == nil || !strings.Contains(err.Error(), "not changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if entries, _ := os.ReadDir(dist); len(entries) != 3 {
+		t.Fatalf("dist holds %v, want only the old files", entries)
+	}
+	for name, want := range map[string]string{platformFile: "old build", "checksums.txt": "old sums", "VERSION": "0.7.0\n"} {
+		if raw, _ := os.ReadFile(filepath.Join(dist, name)); string(raw) != want {
+			t.Fatalf("%s = %q, want %q", name, raw, want)
+		}
+	}
+}
