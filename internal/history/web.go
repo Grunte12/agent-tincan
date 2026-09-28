@@ -743,6 +743,10 @@ type webNode struct {
 	text   string
 	at     time.Time
 	images int
+	// sources is how many source links the message carries (Copilot),
+	// so a text-stability wait also waits for links that come after the
+	// text.
+	sources int
 	// finished: the site marks this message finished.
 	finished bool
 	// hidden: the site does not show this message (ChatGPT's
@@ -831,7 +835,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 	}
 	var leaf, answer *webNode
-	images, ended, limited := 0, false, false
+	images, sources, ended, limited := 0, 0, false, false
 	for i := b + 1; i < end; i++ {
 		n := &nodes[i]
 		ended = ended || n.endTurn
@@ -841,6 +845,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		}
 		leaf = n
 		images += n.images
+		sources += n.sources
 		if n.reply && strings.TrimSpace(n.text) != "" {
 			answer = n
 		}
@@ -856,7 +861,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 	}
 	p.found = text != "" || images > 0
 	p.limited = limited && !p.found
-	p.sig = fmt.Sprintf("%s\n%d\n%s", id, images, text)
+	p.sig = fmt.Sprintf("%s\n%d\n%d\n%s", id, images, sources, text)
 	p.finished = ended || (p.found && leaf.reply && leaf.finished)
 	return p
 }

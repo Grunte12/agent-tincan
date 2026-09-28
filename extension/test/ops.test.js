@@ -1155,11 +1155,15 @@ test('perplexity.detail stops after PERPLEXITY_MAX_PAGES pages and says more exi
   assert.equal(calls.length, PERPLEXITY_MAX_PAGES);
   assert.equal(frames[0].result.entries.length, PERPLEXITY_MAX_PAGES);
   assert.equal(frames[0].result.more, true);
-  // A cursor that does not move ends the read.
+  // A cursor that does not move, or none, ends the read, still marked
+  // more: the newest entries were not read.
   const stuck = [];
   const s = async (url) => (stuck.push(String(url)), jsonResponse({ entries: [], has_next_page: true, next_cursor: 'same' }));
-  await run(createRunner({ fetch: s }), 'perplexity.detail', { id: PX_SLUG });
+  const st = await run(createRunner({ fetch: s }), 'perplexity.detail', { id: PX_SLUG });
   assert.equal(stuck.length, 2);
+  assert.equal(st[0].result.more, true);
+  const none = async () => jsonResponse({ entries: [], has_next_page: true, next_cursor: null });
+  assert.equal((await run(createRunner({ fetch: none }), 'perplexity.detail', { id: PX_SLUG }))[0].result.more, true);
 });
 
 test('perplexity.send needs a signed-in user first; signed out, a sign-in redirect or a challenge opens no tab', async () => {

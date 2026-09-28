@@ -439,3 +439,24 @@ func TestCopilotWebSendFailureReplies(t *testing.T) {
 		}
 	}
 }
+
+// Copilot's reply wait holds out for source links that land after the
+// text: the same text with more sources is not the same read.
+func TestCopilotReplySignatureCountsSources(t *testing.T) {
+	at := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	sig := func(srcs ...copilotSource) string {
+		raw := copilotDetailJSON(copilotConv1, "t", at, copilotMsg("u1", "user", "q", at), copilotMsg("b1", "bot", "answer", at.Add(time.Second), srcs...))
+		nodes, err := copilotNodes(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := progressOf(nodes, replyAnchor{bound: "u1"})
+		if !p.found {
+			t.Fatalf("no reply found: %+v", p)
+		}
+		return p.sig
+	}
+	if sig() == sig(copilotSource{Title: "S", URL: "https://s.example/"}) {
+		t.Fatal("a source landing after the text left the reply signature unchanged")
+	}
+}

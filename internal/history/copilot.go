@@ -230,7 +230,9 @@ func parseCopilotDetail(id string, raw json.RawMessage) (thread, error) {
 
 // copilotNodes reads the conversation for the reply wait. The page JSON
 // marks no answer finished, so a Copilot reply is finished by the site's
-// text-stability rule (DefaultCopilotStablePolls, DefaultCopilotStableFor).
+// text-stability rule (DefaultCopilotStablePolls, DefaultCopilotStableFor),
+// with the source count in what must hold still, since the links can land
+// after the text.
 func copilotNodes(raw json.RawMessage) ([]webNode, error) {
 	d, err := decodeCopilotDetail(raw)
 	if err != nil {
@@ -244,6 +246,7 @@ func copilotNodes(raw json.RawMessage) ([]webNode, error) {
 			n.user = true
 		case "bot":
 			n.reply = true
+			n.sources = len(m.Sources)
 		default:
 			continue
 		}

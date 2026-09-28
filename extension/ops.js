@@ -903,8 +903,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (!isPlainObject(r) || !Array.isArray(r.entries)) throw new OpError('endpoint_changed', 'unexpected thread answer');
       for (const e of r.entries) entries.push(perplexityEntry(e));
       const next = typeof r.next_cursor === 'string' ? r.next_cursor : '';
-      more = r.has_next_page === true && next !== '' && next !== cursor;
-      if (!more) break;
+      // A next page with no usable cursor is still more: the newest
+      // entries were not read, so the thread is not reported whole.
+      more = r.has_next_page === true;
+      if (!more || next === '' || next === cursor) break;
       cursor = next;
     }
     const result = { slug, entries };

@@ -220,7 +220,12 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 				th.conv.Title = cands[i].Title
 			}
 			th.conv.Automated = owned[cands[i].ID]
-			if l.undatedList && !th.conv.UpdatedAt.IsZero() {
+			if l.undatedList {
+				// With no time from the list or the read, its age cannot
+				// be checked against the window, so it is not shown.
+				if th.conv.UpdatedAt.IsZero() {
+					return thread{}, false, nil
+				}
 				prev = th.conv.UpdatedAt
 				// Past the window's age: not shown, and the next
 				// candidate's bound (this time) stops the scan.
