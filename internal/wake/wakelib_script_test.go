@@ -756,3 +756,55 @@ func TestWakeLibHungNoticeTimesOut(t *testing.T) {
 		t.Fatalf("hung notice: lock left %v\nstderr:\n%s", h.exists(h.lockDir()), r.stderr)
 	}
 }
+
+// The holder records its own bound in the lock, so a wake configured with
+// shorter timeouts does not break a live run's lock early.
+func TestWakeLibLiveLockHonorsHolderBound(t *testing.T) {
+	h := newLibHarness(t)
+	writeLock(t, h.lockDir(), os.Getpid())
+	if err := os.WriteFile(filepath.Join(h.lockDir(), "max"), []byte("600\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Far past this invocation's own bound (a few minutes), well inside the
+	// holder's ten hours.
+	old := time.Now().Add(-70 * time.Minute)
+	if err := os.Chtimes(h.lockDir(), old, old); err != nil {
+		t.Fatal(err)
+	}
+	short := []string{"TINCAN_WAKE_TIMEOUT=60", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=1"}
+	r := h.run(driver, short...)
+	if r.err != nil || h.count(h.runs) != 0 {
+		t.Fatalf("live lock inside the holder's bound: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+	if strings.Contains(r.stderr, "stale lock") {
+		t.Fatalf("a live run's lock was broken by a shorter-configured wake:\n%s", r.stderr)
+	}
+
+	// Past the holder's own bound, the pid is taken to be reused.
+	older := time.Now().Add(-11 * time.Hour)
+	if err := os.Chtimes(h.lockDir(), older, older); err != nil {
+		t.Fatal(err)
+	}
+	r = h.run(driver, short...)
+	if r.err != nil || h.count(h.runs) != 1 || !strings.Contains(r.stderr, "stale lock") {
+		t.Fatalf("lock past the holder's bound: %v, runs %d\nstderr:\n%s", r.err, h.count(h.runs), r.stderr)
+	}
+}
+
+// A run records its bound in the lock it holds.
+func TestWakeLibRecordsLockBound(t *testing.T) {
+	h := newLibHarness(t)
+	r := h.run(`. "$TINCAN_WAKE_LIB"
+tincan_wake_init fake
+tincan_wake_begin
+cat "$TINCAN_WAKE_STATE_DIR/lock/max" >"$STATE_OUT/max.out"
+`, "TINCAN_WAKE_TIMEOUT=600", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=30")
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	raw, err := os.ReadFile(filepath.Join(h.dir, "max.out"))
+	// (600 + 3*30 + 4*15) seconds is 12.5 minutes, rounded up, plus five.
+	if err != nil || strings.TrimSpace(string(raw)) != "18" {
+		t.Fatalf("recorded bound = %q, %v; want 18", raw, err)
+	}
+}
