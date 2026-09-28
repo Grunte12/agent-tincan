@@ -99,8 +99,11 @@
           <li><code>https://chatgpt.com/*</code>: to list and read your ChatGPT conversations and their files, and to send messages to ChatGPT, with your existing session.</li>
           <li><code>https://*.oaiusercontent.com/*</code>: to download images that ChatGPT stores behind signed links on this domain. These downloads carry no cookies or credentials.</li>
           <li><code>https://claude.ai/*</code>: to list and read your claude.ai conversations and their files, and to send messages to Claude, with your existing session.</li>
-to        </ul>
-        <p>The extension checks that Chrome has granted it a site before it reads from or opens a tab on that site, and refuses otherwise. Its options page (in <code>chrome://extensions</code>, Agent Tincan History, Details, Extension options) shows which sites are granted and lets you grant one; Chrome asks you to confirm. Grok, and any site added later, is optional: the extension has no access to it until you grant it there.</p>
+          <li><code>https://grok.com/*</code> and <code>https://assets.grok.com/*</code> (optional, only after you grant Grok on the options page): to list and read your Grok conversations and the images Grok generated, and to send messages to Grok, with your existing session.</li>
+          <li><code>https://gemini.google.com/*</code> (optional, only if you grant it): to list and read your Gemini conversations and to send messages to Gemini, with your existing session.</li>
+          <li><code>https://lh3.googleusercontent.com/*</code> (optional, granted together with Gemini): to fetch the images Gemini generated in a conversation your agent asked about.</li>
+        </ul>
+        <p>The extension checks that Chrome has granted it a site before it reads from or opens a tab on that site, and refuses otherwise. Its options page (in <code>chrome://extensions</code>, Agent Tincan History, Details, Extension options) shows which sites are granted and lets you grant one; Chrome asks you to confirm. Grok, Gemini and any site added later are optional: the extension has no access to one until you grant it there.</p>
 
         <h2>Your control</h2>
         <ul>

@@ -15,7 +15,7 @@ It handles one request at a time. The extension also runs one send per site at a
 
 If the site answers HTTP 429, the agent waits the site's `Retry-After` (the extension reports it), or backs off from 30 seconds, doubling up to 5 minutes. It never retries at the normal cadence. If that wait would outlast the request's 8 minutes, the request fails with "ChatGPT is rate-limiting this account right now. The message was sent to ChatGPT (conversation <id>); ask for the reply later instead of sending it again." (or claude.ai, Grok or Gemini): the message already went through, so sending it again would only duplicate it. While the cooldown runs, the next request fails at once, before anything is sent, with "ChatGPT is rate-limiting this account right now; try again later" instead of asking the site again. The native host keeps the same cooldown for every reader and agent that goes through it, so history reads also stop hitting the site; a history read that meets a 429 fails at once with that message, without retrying. An HTTP 5xx while waiting also backs off (doubling, up to 2 minutes).
 
-Each site has its own cooldown: a rate limit on one never holds back another (a rate limit on Grok never holds back ChatGPT or claude.ai, and the other way round). Gemini also cools down for 5 minutes after Google shows its anti-bot page (`/sorry/`), so the agent does not keep tripping it on your account; while that runs, requests fail at once with the anti-bot reply instead of asking Google again. ChatGPT and claude.ai start no cooldown on an anti-bot answer.
+Each site has its own cooldown: a rate limit on one never holds back another. Gemini also cools down for 5 minutes after Google shows its anti-bot page (`/sorry/`), so the agent does not keep tripping it on your account; while that runs, requests fail at once with the anti-bot reply instead of asking Google again. ChatGPT and claude.ai start no cooldown on an anti-bot answer.
 
 Grok can also end an answer on the plan's usage limit instead of answering with a 429: the finished response carries a stream error naming a rate or usage limit. The agent treats that like a 429 it cannot wait out: the request fails with "Grok is rate-limiting this account right now. The message was sent to Grok (conversation <id>); ask for the reply later instead of sending it again.", and Grok is left alone for 15 minutes, during which requests to grok-web fail at once without sending.
 
@@ -29,7 +29,12 @@ The extension opens a new background tab (`chrome.tabs.create` with `active: fal
 
 Why a tab and not an API call: all four sites protect their send endpoints with anti-bot tokens that only the real page can produce (grok.com's send carries a per-request `x-statsig-id`). Driving the page is what survives that.
 
-theirs
+Reads are plain JSON requests from the extension's service worker with your cookies. For grok.com they are `GET /rest/app-chat/conversations` (the list), `GET /rest/app-chat/conversations/<id>/response-node?includeThreads=true` (the message tree and what is still being written) and `POST .../load-responses` (the message bodies); none of them needs a page-set header. If grok.com ever refuses reads from the extension's origin, the one function that fetches them (`grokJSON` in `extension/ops.js`) is where a fixed read in an extension-opened grok.com tab's isolated world would go; nothing ever runs in the page's own JavaScript.
+
+### Grok: grant it first
+
+grok.com is an optional site: the extension has no access to it until you grant it. Open `chrome://extensions` > Agent Tincan History > Details > Extension options and click Grant for Grok; Chrome asks for grok.com and its image host, assets.grok.com, together. Chrome takes the grant only from that click, so it is a step for you, not for an agent. Until then every grok-web request is answered with that step, and while the extension is connected `tincan web serve --site grok` waits for the grant, checking again every minute (see the grant reply below). grok.com also lets a logged-out browser chat anonymously, so before opening a tab the extension reads your conversation list, and the send tab then checks the page for grok.com's sign-in link or `/sign-in` address before typing; a logged-out browser fails at one of the two and never sends.
+
 ## Allowlist
 
 By default there is no allowlist file and every agent joined to your relay may ask, so any agent on your mesh can act as you in ChatGPT, Claude, Grok or Gemini (and, through Gemini, read what Gemini can read; see [Gemini](#gemini)). The startup log says `allowlist: all joined agents (no file at ~/.config/tincan/chatgpt-web-allow.txt)`.
@@ -146,7 +151,8 @@ The answer is the last message after that user message and before the next user 
 
 - ChatGPT: an assistant message to everyone, with status `finished_successfully`, `finish_details`, or `end_turn: true` (and `end_turn` not `false`).
 - claude.ai: an assistant message with a `stop_reason`, or else whose text is the same on 4 reads in a row spanning at least 10 seconds, so a pause mid-answer is not taken for the end.
-to
+- Grok: an assistant response with `partial: false` while the conversation's `inflightResponses` is empty. grok.com marks this explicitly, so there is no text-stability wait. The current branch is walked back through `parentResponseId` from the newest response, so a regenerated answer replaces the draft it regenerated.
+- Gemini: its read has no finished marker, so the chosen answer counts as finished once its text (and image count) is the same on 4 reads in a row spanning at least 45 seconds. Gemini can hold its text still for a long while as it thinks or searches, so the window is longer than claude.ai's; an answer still changing when the 8 minutes run out ends with the "did not finish answering in time" reply.
 If a later user message follows this request's message with nothing between them, no answer will come, and the request fails saying another message was sent in the conversation first. If this request's answer is still being written when a later message appears, the agent keeps waiting for it.
 
 ## Gemini
