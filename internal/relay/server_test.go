@@ -997,3 +997,125 @@ func TestStopEndsHeldPollsAndWaits(t *testing.T) {
 		t.Fatalf("poll after Stop got %+v", got)
 	}
 }
+
+// --- retention by recipient kind (KTD2) ---
+
+// ttlHarness is a harness on a fake clock with muse set to the notes kind,
+// instinct to history, and grokbot left without a kind.
+func ttlHarness(t *testing.T, cfg Config) (*harness, *fakeClock) {
+	t.Helper()
+	clock := &fakeClock{t: time.Now()}
+	cfg.Now = clock.Now
+	h := newHarness(t, cfg)
+	h.st.SetClock(clock.Now)
+	h.do(macAddr, "PUT", "/v1/agents/muse/kind", `{"kind":"notes"}`, http.StatusOK, nil)
+	h.do(macAddr, "PUT", "/v1/agents/instinct/kind", `{"kind":"history"}`, http.StatusOK, nil)
+	return h, clock
+}
+
+// ttlOf reads how long a request was given to live when it was last
+// (re)queued: expires_at minus updated_at.
+func ttlOf(t *testing.T, h *harness, id string) time.Duration {
+	t.Helper()
+	var exp, upd int64
+	if err := h.st.DB().QueryRow(`SELECT expires_at, updated_at FROM requests WHERE id = ?`, id).Scan(&exp, &upd); err != nil {
+		t.Fatal(err)
+	}
+	return time.Duration(exp-upd) * time.Millisecond
+}
+
+func statusOf(t *testing.T, h *harness, addr, id string) envelope.Status {
+	t.Helper()
+	var res envelope.Result
+	h.do(addr, "GET", "/v1/requests/"+id, "", http.StatusOK, &res)
+	return res.Status
+}
+
+func TestRequestTTLChosenByRecipientKind(t *testing.T) {
+	h, _ := ttlHarness(t, Config{})
+	notes := h.send(grokAddr, "muse", "save this")
+	history := h.send(grokAddr, "instinct", "what did I ask")
+	unset := h.send(museAddr, "grokbot", "hi")
+	if got := ttlOf(t, h, notes.ID); got != 30*24*time.Hour {
+		t.Errorf("notes ttl = %v, want 720h", got)
+	}
+	if got := ttlOf(t, h, history.ID); got != 24*time.Hour {
+		t.Errorf("history ttl = %v, want 24h", got)
+	}
+	if got := ttlOf(t, h, unset.ID); got != 24*time.Hour {
+		t.Errorf("unset-kind ttl = %v, want 24h", got)
+	}
+}
+
+func TestNotesTTLOverride(t *testing.T) {
+	h, clock := ttlHarness(t, Config{NotesRequestTTL: 72 * time.Hour})
+	notes := h.send(grokAddr, "muse", "save this")
+	if got := ttlOf(t, h, notes.ID); got != 72*time.Hour {
+		t.Fatalf("notes ttl = %v, want 72h", got)
+	}
+	clock.advance(71 * time.Hour)
+	h.srv.Sweep(context.Background())
+	if s := statusOf(t, h, grokAddr, notes.ID); s != envelope.StatusQueued {
+		t.Fatalf("at 71h status = %s, want queued", s)
+	}
+	clock.advance(2 * time.Hour)
+	h.srv.Sweep(context.Background())
+	if s := statusOf(t, h, grokAddr, notes.ID); s != envelope.StatusExpired {
+		t.Fatalf("at 73h status = %s, want expired", s)
+	}
+}
+
+// A notes request outlives the 24h window: still delivered at day 29,
+// requeued when its claim lapses, and expired (as the asker sees it) past 30d.
+func TestNotesRequestLifecycleOverThirtyDays(t *testing.T) {
+	h, clock := ttlHarness(t, Config{ClaimLease: time.Hour})
+	notes := h.send(grokAddr, "muse", "save this")
+	history := h.send(grokAddr, "instinct", "what did I ask")
+	clock.advance(25 * time.Hour)
+	h.srv.Sweep(context.Background())
+	if s := statusOf(t, h, grokAddr, history.ID); s != envelope.StatusExpired {
+		t.Fatalf("history at 25h = %s, want expired", s)
+	}
+	clock.advance(28 * 24 * time.Hour) // day 29
+	h.srv.Sweep(context.Background())
+	var got pollResult
+	h.do(museAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &got)
+	if len(got.Requests) != 1 || got.Requests[0].ID != notes.ID {
+		t.Fatalf("day 29 poll = %+v", got)
+	}
+	h.do(museAddr, "POST", "/v1/requests/"+notes.ID+"/claim", "", http.StatusOK, nil)
+	clock.advance(2 * time.Hour) // claim lease lapses, still inside the TTL
+	h.srv.Sweep(context.Background())
+	if s := statusOf(t, h, grokAddr, notes.ID); s != envelope.StatusQueued {
+		t.Fatalf("after lease lapse = %s, want queued", s)
+	}
+	clock.advance(2 * 24 * time.Hour) // past day 30
+	h.srv.Sweep(context.Background())
+	if s := statusOf(t, h, grokAddr, notes.ID); s != envelope.StatusExpired {
+		t.Fatalf("past 30d = %s, want expired", s)
+	}
+}
+
+// holdAll holds every request for an hour, as the approval gate would.
+type holdAll struct{}
+
+func (holdAll) Prepare(_ context.Context, req *envelope.Request) error {
+	req.Status, req.HoldTTL = envelope.StatusHeld, time.Hour
+	return nil
+}
+
+// An approved held request to a notes agent gets the notes window, not 24h.
+func TestApprovedHeldNotesRequestKeepsNotesTTL(t *testing.T) {
+	h, _ := ttlHarness(t, Config{})
+	h.srv.SetPreparer(holdAll{})
+	notes := h.send(grokAddr, "muse", "save this")
+	history := h.send(grokAddr, "instinct", "what did I ask")
+	h.do(macAddr, "POST", "/v1/admin/requests/"+notes.ID+"/approve", "", http.StatusOK, nil)
+	h.do(macAddr, "POST", "/v1/admin/requests/"+history.ID+"/approve", "", http.StatusOK, nil)
+	if got := ttlOf(t, h, notes.ID); got != 30*24*time.Hour {
+		t.Errorf("approved notes ttl = %v, want 720h", got)
+	}
+	if got := ttlOf(t, h, history.ID); got != 24*time.Hour {
+		t.Errorf("approved history ttl = %v, want 24h", got)
+	}
+}

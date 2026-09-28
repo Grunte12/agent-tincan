@@ -39,6 +39,7 @@ type relayFlags struct {
 	adminLogins   []string
 	noRebind      bool
 	replyGrace    time.Duration
+	notesTTL      time.Duration
 	dist          string
 	upgradeExit   bool
 	releaseURL    string
@@ -68,6 +69,10 @@ state dir, chmod 600. They are never sent to agents. A webhook or email agent
 is also woken when a reply to its own request is still unread after
 --reply-grace.
 
+An unanswered request expires after 24 hours, except one to a notes-kind
+agent, which waits --notes-ttl (30 days by default) so a sleeping notes Mac
+loses nothing.
+
 A rebuilt machine (a new Tailscale node with the same machine name, or that
 name plus a "-1" style suffix) is re-admitted as its old agent on its first
 call when it is untagged, owned by the login recorded at join, and the old
@@ -84,6 +89,9 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if f.urgentPerHour < 1 {
 				return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
+			}
+			if f.notesTTL <= 0 {
+				return fmt.Errorf("--notes-ttl must be positive, got %s", f.notesTTL)
 			}
 			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
 				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
@@ -104,6 +112,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
 	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
+	cmd.Flags().DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
 	cmd.Flags().StringVar(&f.releaseURL, "release-url", "", "let tincan relay-upgrade --from-github download releases from <url>/<tag>/<file> (for this project: "+GitHubReleaseURL+"); off when empty")
@@ -112,6 +121,11 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
 	cmd.Flags().StringVar(&f.gatewayURL, "gateway-url", "", "public https URL of the gateway when using --gateway-listen")
 	return cmd
+}
+
+// relayConfig maps the relay flags onto the relay server.
+func (f relayFlags) relayConfig() relay.Config {
+	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL}
 }
 
 // directoryConfig maps the relay flags onto the identity directory.
@@ -187,7 +201,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	}
 
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), f.directoryConfig())
-	srv := relay.New(dir, st, relay.Config{Version: Version})
+	srv := relay.New(dir, st, f.relayConfig())
 	urls := who.SelfURLs(ctx, f.port)
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))

@@ -556,3 +556,19 @@ func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
 		}
 	}
 }
+
+// notes is a product service: its runtime name resolves to the notes kind,
+// it waits on the relay, and its block carries no model instructions.
+func TestNotesServiceBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "notes"}}})
+	b := block(t, k, "notes")
+	if b.Kind != KindNotes || b.Wake != "wait" {
+		t.Fatalf("notes block kind/wake = %s/%s", b.Kind, b.Wake)
+	}
+	if strings.Contains(b.Instructions, "check_inbox") || !strings.Contains(b.Instructions, "is a service") {
+		t.Errorf("notes instructions should be the service line only:\n%s", b.Instructions)
+	}
+	if setup := strings.Join(b.Setup, "\n"); !strings.Contains(setup, "30 days") {
+		t.Errorf("notes setup should state the relay retention:\n%s", setup)
+	}
+}

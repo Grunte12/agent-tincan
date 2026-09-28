@@ -118,6 +118,10 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
+{{- define "instructions.notes" -}}
+{{.Name}} is a service, not a model, so there is nothing to paste into a model. It saves notes into Agent Notes on {{.OwnerPoss}} Mac and finds and reads them back for teammates.
+{{- end -}}
+
 {{- define "website"}}{{if eq .Kind "claude-web"}}Claude (claude.ai){{else if eq .Kind "grok-web"}}Grok (grok.com){{else if eq .Kind "gemini-web"}}Gemini (gemini.google.com){{else if eq .Kind "perplexity-web"}}Perplexity (www.perplexity.ai){{else if eq .Kind "copilot-web"}}Microsoft Copilot (copilot.com){{else}}ChatGPT (chatgpt.com){{end}}{{end -}}
 {{- define "websiteflag"}}{{if eq .Kind "claude-web"}}claude-ai{{else if eq .Kind "grok-web"}}grok{{else if eq .Kind "gemini-web"}}gemini{{else if eq .Kind "perplexity-web"}}perplexity{{else if eq .Kind "copilot-web"}}copilot{{else}}chatgpt{{end}}{{end -}}
 
@@ -249,6 +253,12 @@ If the service log (~/Library/Logs/tincan-history.log on macOS) says it is not j
 Check it from another agent: tincan ask {{.Name}} "what was the last thing {{.Owner}} asked Codex?"
 {{- end -}}
 
+{{- define "setup.notes" -}}
+Run it on the Mac where {{.Owner}} uses Agent Notes; it saves and reads notes there. On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
+Requests to {{.Name}} wait on the relay up to 30 days (relay flag --notes-ttl), so the Mac may be asleep or offline meanwhile.
+If the service says it is not joined, run {{template "rejoin" .}} and restart the service.
+{{- end -}}
+
 {{- define "setup.web" -}}
 Name the agent {{.Kind}} when you invite it: tincan web serve and its service expect that name (pass --name to tincan web serve for another).
 Run it on the machine where {{.Owner}} uses Chrome, logged in to {{template "websitefull" .}}. It types each request into that site as {{.Owner}}, in a background tab the Tincan Chrome extension opens and closes; the chats show up in {{.OwnerPoss}} history there.
@@ -308,6 +318,7 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.gemini-cli"}}Gemini through Antigravity CLI or Gemini CLI, woken by tincan listen{{end -}}
 {{- define "title.grok-cli"}}xAI Grok Build CLI woken by tincan listen{{end -}}
 {{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats{{end -}}
+{{- define "title.notes"}}Notes service for Agent Notes on the Mac{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}
