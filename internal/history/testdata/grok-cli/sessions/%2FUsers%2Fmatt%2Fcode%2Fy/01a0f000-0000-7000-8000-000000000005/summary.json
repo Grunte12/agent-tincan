@@ -1,0 +1,11 @@
+{
+  "info": {
+    "id": "01a0f000-0000-7000-8000-000000000005",
+    "cwd": "/Users/matt/code/y"
+  },
+  "num_messages": 3,
+  "agent_name": "grok-build-plan",
+  "created_at": "2026-09-21T12:00:00.000000Z",
+  "updated_at": "2026-09-21T12:00:30.000000Z",
+  "sandbox_profile": "workspace"
+}

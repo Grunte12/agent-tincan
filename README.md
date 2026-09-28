@@ -114,13 +114,15 @@ Codex. The Codex CLI has no background process of its own, so a small listener (
 
 Gemini CLI agent (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.
 
+Grok CLI. xAI's Grok Build CLI (`grok`) is woken the same way as Codex: the listener starts an unattended headless `grok -p` run that works through the inbox and replies, inside Grok's own sandbox. It runs in a wake home of its own, so it never picks up the MCP servers your other tools have configured.
+
 Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tincan mcp`. Hermes has its own webhook gateway, so the relay wakes it with a webhook signed with HMAC, and each wake starts a fresh Hermes session that works through the inbox.
 
 OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP server (`openclaw mcp add agent-tincan --command tincan --arg mcp`), with a skill that drives the `tincan` CLI as a fallback. To wake it, the relay POSTs to the Gateway's `/hooks/agent` endpoint with the hook token as a bearer token; each wake starts a fresh agent turn that empties the Agent Tincan inbox and replies.
 
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox only while you are chatting with it; nothing can wake it.
 
-History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex and Claude Code history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
+History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. It is always listening.
 
 ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first.
 
@@ -138,10 +140,11 @@ In one table:
 | claude-code | Claude Code on your Mac | `tincan mcp` as an MCP server; channel mode pushes requests into the open session | Channel: requests appear in the open Claude Code session |
 | codex | OpenAI Codex CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended `codex exec` run when something is waiting |
 | gemini-cli | Gemini as a coding agent on your Mac, through Antigravity CLI (`agy`) or Gemini CLI | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts an unattended `agy` or `gemini` run when something is waiting |
+| grok-cli | xAI Grok Build CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended, sandboxed `grok -p` run when something is waiting |
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
-| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok and Gemini history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
@@ -419,6 +422,7 @@ Notes that apply to every method:
 | Claude Code | `claude-code` | channel (or command) | [claude-code.md](docs/adapters/claude-code.md) |
 | OpenAI Codex CLI | `codex` | command | [codex.md](docs/adapters/codex.md) |
 | Gemini through Antigravity CLI or Gemini CLI | `gemini-cli` | command | [gemini-cli.md](docs/adapters/gemini-cli.md) |
+| xAI Grok Build CLI | `grok-cli` | command | [grok-cli.md](docs/adapters/grok-cli.md) |
 | Hermes Agent | `hermes` | webhook (or command) | [hermes.md](docs/adapters/hermes.md) |
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
@@ -701,6 +705,50 @@ Install agy and log in once with your Google account, add the MCP server with `a
 
 [docs/adapters/gemini-cli.md](docs/adapters/gemini-cli.md)
 
+### Grok CLI (command wake, wake home of its own)
+
+#### What it is
+
+xAI's Grok Build CLI (`grok`) as a coding agent on your Mac. Like Codex it has no background process, so a listener starts a fresh headless run whenever something is waiting. It uses your own Grok account (a login in its wake home, or `XAI_API_KEY`). The community `grok-cli` npm package is a different tool; the wake refuses it.
+
+#### How it joins
+
+```bash
+tincan invite grok-cli --kind grok-cli
+TINCAN_CONFIG="$HOME/.config/tincan/grok-cli.json" tincan join <code> --relay http://<relay>
+```
+
+#### How it wakes
+
+Command, through [examples/grok-cli/grok-wake.sh](examples/grok-cli/grok-wake.sh) and the shared [examples/lib/tincan-wake-lib.sh](examples/lib/tincan-wake-lib.sh). Copy both into one folder you keep, then point the listener at the script:
+
+```bash
+mkdir -p ~/bin && cp examples/grok-cli/grok-wake.sh examples/lib/tincan-wake-lib.sh ~/bin/ && chmod +x ~/bin/grok-wake.sh   # from a repo checkout
+TINCAN_CONFIG="$HOME/.config/tincan/grok-cli.json" tincan listen --exec ~/bin/grok-wake.sh
+```
+
+Grok Build also loads MCP servers from Claude Code and Cursor configs, so the wake runs it with `HOME` and `GROK_HOME` in a wake home of its own (`~/.config/tincan/grok-cli.wake`), where the only server is this teammate's. Before each run it checks that `grok` is Grok Build and that `grok inspect --json` lists exactly one agent-tincan server with this teammate's `TINCAN_CONFIG` and nothing else; then it runs `grok -p <drain prompt> --output-format json --always-approve --sandbox tincan-wake --cwd <workdir> --session-id <id>`. The `tincan-wake` sandbox profile extends Grok's `workspace` profile: reads anywhere, writes only in the workdir, temp directories, the wake home's `.grok`, the attachments folder and write roots the operator opens with `TINCAN_GROK_WRITE_ROOTS`. The session id is recorded beside the config so the history agent leaves wake runs out.
+
+#### One-time setup
+
+```bash
+W="$HOME/.config/tincan/grok-cli.wake"; mkdir -p "$W/.grok"
+HOME="$W" GROK_HOME="$W/.grok" grok mcp add agent-tincan -e TINCAN_CONFIG="$HOME/.config/tincan/grok-cli.json" -- tincan mcp
+GROK_HOME="$W/.grok" grok login        # or XAI_API_KEY in the listener's environment
+```
+
+Set `{ "grok-cli": { "method": "command" } }` in `wake.json`.
+
+#### Limits and gotchas
+
+- Every wake is a fresh session, so each run must drain the whole inbox.
+- During a run `~` is the wake home: `git` and `gh` there have none of your settings or logins unless you add them.
+- Not yet verified live end to end; see the adapter doc.
+
+#### Adapter doc
+
+[docs/adapters/grok-cli.md](docs/adapters/grok-cli.md)
+
 ### Hermes Agent (webhook with HMAC)
 
 #### What it is
@@ -866,7 +914,7 @@ For each request it:
 3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|gemini|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|grok|gemini|codex|claude-code|grok-cli>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -886,9 +934,10 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 #### Limits and gotchas
 
-- It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
+- It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex or grok-cli wake) can read local Codex, Claude Code and Grok CLI history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
-- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Codex or Claude Code".
+- A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code or Grok CLI".
+- "Grok" means grok.com and "Grok CLI" means Grok Build sessions on this machine (`~/.grok`); grok-cli wake runs are left out unless `--all`.
 - When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT, claude.ai, Grok and Gemini read at most 100 conversations whatever the window says.
 
 #### Adapter doc

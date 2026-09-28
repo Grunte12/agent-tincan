@@ -1,0 +1,2 @@
+{"type": "user", "content": [{"type": "text", "text": "<user_info>\nOS Version: darwin\nShell: /bin/zsh\nWorkspace: /Users/matt\n</user_info>"}]}
+{"type": "user", "content": [{"type": "text", "text": "You have 2 Agent Tincan item(s) waiting. Call check_inbox."}], "prompt_index": 0}

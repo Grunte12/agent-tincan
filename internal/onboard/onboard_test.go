@@ -201,13 +201,13 @@ func TestEmptyRosterAndOffline(t *testing.T) {
 
 func TestRecipes(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL})
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "history", "generic", "second-agent", "relay-host"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "generic", "second-agent", "relay-host"} {
 		r := recipe(t, k, kind)
 		if r.Title == "" || len(r.Steps) < 2 {
 			t.Errorf("recipe %s too thin: %+v", kind, r)
 		}
 	}
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "gemini-cli", "history", "generic"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "generic"} {
 		r := recipe(t, k, kind)
 		all := strings.Join(r.Steps, "\n")
 		inv := strings.Index(all, "tincan invite <name> --kind "+kind)
@@ -273,6 +273,48 @@ func TestFreshSessionReplyWakeGuidance(t *testing.T) {
 // The Codex recipe wakes through the wake script, which takes a lock and
 // runs a sandboxed codex exec, rather than a raw codex exec line, and does
 // not assume a repo checkout at a fixed path.
+// grok-cli is a command-woken fresh-session kind: its block sets up a wake
+// home with only this teammate's tincan server, pins TINCAN_CONFIG, logs
+// in there, and wakes through the grok wake script.
+func TestGrokCLIBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "grok-cli", Kind: KindGrokCLI}}})
+	a := block(t, k, "grok-cli")
+	if a.Kind != KindGrokCLI || a.Wake != "command" {
+		t.Fatalf("block kind %q wake %q, want grok-cli and command", a.Kind, a.Wake)
+	}
+	if !strings.Contains(a.Instructions, "drain the whole inbox") {
+		t.Errorf("grok-cli instructions lack the fresh-session rules:\n%s", a.Instructions)
+	}
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{
+		"Grok Build", "grok --version",
+		"HOME=~/.config/tincan/grok-cli.wake GROK_HOME=~/.config/tincan/grok-cli.wake/.grok grok mcp add agent-tincan -e TINCAN_CONFIG=<full path of ~/.config/tincan/grok-cli.json> -- tincan mcp",
+		"GROK_HOME=~/.config/tincan/grok-cli.wake/.grok grok login", "XAI_API_KEY",
+		"examples/grok-cli/grok-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x",
+		"TINCAN_CONFIG=~/.config/tincan/grok-cli.json tincan listen --exec ~/bin/grok-wake.sh",
+		"--sandbox", "TINCAN_GROK_WRITE_ROOTS",
+		`method "command"`, "docs/adapters/grok-cli.md",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("grok-cli setup missing %q:\n%s", want, setup)
+		}
+	}
+	// The runtime name alone maps to the kind, and the recipe invites with it.
+	k = build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "grok-cli"}}})
+	if b := block(t, k, "grok-cli"); b.Kind != KindGrokCLI {
+		t.Fatalf("runtime name grok-cli resolved to %q", b.Kind)
+	}
+	r := recipe(t, k, KindGrokCLI)
+	if !strings.Contains(r.Title, "Grok") || !strings.Contains(strings.Join(r.Steps, "\n"), "tincan invite <name> --kind grok-cli") {
+		t.Fatalf("grok-cli recipe: %+v", r)
+	}
+	// The history agent's block names Grok CLI among its sources.
+	k = build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "history", Kind: KindHistory}}})
+	if h := block(t, k, "history"); !strings.Contains(h.Instructions, "Grok CLI") {
+		t.Fatalf("history instructions do not name Grok CLI:\n%s", h.Instructions)
+	}
+}
+
 func TestCodexSetupUsesWakeScript(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "codex", Wake: "command", Kind: "codex"}}})
 	setup := strings.Join(block(t, k, "codex").Setup, "\n")
@@ -433,7 +475,7 @@ func TestHistoryBlock(t *testing.T) {
 	if want := "TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay " + relayURL; a.Join != want {
 		t.Errorf("history join = %q, want %q", a.Join, want)
 	}
-	for _, want := range []string{"service", "nothing to paste", "asked ChatGPT, claude.ai, Grok, Gemini, Codex and Claude Code"} {
+	for _, want := range []string{"service", "nothing to paste", "asked ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI"} {
 		if !strings.Contains(a.Instructions, want) {
 			t.Errorf("history instructions missing %q:\n%s", want, a.Instructions)
 		}
@@ -461,7 +503,7 @@ func TestHistoryBlock(t *testing.T) {
 		t.Errorf("history setup assumes a repo checkout:\n%s", setup)
 	}
 	r := recipe(t, k, "history")
-	if want := "History service for ChatGPT, claude.ai, Grok, Gemini, Codex and Claude Code chats"; r.Title != want {
+	if want := "History service for ChatGPT, claude.ai, Grok, Gemini, Codex, Claude Code and Grok CLI chats"; r.Title != want {
 		t.Errorf("history recipe title = %q, want %q", r.Title, want)
 	}
 	all := strings.Join(r.Steps, "\n")

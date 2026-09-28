@@ -93,10 +93,10 @@ A5. Join this machine's own agent (you), if you are one of the team:
         tincan join <CODE> --relay http://tincan-relay
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
-    claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, history,
-    chatgpt-web, claude-web, grok-web, gemini-web, generic. (gemini-cli,
-    grok-web and gemini-web need a relay from this release or later; on an
-    older relay invite without --kind and run
+    claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
+    history, chatgpt-web, claude-web, grok-web, gemini-web, generic.
+    (gemini-cli, grok-cli, grok-web and gemini-web need a relay from this
+    release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>.)
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
@@ -166,6 +166,9 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      docs/adapters/gemini-cli.md)
     - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
                      (only with a paid Gemini API key)
+    - Grok Build CLI (grok-cli teammate): not in ~/.grok. It runs in a wake home of
+                     its own (~/.config/tincan/<your-name>.wake); follow the setup
+                     steps in your onboard block (B4) and docs/adapters/grok-cli.md.
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
@@ -263,7 +266,7 @@ C6. Grok (optional). Tell your owner first: xAI's terms prohibit automated
     - Test: `tincan ask grok-web "Tincan test: say hello in five words."` and
       `tincan ask history "what was the last thing I asked Grok?"`.
 
-C6. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
+C7. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
     they agree: Google's terms do not allow automated access, and Google's
     enforcement can reach their whole Google account, not only Gemini. Gemini
     answers can also draw on Google apps connected to their account (Gmail,
@@ -276,13 +279,18 @@ C6. Optional: Gemini (gemini-web). Tell your owner first, and go ahead only if
       Chrome before continuing.
     - Get an invite code with kind gemini-web and join and install it:
 
-        TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan join <CODE4> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan join <CODE5> --relay http://tincan-relay
         TINCAN_CONFIG=~/.config/tincan/gemini-web.json  tincan web install --site gemini
 
     - Write ~/.config/tincan/gemini-web-allow.txt with only the agents your
       owner wants to reach their Gemini (one name per line), or have them
       disconnect Gmail, Drive and Calendar in Gemini's settings.
     - Test: `tincan ask gemini-web "Tincan test: say hello in five words."`
+
+
+The history agent also reads the owner's Grok CLI (Grok Build) sessions on that
+Mac, from ~/.grok: `tincan ask history "what did I last ask Grok CLI?"`. "Grok"
+alone means grok.com. No extension step is needed for it.
 
 Details: docs/adapters/history.md and docs/adapters/web-agents.md in the repo.
 

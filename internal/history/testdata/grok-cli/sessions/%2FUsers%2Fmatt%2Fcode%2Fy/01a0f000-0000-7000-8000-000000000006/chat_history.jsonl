@@ -1,0 +1,3 @@
+{"type": "user", "content": [{"type": "text", "text": "<user_info>\nOS Version: darwin\nShell: /bin/zsh\nWorkspace: /Users/matt\n</user_info>"}]}
+{"type": "user", "content": [{"type": "text", "text": "old question about the build"}], "prompt_index": 0}
+{"type": "assistant", "content": "Old answer.", "model_id": "grok-build"}

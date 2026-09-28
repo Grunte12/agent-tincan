@@ -146,7 +146,7 @@ func TestSiteTableNames(t *testing.T) {
 	if WebSiteNames() != "chatgpt, claude-ai, grok or gemini" || WebAgentNames() != "chatgpt-web, claude-web, grok-web or gemini-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok and Gemini" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, grok, gemini, codex or claude-code" {
+	if SourceNames() != "chatgpt, claude-ai, grok, gemini, codex, claude-code or grok-cli" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{

@@ -33,6 +33,7 @@ const (
 	KindOpenClaw     = "openclaw"
 	KindCodex        = "codex"
 	KindGeminiCLI    = "gemini-cli"
+	KindGrokCLI      = "grok-cli"
 	KindHistory      = "history"
 	KindChatGPTWeb   = "chatgpt-web"
 	KindClaudeWeb    = "claude-web"
@@ -42,7 +43,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -66,6 +67,7 @@ var runtimeNames = map[string]string{
 	"openclaw":    KindOpenClaw,
 	"codex":       KindCodex,
 	"gemini-cli":  KindGeminiCLI,
+	"grok-cli":    KindGrokCLI,
 	"history":     KindHistory,
 	"chatgpt-web": KindChatGPTWeb,
 	"claude-web":  KindClaudeWeb,
@@ -84,6 +86,7 @@ var defaultWake = map[string]string{
 	KindOpenClaw:     "webhook",
 	KindCodex:        "command",
 	KindGeminiCLI:    "command",
+	KindGrokCLI:      "command",
 	KindHistory:      "wait",
 	KindChatGPTWeb:   "wait",
 	KindClaudeWeb:    "wait",
@@ -102,6 +105,7 @@ var freshSession = map[string]bool{
 	KindOpenClaw:  true,
 	KindCodex:     true,
 	KindGeminiCLI: true,
+	KindGrokCLI:   true,
 }
 
 // Member is one roster entry as the relay reports it.
