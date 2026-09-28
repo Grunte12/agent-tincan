@@ -40,6 +40,8 @@ type relayFlags struct {
 	noRebind      bool
 	replyGrace    time.Duration
 	dist          string
+	upgradeExit   bool
+	releaseURL    string
 
 	gateway         bool
 	gatewayHostname string
@@ -75,12 +77,22 @@ off with --no-auto-rebind.
 With --dist <dir>, the relay serves tincan release binaries from dir to joined
 agents and admins, so tincan upgrade works on machines without GitHub access.
 Put the raw binaries there as tincan_<os>_<arch> (linux or darwin, amd64 or
-arm64), plus checksums.txt and a VERSION file naming the release.`,
+arm64), plus checksums.txt and a VERSION file naming the release. An admin can
+then upgrade the relay itself with tincan relay-upgrade: it installs the dist
+build over this binary (which the relay user must own) and re-executes, or
+with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if f.urgentPerHour < 1 {
 				return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
 			}
-			return runRelay(cmd.Context(), f)
+			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
+				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
+			}
+			err := runRelay(cmd.Context(), f)
+			if rs, ok := errors.AsType[*errRelayRestart](err); ok {
+				return rs.u.restart()
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
@@ -93,6 +105,8 @@ arm64), plus checksums.txt and a VERSION file naming the release.`,
 	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
+	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
+	cmd.Flags().StringVar(&f.releaseURL, "release-url", "", "let tincan relay-upgrade --from-github download releases from <url>/<tag>/<file> (for this project: "+GitHubReleaseURL+"); off when empty")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
 	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
@@ -189,6 +203,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		}
 		srv.SetDist(f.dist)
 	}
+	ctx, up := withRelayUpgrader(ctx, srv, f)
 	wakeCfg, err := wake.LoadConfig(filepath.Join(f.stateDir, "wake.json"))
 	if err != nil {
 		return err
@@ -282,7 +297,12 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		s.do()
 	}
 	log.Printf("tincan relay stopped")
-	return served
+	if served != nil {
+		return served
+	}
+	// After tincan relay-upgrade: the store and listeners are closed, so
+	// the caller can now re-exec the new build or exit for a supervisor.
+	return up.restartErr()
 }
 
 // relayDrainTimeout bounds how long shutdown waits for calls in flight

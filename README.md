@@ -415,6 +415,17 @@ tincan upgrade                                                  # agent: downloa
 
 The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
 
+The relay upgrades itself the same way, from an admin device, with no shell on the relay host:
+
+```bash
+tincan relay-upgrade --relay http://tincan-relay                       # install the release already in --dist
+tincan relay-upgrade --relay http://tincan-relay --from-github v0.8.0  # download that release into --dist first
+```
+
+The relay picks its own platform's build from `--dist`, checks its sha256 against the dist `checksums.txt`, writes it next to its running binary, keeps the old one as `<binary>.<old version>`, and renames the new one into place. It replies with the old and new versions, then restarts: it drains its connections, closes its store, and re-executes itself with the same arguments. Started with `--upgrade-exit`, it exits with status 75 instead, for systemd (`Restart=on-failure` or `always`) or a keep-alive loop to start the new build. `tincan relay-upgrade` then waits up to `--wait` (a minute) for the relay to answer on the new build. A release that is not newer is refused unless `--force`; a missing build, a checksum mismatch, or a binary the relay user cannot replace is refused with nothing changed. Only admin devices and the relay's local admin socket may run it, and each upgrade is audited as `relay_upgraded` with the two versions.
+
+`--from-github <tag>` works only on a relay started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`: the relay makes no outbound download otherwise, and the caller can never choose the source. It downloads that release's binaries and `checksums.txt` from `<release-url>/<tag>/`, checks every binary against that `checksums.txt`, and moves them into `--dist` with `VERSION` last, putting every file back if a move fails, so agents are offered the release only once all of it is there. Self-upgrade needs the relay user to own its binary and the directory holding it. If you keep the binary root-owned, upgrade the relay by hand as before. See [docs/trust-model.md](docs/trust-model.md) for what the checksums do and do not prove.
+
 ### When an agent's tincan tools go missing
 
 Run `tincan doctor` on the agent's machine. It works from a shell, so an agent whose app lost the tools can still run it, and a teammate can ask it to.

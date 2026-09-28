@@ -124,18 +124,12 @@ func (h *NativeHost) recheck(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		h.recheckNow()
-	}
-}
-
-// recheckNow is one recheck: the last hello, if any, against the files on
-// disk.
-func (h *NativeHost) recheckNow() {
-	h.mu.Lock()
-	hello := h.hello
-	h.mu.Unlock()
-	if hello != nil {
-		h.checkDrift(*hello, true)
+		h.mu.Lock()
+		hello := h.hello
+		h.mu.Unlock()
+		if hello != nil {
+			h.checkDrift(*hello, true)
+		}
 	}
 }
 

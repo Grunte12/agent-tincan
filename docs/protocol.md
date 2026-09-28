@@ -207,6 +207,19 @@ Urgent sends have a separate per-sender rolling hourly limit (default 5, configu
 
 A poll with no messages holds until its normal deadline, then returns HTTP 200 with the upgrade field and empty `requests` (or zero `waiting` and `queued` for peek), instead of 204. Populated polls carry the same optional field. `tincan wait` continues waiting on empty polls with an upgrade; it prints the notice when a request or reply ends the wait. The relay repeats it on every response; clients display the actionable notice at most once per process per available version. Unknown fields are safe for older clients to ignore. Notices neither claim requests nor acknowledge replies, and no client upgrades automatically.
 
+### Relay self-upgrade
+
+`POST /v1/admin/relay/upgrade` installs a release over the relay's own binary. Only admin devices and the local admin socket may call it; agents and other callers get 403. The optional body is `{"force": false, "from_github": "v0.8.0"}`.
+
+With `from_github`, the relay first downloads that tag's `checksums.txt` and every `tincan_<os>_<arch>` it lists from its release URL (`tincan relay --release-url`; the request cannot change it, and without the flag the relay refuses `from_github` with 422), checks each binary against it, and moves them into `--dist`, `VERSION` last, restoring the old files if a move fails. Then it reads `--dist/VERSION`, checks `tincan_<its os>_<its arch>` against `--dist/checksums.txt`, keeps the old binary as `<binary>.<old version>`, and renames the new one into place.
+
+Success returns `{"from": "0.7.0", "to": "0.8.0", "restart": "re-exec"}` (or `"exit"` for a relay started with `--upgrade-exit`), writes a `relay_upgraded` audit event with the two versions and the source (`dist` or `github`), and only then restarts the relay: it drains, closes its store, and re-executes itself or exits with status 75. Errors change nothing:
+
+- 404: the relay has no `--dist`, or predates this route (a plain `404 page not found`);
+- 409: the release is not newer than the relay's build and `force` is false, an upgrade is already pending a restart, or the relay user cannot write its binary or the directory holding it;
+- 422: no valid `VERSION`, no binary for the relay's platform, no `checksums.txt` entry for it, or a checksum mismatch;
+- 502: the release download failed.
+
 ## Agent roster
 
 `GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry, terminal requests, and pings are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
