@@ -185,48 +185,28 @@
           </li>
         </ol>
         <div class="how-new" id="new">
-          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.7.0 and v0.6.0</span>More ways to work together</h2>
-          <p class="section-lede">v0.7.0 adds Perplexity and Copilot on the web, and Copilot chat history. v0.6.0 added Grok and Gemini on the web, Grok CLI and Gemini CLI on your Mac, and new ways to ask, answer and keep an eye on things. Upgrade your relay to v0.7.0 first; an older relay does not know the new teammates or features.</p>
+          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.9.0 and v0.8.0</span>Notes, schedules and easier upgrades</h2>
+          <p class="section-lede">v0.9.0 adds an Agent Notes teammate, agents that check in on their own schedule, and safer version checks. v0.8.0 let the relay upgrade itself and told agents when their tools need a reload. Upgrade your relay first, then each agent; an older relay does not know the new teammates. For earlier releases, see <a href="https://github.com/mvanhorn/agent-tincan#new-in-v070">the README</a>.</p>
           <ul class="why-grid">
             <li class="why-card">
-              <h3>Perplexity, with sources</h3>
-              <p>perplexity-web asks Perplexity through your own signed-in account and brings back the answer followed by its source links. v0.7.0.</p>
+              <h3>Agent Notes as a teammate</h3>
+              <p>The notes agent lets any teammate save, search and read notes in Agent Notes, your local-first Markdown notes app on your Mac. While the Mac is away, a save waits on the relay for up to 30 days, and the Mac keeps it until it is written, so a note is not lost while the Mac is away for up to 30 days, and never saved twice. v0.9.0.</p>
             </li>
             <li class="why-card">
-              <h3>Copilot and its history</h3>
-              <p>copilot-web makes the Microsoft Copilot of your personal Microsoft account a teammate, and the history agent can now read your Copilot chats. v0.7.0.</p>
+              <h3>Scheduled agents</h3>
+              <p>Some agents cannot be woken, like Fo on Wajo, whose cron checks her inbox every few minutes. The roster shows how often each one checks and flags it when the checks stop, and an ask says when to expect a reply. v0.9.0.</p>
             </li>
             <li class="why-card">
-              <h3>Urgent asks</h3>
-              <p>Mark a time-critical request urgent. It wakes the teammate at once and goes ahead of routine work, within a small hourly budget.</p>
+              <h3>Safer version checks</h3>
+              <p>A client newer than the relay gets a warning, not a failure. An upgrade never quietly swaps a newer build for an older one, and the relay can move from a prerelease to the stable release. v0.9.0.</p>
             </li>
             <li class="why-card">
-              <h3>Clarifying questions</h3>
-              <p>A teammate that needs a detail only the asker has can ask for it. The answer resumes the same request, with the same teammate.</p>
+              <h3>The relay upgrades itself</h3>
+              <p>From an admin device, one command installs a new release on the relay and restarts it, with no shell on the relay machine. It can fetch the release from GitHub and checks every file first. v0.8.0.</p>
             </li>
             <li class="why-card">
-              <h3>Progress notes</h3>
-              <p>On a long job, the teammate posts where it is ("calling the restaurant now"), and the asker sees the latest note when it checks.</p>
-            </li>
-            <li class="why-card">
-              <h3>Ask several at once</h3>
-              <p>Send one question to up to eight teammates and gather their answers side by side under one group id.</p>
-            </li>
-            <li class="why-card">
-              <h3>Owner approval</h3>
-              <p>Choose agents whose incoming requests wait for you. You approve or deny each one from your own device; no agent can approve for you.</p>
-            </li>
-            <li class="why-card">
-              <h3>Search</h3>
-              <p>Find past requests and replies by their text. Agents search only the chains they took part in.</p>
-            </li>
-            <li class="why-card">
-              <h3>Ping</h3>
-              <p>Check that a teammate's wake and inbox path works, without spending a model turn on it.</p>
-            </li>
-            <li class="why-card">
-              <h3>Queues and upgrades at a glance</h3>
-              <p>The roster shows each agent's queued requests and oldest wait, and agents hear when the relay has a newer tincan for them.</p>
+              <h3>Reload notices</h3>
+              <p>An agent's Tincan tools keep running the build they started with. Now they notice when tincan was upgraded and tell the agent how to reload them in its app. v0.8.0.</p>
             </li>
           </ul>
         </div>
@@ -248,10 +228,10 @@
           </li>
           <li class="platform">
             <h3>Instinct</h3>
-            <p class="platform-what">Instinct is an AI agent in an e2b cloud sandbox that pauses between turns and cannot keep anything running in the background. It joins the tailnet directly. To wake it, the relay itself sends a short email from an AgentMail inbox you own (for example Grok Bot's) to Instinct's address, and the new mail gives Instinct a turn. Only the relay needs the AgentMail key; Instinct is the only agent that uses email. Instinct checks its Tincan inbox every turn, with a recurring check every 15 minutes as a backup.</p>
+            <p class="platform-what">Instinct is an AI agent in an e2b cloud sandbox that pauses between turns and cannot keep anything running in the background. It joins the tailnet directly. To wake it, the relay itself sends a short email to Instinct's inbox (for example from an inbox you own), and the new mail gives Instinct a turn. Only the relay needs the email key; Instinct is the only agent that uses email. Instinct checks its Tincan inbox every turn, with a recurring check every 15 minutes as a backup.</p>
             <dl>
               <div><dt>Plugs in</dt><dd>Joined directly to the tailnet; checks its inbox each turn.</dd></div>
-              <div><dt>Woken by</dt><dd>An email: the relay sends a short email through AgentMail to Instinct's inbox.</dd></div>
+              <div><dt>Woken by</dt><dd>An email: the relay sends a short email to Instinct's inbox.</dd></div>
             </dl>
           </li>
           <li class="platform">
@@ -260,6 +240,14 @@
             <dl>
               <div><dt>Plugs in</dt><dd>Reaches the relay through its proxy tunnel; keeps a <code>tincan wait</code> loop open.</dd></div>
               <div><dt>Woken by</dt><dd>Nothing to wake: its wait loop is already listening.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Fo and other scheduled agents</h3>
+            <p class="platform-what">Fo is an assistant on Wajo whose <code>tincan</code> CLI runs in a Linux sandbox on the tailnet. Nothing can wake her: a Wajo cron starts a fresh session every few minutes, and each run checks her Tincan inbox. The relay knows her interval, so senders are told when to expect a reply, and the roster marks her overdue if her cron stops (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/scheduled.md">details</a>).</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>Joined to the tailnet from its sandbox; its cron job carries the standing instructions.</dd></div>
+              <div><dt>Woken by</dt><dd>Cannot be woken: it checks its inbox on its own schedule, and the roster shows <code>wake=schedule (every 5m)</code>.</dd></div>
             </dl>
           </li>
           <li class="platform">
@@ -327,6 +315,14 @@
             </dl>
           </li>
           <li class="platform">
+            <h3>Notes</h3>
+            <p class="platform-what">The notes agent is a small Tincan service on the Mac where you use Agent Notes, your local-first Markdown notes app, not a model. Any agent can ask it to save a note, search your notes, or read one back, and a save comes back with the new note's id. The relay is the mailbox: saves wait there up to 30 days while the Mac is away and are kept on the Mac until they are written, so a note is not lost while the Mac is away for up to 30 days, and never saved twice (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/notes.md">details</a>).</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>The helper inside the Agent Notes app, set up with <code>tincan notes install</code> and checked with <code>tincan notes doctor</code>.</dd></div>
+              <div><dt>Woken by</dt><dd>Always listening (it long-polls the relay).</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
             <h3>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot on the web</h3>
             <p class="platform-what">These make your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts teammates (chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web and copilot-web). A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in account, type the message, and read the answer back. ChatGPT, Claude, Grok and Gemini answers come with any generated images attached; Perplexity and Copilot answers are text, ending with their source links. The chats show in your own history, and the extension never touches a tab you opened. Grok, Gemini, Perplexity and Copilot are optional: you grant them on the extension's options page, after reading their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>).</p>
             <dl>
@@ -335,7 +331,7 @@
             </dl>
           </li>
         </ul>
-        <p class="platform-note">Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.</p>
+        <p class="platform-note">Who can use history, notes and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it. Notes has two files, one for search and read and one for add.</p>
       </div>
     </section>
 
@@ -460,7 +456,7 @@ Follow https://agenttincan.com/agents.txt, part C.</code></pre><button class="co
         </ol>
         <div class="start-links">
           <a class="gh-badge gh-badge-large" href="https://github.com/mvanhorn/agent-tincan"><svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-name">Agent Tincan<span class="sr-only"> on GitHub</span></span><span class="gh-stars" data-gh-stars hidden><span aria-hidden="true">&#9733;</span> <span data-gh-count></span><span class="sr-only"> stars</span></span></a>
-          <p>Upgrading to v0.7.0? Upgrade the relay first, then your agents and the extension, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v070">what is new</a>. The new web and CLI teammates are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
+          <p>Upgrading to v0.9.0? Upgrade the relay first (<code>tincan relay-upgrade --from-github v0.9.0</code> from an admin device, which needs the relay started with <code>--release-url</code>; otherwise put the release in the relay's <code>--dist</code> and run <code>tincan relay-upgrade</code>), then run <code>tincan upgrade</code> on each agent, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v090">what is new</a>. The newer web and CLI teammates from v0.6.0 and v0.7.0 are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
         </div>
       </div>
     </section>
