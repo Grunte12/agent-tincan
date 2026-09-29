@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Tincan Council</title>
+<style>
+:root {
+  --bg: #0b0f17; --panel: #131a26; --line: #243044; --text: #eef2f7; --muted: #9aa6b8;
+  --accent: #5eead4; --gold: #fbbf24; --warn: #f87171; --track: #1f2937;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3ea; --text: #111827; --muted: #5b6475;
+    --accent: #0f766e; --gold: #b45309; --warn: #b91c1c; --track: #e5e7eb; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 40px 20px 64px; }
+.brand { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 13px; }
+h1 { font-size: 26px; line-height: 1.3; margin: 10px 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+h2 { font-size: 18px; margin: 36px 0 12px; }
+.meta { color: var(--muted); font-size: 14px; }
+.meta span + span::before { content: " \00b7 "; }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
+.banner { border-left: 4px solid var(--warn); }
+.verdict { border-left: 4px solid var(--accent); }
+.verdict h3 { margin: 14px 0 4px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.verdict h3:first-child { margin-top: 0; }
+.text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+td.num { width: 3em; font-weight: 700; }
+tr.first td.num, tr.first td.who { color: var(--gold); }
+.bar { background: var(--track); border-radius: 6px; height: 10px; min-width: 160px; margin-top: 7px; }
+.bar span { display: block; height: 100%; border-radius: 6px; background: var(--accent); }
+tr.first .bar span { background: var(--gold); }
+.answer header { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 10px; }
+.answer header strong { font-size: 17px; }
+.tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+.note { color: var(--muted); font-size: 14px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+ol.ballot { margin: 6px 0; padding-left: 22px; }
+footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+<div class="brand">Agent Tincan Council</div>
+<h1>{{.Question}}</h1>
+<div class="meta">
+  {{- if .Date}}<span>{{.Date}}</span>{{end -}}
+  <span>request {{.RequestID}}</span>
+  <span>{{.State}}</span>
+  {{- if .Category}}<span>category: {{.Category}}</span>{{end -}}
+  {{- if .Chairman}}<span>chairman: {{.Chairman}}</span>{{end -}}
+</div>
+<p class="meta">{{.Status}}</p>
+
+{{if not .Completed}}
+<section class="panel banner">
+  <strong>Council {{.State}}.</strong>
+  <p class="text">{{.Reason}}</p>
+</section>
+{{end}}
+
+{{if .VerdictShown}}
+<h2>Verdict</h2>
+<section class="panel verdict">
+  {{range .Sections}}<h3>{{.Head}}</h3><p class="text">{{.Text}}</p>{{end}}
+</section>
+{{if .Chairmen}}<p class="note">The chairman saw the answers as
+{{range $i, $l := .Chairmen}}{{if $i}}, {{end}}Answer {{$l.Label}} = {{$l.Member}}{{end}}.
+The chairman writes the verdict but cannot change the peer ranking.</p>{{end}}
+{{else if .VerdictUnavailable}}
+<h2>Verdict</h2>
+<section class="panel banner">
+  <strong>Verdict unavailable.</strong>
+  <p class="text">{{.VerdictReason}}</p>
+  <p class="note">The ranking below is the blind peer review's, and the council is recorded as uncategorized.</p>
+</section>
+{{end}}
+
+{{if .Ranking}}
+<h2>Peer ranking</h2>
+<section class="panel">
+<table>
+  <tr><th>#</th><th>Member</th><th>Score (mean Borda, 0 to 1)</th><th>Ballots</th></tr>
+  {{range .Ranking}}
+  <tr{{if eq .Placement 1}} class="first"{{end}}>
+    <td class="num">{{.Placement}}</td>
+    <td class="who">{{.Member}}</td>
+    <td>{{.Score}}<div class="bar"><span style="width: {{.Pct}}%"></span></div></td>
+    <td>{{.Ballots}}</td>
+  </tr>
+  {{end}}
+</table>
+<p class="note">Each member ranked the others' answers under shuffled labels, with its vote on its own answer dropped. A ballot that could not be read counts as no ballot.</p>
+</section>
+{{end}}
+
+{{if .Answers}}
+<h2>Answers</h2>
+{{range .Answers}}
+<section class="panel answer">
+  <header>
+    <strong>{{.Member}}</strong>
+    <span class="tag">{{.Placement}}</span>
+    {{if .Elapsed}}<span class="tag">answered in {{.Elapsed}}</span>{{end}}
+    {{if .Truncated}}<span class="tag">reviewers saw this answer cut to fit</span>{{end}}
+  </header>
+  <p class="text">{{.Body}}</p>
+</section>
+{{end}}
+{{end}}
+
+{{if .Ballots}}
+<h2>Ballots</h2>
+<section class="panel">
+{{range .Ballots}}
+  <div>
+    <strong>{{.Reviewer}}</strong>{{if not .Valid}} <span class="tag">no valid ballot</span>{{end}}
+    {{if .Ranked}}<ol class="ballot">{{range .Ranked}}<li>{{.}}</li>{{end}}</ol>{{end}}
+    {{if .Body}}<details><summary>Full review</summary><p class="text">{{.Body}}</p></details>{{end}}
+  </div>
+{{end}}
+</section>
+{{end}}
+
+{{if .Timings}}
+<h2>Timings</h2>
+<section class="panel">
+<table>
+  {{range .Timings}}<tr><td>{{.Stage}}</td><td>{{.Took}}</td></tr>{{end}}
+</table>
+</section>
+{{end}}
+
+{{if .Absent}}
+<h2>Absent</h2>
+<section class="panel">
+<table>
+  <tr><th>Member</th><th>Stage</th><th>Reason</th></tr>
+  {{range .Absent}}
+  <tr><td>{{.Member}}</td><td>{{.Stage}}</td><td>{{.Reason}}{{if .Detail}}<p class="text note">{{.Detail}}</p>{{end}}</td></tr>
+  {{end}}
+</table>
+<p class="note">Absent members are not scored or penalized on the leaderboard.</p>
+</section>
+{{end}}
+
+{{if .Excluded}}
+<h2>Excluded</h2>
+<section class="panel">
+<table>
+  {{range .Excluded}}<tr><td>{{.Name}}</td><td>{{.Reason}}</td></tr>{{end}}
+</table>
+</section>
+{{end}}
+
+{{if or .Context .Truncated}}
+<h2>Context and truncation</h2>
+<section class="panel">
+{{if .Context}}
+<table>
+  <tr><th>File</th><th>How each member got it</th></tr>
+  {{range .Context}}
+  <tr><td>{{.File}}</td><td>{{range $i, $n := .Members}}{{if $i}}; {{end}}{{$n.Member}}: {{$n.Delivery}}{{end}}</td></tr>
+  {{end}}
+</table>
+{{end}}
+{{if .Truncated}}<p class="note">Reviewers and the chairman saw these answers cut to fit the web message limit:
+{{range $i, $m := .Truncated}}{{if $i}}, {{end}}{{$m}}{{end}}. The answers above are in full.</p>{{end}}
+</section>
+{{end}}
+
+<p class="note">Reviewers saw the answers under labels shuffled for each reviewer, with vendor and model names redacted and the web sites' reply footers removed. Writing style can still give a model away.</p>
+
+<footer>Made by Agent Tincan: {{.Repo}}. This report was written on the owner's machine and has not been shared.</footer>
+</main>
+</body>
+</html>
