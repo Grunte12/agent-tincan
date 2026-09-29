@@ -85,6 +85,23 @@ func DefaultDir(goos, home string) string {
 // service's relay identity.
 func ConfigPathIn(dir string) string { return filepath.Join(dir, "council.json") }
 
+// StorePathIn is the service's database inside its folder dir.
+func StorePathIn(dir string) string { return filepath.Join(dir, "council.db") }
+
+// Folders resolves the service's folders from its folder dir and cfg: the
+// folder its database lives in, and where reports and cards are written.
+func Folders(dir string, cfg Config) (data, reports string) {
+	data = dir
+	if cfg.Dir != "" {
+		data = cfg.Dir
+	}
+	reports = filepath.Join(data, "reports")
+	if cfg.ReportDir != "" {
+		reports = cfg.ReportDir
+	}
+	return data, reports
+}
+
 // maxConfigBytes bounds how much of council.json is read.
 const maxConfigBytes = 64 << 10
 

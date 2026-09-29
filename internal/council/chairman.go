@@ -83,6 +83,7 @@ func (e *Engine) chair(ctx context.Context, c Council, out Outcome) (Verdict, er
 		if i < len(candidates)-1 {
 			left /= 2
 		}
+		c.progress("Chairman %s writing the verdict", cand)
 		res, _, err := e.stage(ctx, c.Request.ID, []plan{{member: cand, out: client.Outgoing{To: cand, Body: body}}}, left)
 		if err != nil {
 			return v, err

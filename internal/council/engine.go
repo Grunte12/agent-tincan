@@ -96,6 +96,16 @@ type Council struct {
 	Members  []Seat
 	// Chairmen is the chairman failover order (Eligibility.Chairmen).
 	Chairmen []string
+	// Progress, when set, is told of each stage change, for the progress
+	// notes that renew the convening request's claim.
+	Progress func(note string)
+}
+
+// progress reports note through c's hook, if it has one.
+func (c Council) progress(format string, args ...any) {
+	if c.Progress != nil {
+		c.Progress(fmt.Sprintf(format, args...))
+	}
 }
 
 // Answer is one member's answer.
@@ -169,6 +179,7 @@ func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 		out.State, out.Reason = CouncilDeclined, err.Error()
 		return out, nil
 	}
+	c.progress("Answers: asked %d members", len(plans))
 	res, notes, err := e.stage(ctx, c.Request.ID, plans, e.Config.AnswerLimit)
 	if err != nil {
 		return out, err
@@ -183,6 +194,7 @@ func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 		}
 		out.Answers = append(out.Answers, Answer{Member: s.Name, RequestID: r.Request.ID, Body: r.Reply.Body, Copy: reviewerCopy(r.Reply.Body, s.Web), Elapsed: elapsed(r)})
 	}
+	c.progress("Answers: %d of %d in", len(out.Answers), len(c.Members))
 	if len(out.Answers) < MinMembers {
 		out.State = CouncilFailed
 		out.Reason = fmt.Sprintf("only %d of %d members answered in time, and a council needs at least %d", len(out.Answers), len(c.Members), MinMembers)
@@ -211,6 +223,7 @@ func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 		out.Reviews = append(out.Reviews, rev)
 		plans = append(plans, plan{member: a.Member, out: client.Outgoing{To: a.Member, Body: body}})
 	}
+	c.progress("Review: %d members ranking the answers blind", len(plans))
 	res, _, err = e.stage(ctx, c.Request.ID, plans, e.Config.ReviewLimit)
 	if err != nil {
 		return out, err
@@ -240,6 +253,7 @@ func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 		rv.Valid = len(countedBallot(*rv)) >= minBallotSize
 	}
 	standings, valid := score(out.Reviews)
+	c.progress("Review: %d of %d ballots counted", valid, len(out.Reviews))
 	if valid < MinMembers {
 		out.State = CouncilFailed
 		out.Reason = fmt.Sprintf("only %d valid ballots came back, and a council needs at least %d", valid, MinMembers)

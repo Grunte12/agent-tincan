@@ -291,3 +291,31 @@ func TestChairmanIgnoresInjectedVerdict(t *testing.T) {
 		t.Error("the chairman prompt does not frame answers as material")
 	}
 }
+
+// KTD15: the engine reports each stage change, in order, through the
+// council's progress hook.
+func TestCouncilReportsStageProgress(t *testing.T) {
+	r := newCouncilRig(t, relay.Config{})
+	r.member("alpha", chairing("alpha", func(string) string { return verdictBlock("debugging", "Use a queue.") }))
+	r.member("bravo", honest("bravo", ""))
+	r.member("charlie", honest("charlie", ""))
+	r.join("delta") // never answers
+	conv := r.convene("Which queue should we use?")
+	var notes []string
+	e := r.engine(3*time.Second, 5*time.Second)
+	out, err := e.Run(t.Context(), Council{Request: conv, Question: conv.Body, Members: seats(true, "alpha", "bravo", "charlie", "delta"), Chairmen: []string{"alpha"},
+		Progress: func(note string) { notes = append(notes, note) }})
+	if err != nil || out.State != CouncilCompleted {
+		t.Fatalf("outcome = %s %q, %v", out.State, out.Reason, err)
+	}
+	want := []string{
+		"Answers: asked 4 members",
+		"Answers: 3 of 4 in",
+		"Review: 3 members ranking the answers blind",
+		"Review: 3 of 3 ballots counted",
+		"Chairman alpha writing the verdict",
+	}
+	if !slices.Equal(notes, want) {
+		t.Fatalf("progress notes =\n%q\nwant\n%q", notes, want)
+	}
+}
