@@ -285,7 +285,7 @@ func (u *relayUpgrader) Upgrade(ctx context.Context, dist string, in client.Rela
 // newer refuses a version that is not newer than the running build, unless
 // forced.
 func (u *relayUpgrader) newer(version string, force bool) error {
-	if force || client.Newer(version, u.current) {
+	if force || client.Ahead(version, u.current) {
 		return nil
 	}
 	return fmt.Errorf("%w: the release is %s and the relay runs %s", relay.ErrUpgradeNotNewer, strings.TrimPrefix(version, "v"), strings.TrimPrefix(u.current, "v"))
