@@ -618,6 +618,37 @@ func TestNotesServiceBlock(t *testing.T) {
 	}
 }
 
+// council is a product service: its runtime name resolves to the council
+// kind, it waits on the relay, and teammates learn that a council they
+// convene waits for the owner's approval.
+func TestCouncilServiceBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "council"}}})
+	b := block(t, k, "council")
+	if b.Kind != KindCouncil || b.Wake != "wait" {
+		t.Fatalf("council block kind/wake = %s/%s", b.Kind, b.Wake)
+	}
+	if want := "TINCAN_CONFIG=~/.config/tincan/council.json tincan join <code> --relay " + relayURL; b.Join != want {
+		t.Errorf("council join = %q, want %q", b.Join, want)
+	}
+	if strings.Contains(b.Instructions, "check_inbox") {
+		t.Errorf("council instructions should not carry model guidance:\n%s", b.Instructions)
+	}
+	for _, want := range []string{"is a service", "tincan approve <request id>", "Matt"} {
+		if !strings.Contains(b.Instructions, want) {
+			t.Errorf("council instructions missing %q:\n%s", want, b.Instructions)
+		}
+	}
+	setup := strings.Join(b.Setup, "\n")
+	for _, want := range []string{"Upgrade the relay", `method "wait"`, "approval.json", `{"from": []}`} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("council setup missing %q:\n%s", want, setup)
+		}
+	}
+	if r := recipe(t, k, KindCouncil); !strings.Contains(strings.Join(r.Steps, "\n"), "tincan invite <name> --kind council") {
+		t.Errorf("council recipe lacks the invite step: %v", r.Steps)
+	}
+}
+
 func notesRoster() []Member {
 	return append(matts(), Member{Name: "notes", Wake: "wait", Kind: "notes"})
 }

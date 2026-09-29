@@ -177,6 +177,22 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 	return false, nil
 }
 
+// holdDefaults reports whether the policy Held last read has an entry for
+// target, and the hold TTL and notify target a default hold should use: the
+// file's, or 2 hours and no notice when there is no file. Nil-safe.
+func (a *Approval) holdDefaults(target string) (entry bool, ttl time.Duration, notify string) {
+	if a == nil {
+		return false, 2 * time.Hour, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.good == nil || a.missing {
+		return false, 2 * time.Hour, ""
+	}
+	_, entry = a.good.Gate[target]
+	return entry, a.ttl, a.good.Notify
+}
+
 // Reject ambiguous JSON rather than letting a repeated field replace a rule.
 func approvalJSON(d *json.Decoder) error {
 	token, err := d.Token()

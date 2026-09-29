@@ -134,6 +134,11 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
+{{- define "instructions.council" -}}
+{{.Name}} is a service, not a model, so there is nothing to paste into {{.Name}} itself. It puts one question to every model on the team, has them rank each other's answers blind, and returns a verdict with the ranking. Paste the lines below into the standing instructions of each teammate that should use it.
+To convene a council, ask {{.Name}} your question. The relay holds every ask to {{.Name}} until {{.Owner}} approves it: when the ask comes back held, tell {{.Owner}} its request id and that tincan approve <request id> on an admin device starts it.
+{{- end -}}
+
 {{- define "instructions.notes" -}}
 {{.Name}} is a service (tincan notes serve), not a model, so there is nothing to paste into {{.Name}} itself. It saves notes into Agent Notes on {{.OwnerPoss}} Mac and searches and reads them back for teammates. Paste the lines below into the standing instructions of each teammate that should use it.
 To save, find, or read a note in {{.OwnerPoss}} Agent Notes, ask {{.Name}}. It can add a note, search notes (up to 20 matches with id, title, tags and a snippet), and read one note by its id. It never edits, archives, or deletes a note.
@@ -285,6 +290,14 @@ If the service log (~/Library/Logs/tincan-history.log on macOS) says it is not j
 Check it from another agent: tincan ask {{.Name}} "what was the last thing {{.Owner}} asked Codex?"
 {{- end -}}
 
+{{- define "setup.council" -}}
+Upgrade the relay to this release first: an older relay refuses the council kind and would never hold council asks.
+The agent must have kind council. If it joined without the kind, run tincan kind {{.Name}} council on an admin device.
+On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
+The relay holds every ask to {{.Name}} for {{.OwnerPoss}} approval (tincan held, then tincan approve <id>), even with no approval.json, because a council sends the question to every model vendor on the team. An entry for {{.Name}} in approval.json replaces that default: {"from": []} holds nothing, and the notify field names an agent the relay tells about each held ask.
+If the service log says it is not joined, run {{template "rejoin" .}} and restart the service.
+{{- end -}}
+
 {{- define "setup.notes" -}}
 Run it on the Mac where {{.Owner}} uses Agent Notes; it saves and reads notes there through the agent-notes helper inside the app. It needs an Agent Notes build whose helper supports create --idempotency-key; tincan notes doctor flags an older one as helper_too_old.
 Upgrade the relay to this release first. Requests to {{.Name}} then wait on the relay up to 30 days (relay flag --notes-ttl), so the Mac may be asleep or offline meanwhile; on an older relay they expire after 24 hours.
@@ -361,6 +374,7 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.grok-cli"}}xAI Grok Build CLI woken by tincan listen{{end -}}
 {{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats{{end -}}
 {{- define "title.notes"}}Notes service for Agent Notes on the Mac{{end -}}
+{{- define "title.council"}}Council service that puts one question to every model on the team{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}
 {{- define "title.claude-web"}}Claude (claude.ai) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.grok-web"}}Grok (grok.com) as a teammate, through your logged-in browser{{end -}}

@@ -1447,10 +1447,22 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	for i := range reqs {
-		reqs[i].Body = approvalPreview(reqs[i].Body)
+	// Each entry also names the target's kind, so the owner sees a council ask
+	// (which goes on to every model vendor) for what it is. The attachments'
+	// names and sizes already ride on the request. Old clients ignore to_kind.
+	type heldRequest struct {
+		envelope.Request
+		ToKind string `json:"to_kind,omitempty"`
 	}
-	writeJSON(w, http.StatusOK, emptyIfNil(reqs))
+	out := make([]heldRequest, len(reqs))
+	for i, req := range reqs {
+		req.Body = approvalPreview(req.Body)
+		out[i] = heldRequest{Request: req}
+		if a, ok, err := s.lookupAgent(r.Context(), req.To); err == nil && ok {
+			out[i].ToKind = a.Kind
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {

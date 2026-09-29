@@ -5,10 +5,13 @@ import (
 	"errors"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
@@ -288,5 +291,89 @@ func TestPingRejectsInferredParentAndUsesRateLimit(t *testing.T) {
 	}
 	if err := f.pol.Prepare(t.Context(), &req); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("rate: %v", err)
+	}
+}
+
+// prepareTo runs Prepare for one ask from grokbot to target and returns the
+// prepared request, with the policy metadata the store never returns.
+func (f *fixture) prepareTo(t *testing.T, target string) envelope.Request {
+	t.Helper()
+	req := envelope.Request{From: "grokbot", To: target, Kind: envelope.KindAsk, Body: "x"}
+	if err := f.pol.Prepare(t.Context(), &req); err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func (f *fixture) agent(t *testing.T, name, kind string) {
+	t.Helper()
+	if err := f.st.PutAgent(t.Context(), identity.Agent{Name: name, NodeID: "n-" + name, Kind: kind}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeApproval(t *testing.T, body string) *Approval {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// AE5: an agent's ask to a council-kind agent waits for the owner even with
+// no approval.json, and for long enough to be approved.
+func TestCouncilHeldByDefaultWithoutApproval(t *testing.T) {
+	f := newFixture(t, Config{})
+	f.agent(t, "council", "council")
+	req := f.prepareTo(t, "council")
+	if req.Status != envelope.StatusHeld || req.HoldTTL != 2*time.Hour || req.ApprovalNotify != "" {
+		t.Fatalf("council ask = status %q ttl %v notify %q; want held for 2h with no notice", req.Status, req.HoldTTL, req.ApprovalNotify)
+	}
+}
+
+// An approval.json that gates other agents but names no council still holds
+// council asks, with the file's hold TTL and notify target.
+func TestCouncilHeldWhenApprovalHasNoEntry(t *testing.T) {
+	a := writeApproval(t, `{"gate":{"muse":{"from":"*"}},"notify":"instinct","hold_ttl":"30m"}`)
+	f := newFixture(t, Config{Approval: a})
+	f.agent(t, "council", "council")
+	req := f.prepareTo(t, "council")
+	if req.Status != envelope.StatusHeld || req.HoldTTL != 30*time.Minute || req.ApprovalNotify != "instinct" {
+		t.Fatalf("council ask = status %q ttl %v notify %q; want held 30m, notify instinct", req.Status, req.HoldTTL, req.ApprovalNotify)
+	}
+}
+
+// An explicit entry wins: {"from": []} holds nothing.
+func TestCouncilExplicitEmptyEntryDelivers(t *testing.T) {
+	a := writeApproval(t, `{"gate":{"council":{"from":[]}}}`)
+	f := newFixture(t, Config{Approval: a})
+	f.agent(t, "council", "council")
+	if req := f.prepareTo(t, "council"); req.Status != "" {
+		t.Fatalf("council ask with explicit empty entry = %q, want delivered", req.Status)
+	}
+}
+
+// A failed kind lookup holds rather than delivers.
+func TestCouncilKindLookupErrorHolds(t *testing.T) {
+	f := newFixture(t, Config{})
+	f.agent(t, "muse", "codex")
+	f.pol.kindOf = func(context.Context, string) (string, error) { return "", errors.New("disk gone") }
+	req := f.prepareTo(t, "muse")
+	if req.Status != envelope.StatusHeld || req.HoldTTL <= 0 {
+		t.Fatalf("lookup failure = status %q ttl %v; want held", req.Status, req.HoldTTL)
+	}
+}
+
+// Other kinds are unchanged: no approval.json means no hold.
+func TestNonCouncilNotHeldWithoutApproval(t *testing.T) {
+	f := newFixture(t, Config{})
+	f.agent(t, "muse", "codex")
+	if req := f.prepareTo(t, "muse"); req.Status != "" || req.HoldTTL != 0 {
+		t.Fatalf("codex ask = status %q ttl %v, want delivered", req.Status, req.HoldTTL)
 	}
 }
