@@ -106,6 +106,10 @@ var defaultWake = map[string]string{
 	KindGeneric:       "none",
 }
 
+// wakeMethodOrder is every wake method, in the order the operator prompt
+// lists them.
+var wakeMethodOrder = []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"}
+
 // freshSession lists the kinds whose every wake starts a fresh session with
 // no memory of the last one; their instructions carry instructions.fresh.
 // They commonly share a machine with another agent, so their tincan commands
@@ -246,11 +250,11 @@ func Build(o Options) (Kit, error) {
 		op.Team = append(op.Team, teamLine{Name: m.Name, Kind: kind, Wake: wake, ExpectOnline: expectOnline(kind, wake)})
 	}
 	if len(roster) == 0 {
-		for _, w := range []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"} {
+		for _, w := range wakeMethodOrder {
 			wakes[w] = true
 		}
 	}
-	for _, w := range []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"} {
+	for _, w := range wakeMethodOrder {
 		if wakes[w] {
 			op.WakeMethods = append(op.WakeMethods, w)
 		}

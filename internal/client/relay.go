@@ -67,12 +67,10 @@ type AgentInfo struct {
 	Queued       int       `json:"queued,omitempty"`
 	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
 	Claimed      int       `json:"claimed,omitempty"`
-	// CheckEverySeconds, ExpectReplySeconds and Overdue are the relay's
-	// schedule facts (see envelope.Target), set only for an agent on wake
-	// method schedule and left out otherwise and by older relays.
-	CheckEverySeconds  int  `json:"check_every_seconds,omitempty"`
-	ExpectReplySeconds int  `json:"expect_reply_seconds,omitempty"`
-	Overdue            bool `json:"overdue,omitempty"`
+	// Target carries the relay's schedule facts, set only for an agent on
+	// wake method schedule and left out otherwise and by older relays. Its
+	// fields sit at the top level of each roster entry.
+	envelope.Target
 }
 
 // Roster is the relay's agent list with what the relay says about itself.

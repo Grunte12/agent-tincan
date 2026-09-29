@@ -1071,7 +1071,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if s.wake != nil {
 			info.Wake = s.wake.WakeMethod(a.Name)
 			if t := s.scheduleTarget(s.checkEvery(a.Name), last, a.JoinedAt, now); t != nil {
-				info.CheckEverySeconds, info.ExpectReplySeconds, info.Overdue = t.CheckEverySeconds, t.ExpectReplySeconds, t.Overdue
+				info.Target = *t
 			}
 		}
 		out = append(out, info)

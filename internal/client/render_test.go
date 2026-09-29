@@ -218,10 +218,10 @@ func TestAgentInfoScheduleLabels(t *testing.T) {
 		wake, overdue string
 	}{
 		{"webhook", client.AgentInfo{Wake: "webhook"}, "webhook", ""},
-		{"on time", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, LastPoll: now.Add(-3 * time.Minute)}, "schedule (every 5m)", ""},
-		{"overdue", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, Overdue: true, LastPoll: now.Add(-25 * time.Minute)}, "schedule (every 5m)", "overdue: last check 25m ago"},
-		{"overdue hours", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 3600, Overdue: true, LastPoll: now.Add(-3 * time.Hour), LastActive: now}, "schedule (every 1h)", "overdue: last check 3h ago"},
-		{"never checked", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, Overdue: true}, "schedule (every 5m)", "overdue: never checked"},
+		{"on time", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300}, LastPoll: now.Add(-3 * time.Minute)}, "schedule (every 5m)", ""},
+		{"overdue", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}, LastPoll: now.Add(-25 * time.Minute)}, "schedule (every 5m)", "overdue: last check 25m ago"},
+		{"overdue hours", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 3600, Overdue: true}, LastPoll: now.Add(-3 * time.Hour), LastActive: now}, "schedule (every 1h)", "overdue: last check 3h ago"},
+		{"never checked", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}}, "schedule (every 5m)", "overdue: no check recorded since it joined or the relay restarted"},
 		{"old relay", client.AgentInfo{Wake: "schedule"}, "schedule", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

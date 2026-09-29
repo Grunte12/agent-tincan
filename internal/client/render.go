@@ -83,15 +83,16 @@ func (a AgentInfo) WakeLabel() string {
 	return fmt.Sprintf("%s (every %s)", a.Wake, compactSeconds(a.CheckEverySeconds))
 }
 
-// OverdueNote is "overdue: last check 25m ago" (or "overdue: never
-// checked") for a schedule agent the relay marks overdue, measured from its
-// last inbox check, and empty otherwise.
+// OverdueNote is "overdue: last check 25m ago" for a schedule agent the
+// relay marks overdue, measured from its last inbox check, and empty
+// otherwise. The relay keeps last checks in memory, so an agent with none
+// recorded (never checked, or not since the relay restarted) says so.
 func (a AgentInfo) OverdueNote(now time.Time) string {
 	if !a.Overdue {
 		return ""
 	}
 	if a.LastPoll.IsZero() {
-		return "overdue: never checked"
+		return "overdue: no check recorded since it joined or the relay restarted"
 	}
 	return "overdue: last check " + ageAgo(now.Sub(a.LastPoll))
 }

@@ -237,6 +237,22 @@ func TestUpgradeRefusesDowngrade(t *testing.T) {
 	}
 }
 
+// A check with --force on a newer client still reports a downgrade instead
+// of telling it to install, and changes nothing.
+func TestUpgradeCheckForceNewerClient(t *testing.T) {
+	setVersion(t, "0.8.0")
+	m := meshWithDist(t, map[string]string{platformFile: "relay build", "VERSION": "0.7.0"})
+	exe, before := fakeExe(t)
+	var out bytes.Buffer
+	if err := upgrade(t.Context(), m.Client(t, "muse"), exe, true, true, &out); err != nil {
+		t.Fatal(err)
+	}
+	assertUntouched(t, exe, before)
+	if !strings.Contains(out.String(), "would downgrade") || strings.Contains(out.String(), "Run tincan upgrade to install") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
 func TestUpgradeForceDowngrades(t *testing.T) {
 	setVersion(t, "0.8.0")
 	m := meshWithDist(t, map[string]string{platformFile: "relay build", "VERSION": "0.7.0"})

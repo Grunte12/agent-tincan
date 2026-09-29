@@ -86,7 +86,7 @@ func TestClaudeCodeAndGenericGetConfigHint(t *testing.T) {
 }
 
 func TestOtherKindsUnchangedByConfigRules(t *testing.T) {
-	kinds := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindChatGPT}
+	kinds := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindChatGPT, KindScheduled}
 	var roster []Member
 	for _, kind := range kinds {
 		roster = append(roster, Member{Name: "a-" + kind, Kind: kind})

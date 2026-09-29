@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
@@ -16,8 +17,8 @@ import (
 func TestFormatAgentsSchedule(t *testing.T) {
 	now := time.Now()
 	got := formatAgents([]client.AgentInfo{
-		{Name: "fo", Wake: "schedule", CheckEverySeconds: 300, ExpectReplySeconds: 600, LastPoll: now.Add(-3 * time.Minute)},
-		{Name: "late", Wake: "schedule", CheckEverySeconds: 300, ExpectReplySeconds: 600, Overdue: true, LastPoll: now.Add(-25 * time.Minute)},
+		{Name: "fo", Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600}, LastPoll: now.Add(-3 * time.Minute)},
+		{Name: "late", Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600, Overdue: true}, LastPoll: now.Add(-25 * time.Minute)},
 		{Name: "grokbot", Wake: "webhook", LastPoll: now},
 	}, now)
 	want := "fo             offline  wake=schedule (every 5m) last seen 3m ago\n" +
