@@ -181,3 +181,63 @@ func TestDoctorProgressToolCount(t *testing.T) {
 		})
 	}
 }
+
+// setVersion runs the test as tincan version v.
+func setVersion(t *testing.T, v string) {
+	t.Helper()
+	old := Version
+	Version = v
+	t.Cleanup(func() { Version = old })
+}
+
+// A binary that differs from the relay's release is only a failure when the
+// relay's release is newer or the order is unknown. A newer client warns and
+// tells the owner how to bring the relay up to it.
+func TestVersionCheck(t *testing.T) {
+	cases := []struct {
+		name, client, relay, build string
+		status                     string
+		want, notWant              []string
+	}{
+		{"client newer", "0.8.0", "0.7.0", "other build", "warn",
+			[]string{"0.8.0", "0.7.0", "relay-upgrade --from-github v0.8.0", "admin device"}, []string{"Run tincan upgrade"}},
+		{"client newer with v prefix", "v0.8.0", "v0.7.0", "other build", "warn",
+			[]string{"relay-upgrade --from-github v0.8.0"}, []string{"vv0.8.0"}},
+		{"client older", "0.6.0", "0.7.0", "other build", "fail",
+			[]string{"is not the relay's release 0.7.0", "Run tincan upgrade"}, []string{"relay-upgrade"}},
+		{"same release", "0.7.0", "0.7.0", "old binary", "ok",
+			[]string{"matches the relay's release"}, nil},
+		{"development client", "0.0.1-dev", "0.7.0", "other build", "fail",
+			[]string{"Run tincan upgrade"}, []string{"relay-upgrade"}},
+		{"unknown relay version", "0.8.0", "", "other build", "fail",
+			[]string{"Run tincan upgrade"}, []string{"relay-upgrade"}},
+		{"unparsable relay version", "0.8.0", "nightly", "other build", "fail",
+			[]string{"Run tincan upgrade"}, []string{"relay-upgrade"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setVersion(t, tc.client)
+			files := map[string]string{platformFile: tc.build}
+			if tc.relay != "" {
+				files["VERSION"] = tc.relay
+			}
+			m := meshWithDist(t, files)
+			exe, _ := fakeExe(t)
+			c := versionCheck(t.Context(), m.Client(t, "muse"), exe)
+			text := c.Detail + "\n" + c.Fix
+			if c.Status != tc.status {
+				t.Fatalf("status = %q, want %q: %s", c.Status, tc.status, text)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(text, w) {
+					t.Errorf("missing %q in %q", w, text)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(text, w) {
+					t.Errorf("unexpected %q in %q", w, text)
+				}
+			}
+		})
+	}
+}
