@@ -28,9 +28,6 @@ const (
 	ReasonByRequest   = "excluded (by request)"
 )
 
-// kindCouncil is Council's own roster kind.
-const kindCouncil = "council"
-
 // Exclusion is a roster agent that does not sit on a council, and why.
 type Exclusion struct {
 	Name   string
@@ -70,11 +67,7 @@ func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Req
 	}
 	profiles := map[string]onboard.Profile{}
 	for _, m := range roster {
-		p := onboard.ProfileOf(m)
-		if m.Kind == kindCouncil {
-			p.Kind, p.Service = kindCouncil, true
-		}
-		profiles[m.Name] = p
+		profiles[m.Name] = onboard.ProfileOf(m)
 	}
 	// fit is "" for an agent that may sit or chair when named, else the
 	// reason it may not.
