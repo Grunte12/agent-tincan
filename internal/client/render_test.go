@@ -176,3 +176,61 @@ func TestUpgradeNoticeNamesReloadStep(t *testing.T) {
 		t.Fatalf("no reload step should keep the plain notice: %q", plain)
 	}
 }
+
+// AE2: an ask that returns before a schedule agent replies says how often
+// it checks and when to expect a reply, ahead of the usual request-id line;
+// without target facts (an old relay, or a target not on a schedule) the
+// text is exactly as before.
+func TestFormatResultScheduleTarget(t *testing.T) {
+	base := client.Result{Request: envelope.Request{ID: "r1", To: "fo"}, Status: envelope.StatusQueued}
+	plain := client.FormatResult(base)
+	if plain != "No reply yet from fo. Request id r1 (status queued). Check later with get_reply or `tincan get r1`.\n" {
+		t.Fatalf("plain = %q", plain)
+	}
+	sched := base
+	sched.Target = &envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600}
+	want := "fo checks its inbox every 5m; expect a reply within about 10m.\n" + plain
+	if got := client.FormatResult(sched); got != want {
+		t.Fatalf("schedule = %q, want %q", got, want)
+	}
+	late := base
+	late.Target = &envelope.Target{CheckEverySeconds: 90, ExpectReplySeconds: 5400, Overdue: true}
+	want = "fo checks its inbox every 1m30s; expect a reply within about 1h30m. fo has missed its recent checks, so its schedule may have stopped; the owner may need to restart it.\n" + plain
+	if got := client.FormatResult(late); got != want {
+		t.Fatalf("overdue = %q, want %q", got, want)
+	}
+	// A reply that is in renders as a reply, with no schedule hint.
+	replied := sched
+	replied.Status = envelope.StatusAnswered
+	replied.Reply = &envelope.Reply{From: "fo", Status: envelope.StatusAnswered, Body: "ok"}
+	if got := client.FormatResult(replied); strings.Contains(got, "checks its inbox") {
+		t.Fatalf("replied = %q", got)
+	}
+}
+
+// The roster's schedule label and overdue note: an interval on the wake
+// method, and an overdue agent's last inbox check.
+func TestAgentInfoScheduleLabels(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name          string
+		info          client.AgentInfo
+		wake, overdue string
+	}{
+		{"webhook", client.AgentInfo{Wake: "webhook"}, "webhook", ""},
+		{"on time", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300}, LastPoll: now.Add(-3 * time.Minute)}, "schedule (every 5m)", ""},
+		{"overdue", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}, LastPoll: now.Add(-25 * time.Minute)}, "schedule (every 5m)", "overdue: last check 25m ago"},
+		{"overdue hours", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 3600, Overdue: true}, LastPoll: now.Add(-3 * time.Hour), LastActive: now}, "schedule (every 1h)", "overdue: last check 3h ago"},
+		{"never checked", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}}, "schedule (every 5m)", "overdue: no check recorded since it joined or the relay restarted"},
+		{"old relay", client.AgentInfo{Wake: "schedule"}, "schedule", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.WakeLabel(); got != tc.wake {
+				t.Errorf("WakeLabel = %q, want %q", got, tc.wake)
+			}
+			if got := tc.info.OverdueNote(now); got != tc.overdue {
+				t.Errorf("OverdueNote = %q, want %q", got, tc.overdue)
+			}
+		})
+	}
+}

@@ -222,6 +222,9 @@ func versionCheck(ctx context.Context, r *client.Relay, exe string) check {
 	if want == "" || err != nil {
 		return check{"version", "warn", fmt.Sprintf("tincan %s; relay release %s has no build to compare for this platform", Version, m.Version), ""}
 	}
+	if have != want && client.Ahead(Version, m.Version) {
+		return check{"version", "warn", fmt.Sprintf("tincan %s is newer than the relay's release %s", strings.TrimPrefix(Version, "v"), strings.TrimPrefix(m.Version, "v")), relayBehindAdvice(Version)}
+	}
 	if have != want {
 		return check{"version", "fail", fmt.Sprintf("tincan %s at %s is not the relay's release %s", Version, exe, m.Version), "Run tincan upgrade, then restart the app that runs tincan mcp so it starts the new build."}
 	}

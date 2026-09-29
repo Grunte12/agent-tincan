@@ -269,6 +269,17 @@ func TestRelayUpgradeRefusals(t *testing.T) {
 	}
 }
 
+// A relay on a prerelease accepts its own stable release as an upgrade
+// without --force, which is what doctor tells the owner to run.
+func TestRelayUpgradePrereleaseToStable(t *testing.T) {
+	rig := newSelfUpgradeRig(t, goodDist("0.8.0"))
+	rig.u.current = "0.8.0-rc1"
+	res, err := rig.upgrade(t, "admin", client.RelayUpgradeRequest{})
+	if err != nil || res.To != "0.8.0" {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+}
+
 // --force reinstalls a release that is not newer.
 func TestRelayUpgradeForce(t *testing.T) {
 	rig := newSelfUpgradeRig(t, goodDist("0.7.0"))

@@ -15,6 +15,8 @@
 //     running Claude Code session.
 //   - command (agent-side): `tincan listen --exec` runs a command.
 //   - none: the agent checks at the start of each turn. ChatGPT.
+//   - schedule (agent-side): the agent checks on its own cron every
+//     interval; the relay reports the interval and a missed check.
 //
 // A reply to an agent's own request also wakes a relay-side agent, after a
 // grace period that lets an inline wait read it first, and only if the reply
@@ -58,6 +60,10 @@ const (
 	Channel = "channel"
 	Command = "command"
 	None    = "none"
+	// Schedule (agent-side): the agent checks its inbox on its own cron
+	// every Target.Every. The relay sends no wake; it reports the interval
+	// and whether the agent has missed its checks.
+	Schedule = "schedule"
 )
 
 // Webhook body formats.
@@ -93,6 +99,9 @@ type Target struct {
 	EmailTo       string `json:"email_to,omitempty"`
 	AgentMailFrom string `json:"agentmail_inbox,omitempty"` // sending inbox, e.g. mvhgrokbot@agentmail.to
 	AgentMailKey  string `json:"agentmail_key,omitempty"`
+
+	// schedule: a Go duration such as "5m", the agent's own check interval.
+	Every string `json:"every,omitempty"`
 
 	// MaxPerHour caps relay-side wakes (e.g. e2b resumes). Default 12.
 	MaxPerHour int `json:"max_per_hour,omitempty"`
@@ -135,6 +144,10 @@ func LoadConfig(path string) (Config, error) {
 		case Email:
 			if t.EmailTo == "" || t.AgentMailFrom == "" || t.AgentMailKey == "" {
 				return nil, fmt.Errorf("wake %s: email needs email_to, agentmail_inbox, agentmail_key", name)
+			}
+		case Schedule:
+			if t.Interval() <= 0 {
+				return nil, fmt.Errorf("wake %s: schedule needs every, a positive duration such as \"5m\" (got %q)", name, t.Every)
 			}
 		case Wait, Channel, Command, None:
 		default:
@@ -271,6 +284,25 @@ func (w *Waker) WakeMethod(agent string) string {
 		return t.Method
 	}
 	return None
+}
+
+// Interval is a schedule target's check interval, 0 when Every is empty or
+// does not parse.
+func (t Target) Interval() time.Duration {
+	d, err := time.ParseDuration(t.Every)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// CheckEvery implements relay.Scheduler: a schedule agent's check interval,
+// 0 for an agent on any other method.
+func (w *Waker) CheckEvery(agent string) time.Duration {
+	if t, ok := w.cfg[agent]; ok && t.Method == Schedule {
+		return max(t.Interval(), 0)
+	}
+	return 0
 }
 
 // Queued implements relay.Events. Relay-side methods schedule a debounced

@@ -110,3 +110,30 @@ func TestClientSendsItsPlatform(t *testing.T) {
 		t.Fatalf("platform header != %s", want)
 	}
 }
+
+// Ahead orders a stable release after its own prereleases, which Newer
+// deliberately does not, so a downgrade guard can refuse 0.8.0 -> 0.8.0-rc1.
+func TestAhead(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.8.0", "0.8.0-rc1", true},
+		{"v0.8.0", "0.8.0-rc1", true},
+		{"0.8.0-rc2", "0.8.0-rc1", true},
+		{"0.8.0", "0.7.0", true},
+		{"0.8.0-rc1", "0.8.0", false},
+		{"0.8.0", "0.8.0", false},
+		{"0.7.0", "0.8.0-rc1", false},
+		{"0.8.0-dev", "0.7.0", false},
+		{"0.8.0", "garbage", false},
+	}
+	for _, c := range cases {
+		if got := client.Ahead(c.a, c.b); got != c.want {
+			t.Errorf("Ahead(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+	if client.Newer("0.8.0", "0.8.0-rc1") {
+		t.Error("Newer must still not offer a prerelease relay's build as newer than a stable client")
+	}
+}

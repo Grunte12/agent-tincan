@@ -86,7 +86,7 @@ func TestClaudeCodeAndGenericGetConfigHint(t *testing.T) {
 }
 
 func TestOtherKindsUnchangedByConfigRules(t *testing.T) {
-	kinds := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindChatGPT}
+	kinds := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindChatGPT, KindScheduled}
 	var roster []Member
 	for _, kind := range kinds {
 		roster = append(roster, Member{Name: "a-" + kind, Kind: kind})
@@ -122,6 +122,8 @@ func TestExpectOnline(t *testing.T) {
 		{KindChatGPT, "none", false},
 		{KindCodex, "command", false},
 		{KindCodex, "webhook", false}, // non-generic kinds ignore wake
+		{KindScheduled, "schedule", false},
+		{KindGeneric, "schedule", false},
 		{"", "webhook", false},
 	}
 	for _, c := range cases {

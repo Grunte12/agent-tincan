@@ -97,8 +97,8 @@ A5. Join this machine's own agent (you), if you are one of the team:
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
     history, notes, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
-    copilot-web, generic.
-    (gemini-cli, grok-cli, notes, grok-web, gemini-web, perplexity-web and copilot-web need a relay from this
+    copilot-web, scheduled, generic.
+    (gemini-cli, grok-cli, notes, grok-web, gemini-web, perplexity-web, copilot-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>.)
 
@@ -153,6 +153,9 @@ B2. Join, with the code and relay address from your message (the relay is
       with `TINCAN_CONFIG=~/.config/tincan/<your-name>.json`.
     - "not a joined agent" on a machine that joined before (rebuilt): run
       `tincan rejoin --relay http://tincan-relay` instead of asking for a new code.
+    - Started by a platform cron, with nothing that can wake you: ask your owner
+      to invite you with `--kind scheduled`, join as above, and in B4 paste your
+      standing instructions into your cron job so every run follows them.
 
 B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Claude Code:   claude mcp add --scope user agent-tincan -- tincan mcp --channel

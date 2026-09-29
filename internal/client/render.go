@@ -50,9 +50,78 @@ func FormatResult(r Result) string {
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
-		return fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
+		return scheduleHint(r.Request.To, r.Target) + fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
 			r.Request.To, r.Request.ID, r.Status, r.Request.ID)
 	}
+}
+
+// scheduleHint tells a sender how often a schedule target checks its inbox
+// and when to expect a reply, from the facts the relay sent with the
+// request. It is empty without them: an old relay, or a target that is not
+// on a schedule.
+func scheduleHint(to string, t *envelope.Target) string {
+	if t == nil || t.CheckEverySeconds <= 0 {
+		return ""
+	}
+	hint := fmt.Sprintf("%s checks its inbox every %s", to, compactSeconds(t.CheckEverySeconds))
+	if t.ExpectReplySeconds > 0 {
+		hint += fmt.Sprintf("; expect a reply within about %s", compactSeconds(t.ExpectReplySeconds))
+	}
+	hint += "."
+	if t.Overdue {
+		hint += fmt.Sprintf(" %s has missed its recent checks, so its schedule may have stopped; the owner may need to restart it.", to)
+	}
+	return hint + "\n"
+}
+
+// WakeLabel is the agent's wake method, with its check interval for an
+// agent on a schedule: "schedule (every 5m)".
+func (a AgentInfo) WakeLabel() string {
+	if a.CheckEverySeconds <= 0 {
+		return a.Wake
+	}
+	return fmt.Sprintf("%s (every %s)", a.Wake, compactSeconds(a.CheckEverySeconds))
+}
+
+// OverdueNote is "overdue: last check 25m ago" for a schedule agent the
+// relay marks overdue, measured from its last inbox check, and empty
+// otherwise. The relay keeps last checks in memory, so an agent with none
+// recorded (never checked, or not since the relay restarted) says so.
+func (a AgentInfo) OverdueNote(now time.Time) string {
+	if !a.Overdue {
+		return ""
+	}
+	if a.LastPoll.IsZero() {
+		return "overdue: no check recorded since it joined or the relay restarted"
+	}
+	return "overdue: last check " + ageAgo(now.Sub(a.LastPoll))
+}
+
+// ageAgo renders an age for LastSeen and OverdueNote: "just now", "12m ago", "3h ago",
+// "2d ago".
+func ageAgo(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+}
+
+// compactSeconds renders a whole number of seconds without zero units:
+// 300 is "5m", 90 is "1m30s", 5400 is "1h30m".
+func compactSeconds(n int) string {
+	s := (time.Duration(n) * time.Second).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // FormatProgress renders the latest note with its author and age, on one

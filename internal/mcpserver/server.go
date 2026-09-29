@@ -411,7 +411,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, and queued work with its oldest wait and live claims."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, schedule with its check interval and an overdue marker when it has missed its checks, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, and queued work with its oldest wait and live claims."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {
@@ -420,7 +420,10 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			var out strings.Builder
 			now := time.Now()
 			for _, a := range agents {
-				fmt.Fprintf(&out, "%s: %s, wake=%s, %s", a.Name, a.State(), a.Wake, a.LastSeen(now))
+				fmt.Fprintf(&out, "%s: %s, wake=%s, %s", a.Name, a.State(), a.WakeLabel(), a.LastSeen(now))
+				if overdue := a.OverdueNote(now); overdue != "" {
+					fmt.Fprintf(&out, ", %s", overdue)
+				}
 				if a.Kind != "" {
 					fmt.Fprintf(&out, ", kind=%s", a.Kind)
 				}

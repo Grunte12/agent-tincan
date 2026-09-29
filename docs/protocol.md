@@ -224,6 +224,12 @@ Success returns `{"from": "0.7.0", "to": "0.8.0", "restart": "re-exec"}` (or `"e
 
 `GET /v1/agents` returns an `agents` array. Each entry optionally includes `queued` (queued or delivered requests), `oldest_queued_at` (their earliest creation timestamp), and `claimed` (requests with a live claim lease). Requests past their expiry, terminal requests, and pings are excluded. Zero counts and absent timestamps are omitted. Older clients ignore these additive fields; clients reading an older relay show no backlog. The roster remains visible to joined agents and admins; these counts reveal no request content and do not change the trust model.
 
+An entry for an agent on wake method `schedule` (it checks its inbox on its own interval and cannot be woken) also includes `check_every_seconds` (its configured interval), `expect_reply_seconds` (the interval plus a 5-minute grace for a late check), and `overdue` (true when its last inbox poll, or its join or the relay's start when it has none recorded, is more than two intervals plus the grace ago). All three are omitted for other agents and by older relays.
+
+## Schedule facts on send
+
+The `POST /v1/send` response is the queued request with one optional extra field, `target`, set only when the recipient is on wake method `schedule`: `{"check_every_seconds": 300, "expect_reply_seconds": 600, "overdue": false}`. It is omitted for other recipients, for requests held for owner approval, and by older relays, which older clients ignore. The relay does not store it, and `GET /v1/requests/{id}` never returns it; the tincan client copies it from the send response onto the result an ask returns, so the pending-reply text can say when to expect an answer.
+
 ## Ping capability
 
 Clients advertise `X-Tincan-Features: ping` on every call, but only polls (`GET /v1/poll`, full or peek) count: they come from the processes that receive requests. The relay admits a ping to a target once one of its polls has advertised support and none of its polls has lacked the header in the last 24 hours, so an older poller running under the same agent name keeps pings away from it. Sends, gets and replies never change this. The state is kept in memory and in the agent store. Versions remain informational, so development builds can advertise support. A `ping` send to a target that does not qualify returns HTTP 409 with an instruction to use `ask`. Older relays reject the unknown kind without delivering it.
