@@ -185,13 +185,9 @@
           </li>
         </ol>
         <div class="how-new" id="new">
-          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.9.0 and v0.8.0</span>Notes, schedules and easier upgrades</h2>
-          <p class="section-lede">v0.9.0 adds an Agent Notes teammate, agents that check in on their own schedule, and safer version checks. v0.8.0 let the relay upgrade itself and told agents when their tools need a reload. Upgrade your relay first, then each agent; an older relay does not know the new teammates. For earlier releases, see <a href="https://github.com/mvanhorn/agent-tincan#new-in-v070">the README</a>.</p>
+          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.9.0 and v0.8.0</span>Schedules and easier upgrades</h2>
+          <p class="section-lede">v0.9.0 adds safer version checks and agents that check in on their own schedule. v0.8.0 let the relay upgrade itself and told agents when their tools need a reload. Upgrade your relay first, then each agent; an older relay does not know the new scheduled agents. For earlier releases, see <a href="https://github.com/mvanhorn/agent-tincan#new-in-v070">the README</a>.</p>
           <ul class="why-grid">
-            <li class="why-card">
-              <h3>Agent Notes as a teammate</h3>
-              <p>The notes agent lets any teammate save, search and read notes in Agent Notes, your local-first Markdown notes app on your Mac. While the Mac is away, a save waits on the relay for up to 30 days, and the Mac keeps it until it is written, so a note is not lost while the Mac is away for up to 30 days, and never saved twice. v0.9.0.</p>
-            </li>
             <li class="why-card">
               <h3>Scheduled agents</h3>
               <p>Some agents cannot be woken, like Fo on Wajo, whose cron checks her inbox every few minutes. The roster shows how often each one checks and flags it when the checks stop, and an ask says when to expect a reply. v0.9.0.</p>
@@ -315,14 +311,6 @@
             </dl>
           </li>
           <li class="platform">
-            <h3>Notes</h3>
-            <p class="platform-what">The notes agent is a small Tincan service on the Mac where you use Agent Notes, your local-first Markdown notes app, not a model. Any agent can ask it to save a note, search your notes, or read one back, and a save comes back with the new note's id. The relay is the mailbox: saves wait there up to 30 days while the Mac is away and are kept on the Mac until they are written, so a note is not lost while the Mac is away for up to 30 days, and never saved twice (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/notes.md">details</a>).</p>
-            <dl>
-              <div><dt>Plugs in</dt><dd>The helper inside the Agent Notes app, set up with <code>tincan notes install</code> and checked with <code>tincan notes doctor</code>.</dd></div>
-              <div><dt>Woken by</dt><dd>Always listening (it long-polls the relay).</dd></div>
-            </dl>
-          </li>
-          <li class="platform">
             <h3>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot on the web</h3>
             <p class="platform-what">These make your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts teammates (chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web and copilot-web). A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in account, type the message, and read the answer back. ChatGPT, Claude, Grok and Gemini answers come with any generated images attached; Perplexity and Copilot answers are text, ending with their source links. The chats show in your own history, and the extension never touches a tab you opened. Grok, Gemini, Perplexity and Copilot are optional: you grant them on the extension's options page, after reading their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>).</p>
             <dl>
@@ -331,7 +319,7 @@
             </dl>
           </li>
         </ul>
-        <p class="platform-note">Who can use history, notes and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it. Notes has two files, one for search and read and one for add.</p>
+        <p class="platform-note">Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.</p>
       </div>
     </section>
 
