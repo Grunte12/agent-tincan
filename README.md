@@ -29,13 +29,13 @@ Contents:
 
 ## New in v0.9.0
 
-- A new teammate. The [notes agent](#the-notes-agent) is a service on the Mac where you use Agent Notes, your local-first Markdown notes app. Any teammate can save a note, search your notes, or read one back. The relay is the mailbox: an add waits up to 30 days while the Mac is away, and the Mac spools it until it is written, so a note is never lost or saved twice. Set it up with `tincan notes install` and check it with `tincan notes doctor` ([details](docs/adapters/notes.md)).
+- A new teammate. The [notes agent](#the-notes-agent) is a service on the Mac where you use Agent Notes, your local-first Markdown notes app. Any teammate can save a note, search your notes, or read one back. The relay is the mailbox: an add waits up to 30 days while the Mac is away, and the Mac spools it until it is written, so a note is not lost while the Mac is away for up to 30 days, and never saved twice. Set it up with `tincan notes install` and check it with `tincan notes doctor` ([details](docs/adapters/notes.md)).
 - [Scheduled agents](docs/adapters/scheduled.md): the `schedule` wake method and `scheduled` kind are for agents that cannot be woken but check their inbox on their own cron, like Fo, an assistant on Wajo. The roster shows `wake=schedule (every 5m)` and marks the agent overdue when its checks stop, and a pending ask tells the sender when to expect a reply.
 - Safer [version checks](#upgrades). `tincan doctor` warns instead of failing when the client is newer than the relay. `tincan upgrade` never downgrades a newer client, including a prerelease to the stable release before it, unless you pass `--force`. `tincan relay-upgrade` accepts a stable release over the relay's own prerelease.
 
 Before you upgrade:
 
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.9.0`. Then run `tincan upgrade` on each agent. An older relay refuses the `notes` and `scheduled` kinds and will not start with a `schedule` entry in `wake.json`.
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.9.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.9.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. An older relay refuses the `notes` and `scheduled` kinds and will not start with a `schedule` entry in `wake.json`.
 - The notes agent needs an Agent Notes build whose helper supports `create --idempotency-key`; `tincan notes doctor` reports an older one as `helper_too_old`.
 
 ## New in v0.8.0
