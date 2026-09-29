@@ -2,19 +2,26 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/council"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
@@ -31,8 +38,273 @@ func councilCmd() *cobra.Command {
 			"See docs/adapters/council.md.",
 		Args: cobra.NoArgs,
 	}
-	cmd.AddCommand(councilServeCmd(), councilInstallCmd(), councilDoctorCmd())
+	cmd.AddCommand(councilServeCmd(), councilInstallCmd(), councilDoctorCmd(), councilLeaderboardCmd())
+	cmd.Use = `council ["question" | command]`
+	cmd.Long = "Put a question to every model on the team: tincan council \"question\" sends it to Council as this\n" +
+		"agent, shows each stage as Council reports it, prints the verdict and ranking, and saves the report\n" +
+		"and scorecard to a local folder. Council asks are held for the owner's approval; run in a terminal on\n" +
+		"an admin device, tincan council approves its own request, and anywhere else it waits for approval\n" +
+		"like any ask.\n\n" + cmd.Long
+	cmd.Args = cobra.ArbitraryArgs
+	var to, chairman string
+	var members, attach []string
+	var asJSON bool
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		question := strings.TrimSpace(strings.Join(args, " "))
+		if question == "" {
+			return errors.New("the question is empty")
+		}
+		form := struct {
+			Question string   `json:"question"`
+			Members  []string `json:"members,omitempty"`
+			Chairman string   `json:"chairman,omitempty"`
+		}{question, members, chairman}
+		return convene(cmd, "Convening", to, form, attach, asJSON, true)
+	}
+	cmd.Flags().StringVar(&to, "to", "", "the Council agent to ask (default: the roster's council-kind agent, else council)")
+	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file every member receives with the question (repeatable)")
+	cmd.Flags().StringSliceVar(&members, "members", nil, "the members to ask instead of the default roster (comma-separated or repeatable)")
+	cmd.Flags().StringVar(&chairman, "chairman", "", "the member to try first as chairman")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the council-result block and exit 0 completed, 1 failed or declined, 2 still held")
 	return cmd
+}
+
+func councilLeaderboardCmd() *cobra.Command {
+	var to, category string
+	var card bool
+	cmd := &cobra.Command{
+		Use:   "leaderboard",
+		Short: "Show Council's leaderboard, overall or for one category, and optionally save its card",
+		Long: "Asks Council for its leaderboard: members ranked by wins, then mean score from blind peer review.\n" +
+			"--card saves the leaderboard card (a PNG sized for posting) to a local folder and prints its path.\n" +
+			"Like any council ask it is held for the owner's approval unless run in a terminal on an admin device.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			form := struct {
+				Op       string `json:"op"`
+				Category string `json:"category,omitempty"`
+			}{string(council.OpLeaderboard), category}
+			return convene(cmd, "Asking", to, form, nil, false, card)
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", "", "the Council agent to ask (default: the roster's council-kind agent, else council)")
+	cmd.Flags().StringVar(&category, "category", "", "one category's leaderboard (default: overall)")
+	cmd.Flags().BoolVar(&card, "card", false, "save the leaderboard card as a PNG and print its path")
+	return cmd
+}
+
+// councilPollEvery is how often tincan council checks its request for a
+// new progress note or the reply.
+var councilPollEvery = 2 * time.Second
+
+// councilInteractive reports whether the owner is at a terminal: stdin
+// and stdout are both terminals. A script or an agent's shell is not, so
+// its council waits for approval like any other ask (KTD14).
+var councilInteractive = func() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// convene sends form to Council as this agent, approves the request when
+// the relay holds it and the owner is at a terminal on an admin device,
+// shows progress notes as stage lines until the reply comes, and prints
+// it. With saveFiles it saves the reply's attachments (a council's report
+// and scorecard, the leaderboard's card) and prints their paths.
+func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJSON, saveFiles bool) error {
+	r, cfg, err := connect()
+	if err != nil {
+		return err
+	}
+	ctx := cmd.Context()
+	if to == "" {
+		to = councilAgent(ctx, r)
+	}
+	raw, err := json.Marshal(form)
+	if err != nil {
+		return err
+	}
+	me := cfg.Agent
+	if who, err := r.WhoAmI(ctx); err == nil {
+		me = who.Name
+	}
+	ups, err := r.UploadFiles(ctx, attach)
+	if err != nil {
+		return err
+	}
+	req, err := r.SendAttached(ctx, to, "council: "+string(raw), envelope.KindAsk, "", client.AttachmentIDs(ups), false)
+	if err != nil {
+		return err
+	}
+	// With --json, stdout carries only the result; the rest goes to stderr.
+	info := cmd.OutOrStdout()
+	if asJSON {
+		info = cmd.ErrOrStderr()
+	}
+	fmt.Fprintf(info, "%s %s as %s (request %s).\n", verb, to, me, req.ID)
+
+	if req.Status == envelope.StatusHeld {
+		if why := selfApprove(ctx, req.ID); why != "" {
+			fmt.Fprintf(info, "Request %s: held, waiting for the owner's approval (%s). Approve it on an admin device with: tincan approve %s. Then check on it with: tincan get %s\n",
+				req.ID, why, req.ID, req.ID)
+			if asJSON {
+				return printResultJSON(cmd.OutOrStdout(), client.Result{Request: req, Status: req.Status})
+			}
+			return nil
+		}
+		fmt.Fprintf(info, "Approved request %s on this admin device.\n", req.ID)
+	}
+
+	res, err := waitCouncil(ctx, r, req.ID, info)
+	if err != nil {
+		return err
+	}
+	var saved []string
+	if res.Reply != nil && saveFiles {
+		saved = saveCouncilFiles(ctx, r, cfg, req.ID, res.Reply.Attachments, cmd.ErrOrStderr())
+	}
+	if asJSON {
+		block, ok := councilResultBlock(res)
+		if !ok {
+			return printResultJSON(cmd.OutOrStdout(), res)
+		}
+		for _, p := range saved {
+			fmt.Fprintf(info, "Saved %s\n", p)
+		}
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), block); err != nil {
+			return err
+		}
+		if res.Status != envelope.StatusAnswered {
+			return &ExitError{Code: 1, Silent: true}
+		}
+		return nil
+	}
+	if res.Reply != nil {
+		cmd.Print(strings.TrimRight(res.Reply.Body, "\n") + "\n")
+	} else {
+		cmd.Print(client.FormatResult(res))
+	}
+	for _, p := range saved {
+		cmd.Printf("Saved %s\n", p)
+	}
+	return nil
+}
+
+// councilAgent is the roster's council-kind agent, or "council" when the
+// roster has none or cannot be read.
+func councilAgent(ctx context.Context, r *client.Relay) string {
+	ro, err := r.Roster(ctx)
+	if err != nil {
+		return council.DefaultAgentName
+	}
+	for _, a := range ro.Agents {
+		if a.Kind == onboard.KindCouncil {
+			return a.Name
+		}
+	}
+	return council.DefaultAgentName
+}
+
+// selfApprove approves held request id through the same path as tincan
+// approve, but only when the owner is at a terminal (KTD14). It returns
+// why the request is still held, or "" once approved.
+func selfApprove(ctx context.Context, id string) string {
+	if !councilInteractive() {
+		return "not run from a terminal, so it waits like any agent's ask"
+	}
+	r, err := adminRelay("", "")
+	if err == nil {
+		err = r.Raw(ctx, "POST", "/v1/admin/requests/"+url.PathEscape(id)+"/approve", map[string]string{"reason": ""}, nil)
+	}
+	switch {
+	case err == nil:
+		return ""
+	case client.IsStatus(err, http.StatusForbidden):
+		return "this is not an admin device"
+	default:
+		return "could not approve it here: " + err.Error()
+	}
+}
+
+// waitCouncil checks request id every councilPollEvery until it is done,
+// printing each new progress note to w as a stage line.
+func waitCouncil(ctx context.Context, r *client.Relay, id string, w io.Writer) (client.Result, error) {
+	var last envelope.Progress
+	for {
+		res, err := r.Get(ctx, id, 0)
+		if err != nil {
+			return res, err
+		}
+		if p := res.Progress; p != nil && (p.Note != last.Note || !p.At.Equal(last.At)) {
+			last = *p
+			fmt.Fprintf(w, "Council: %s\n", p.Note)
+		}
+		if res.Done() {
+			return res, nil
+		}
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(councilPollEvery):
+		}
+	}
+}
+
+// saveCouncilFiles downloads a reply's attachments into this agent's
+// attachments folder under council/<request id> (0700, files 0600), named
+// by attachment id, and returns their paths. A file that cannot be saved
+// is reported on errOut and skipped.
+func saveCouncilFiles(ctx context.Context, r *client.Relay, cfg client.Config, id string, atts []envelope.Attachment, errOut io.Writer) []string {
+	if len(atts) == 0 {
+		return nil
+	}
+	dir := filepath.Join(client.AttachmentDir(cfg), "council", filepath.Base(id))
+	var paths []string
+	for _, a := range atts {
+		data, d, err := r.FetchAttachment(ctx, a.ID)
+		if err == nil {
+			var p string
+			if p, err = client.SaveAttachmentFile(dir, a.ID, d.MIME, data); err == nil {
+				// The report is HTML, which the attachment allowlist saves
+				// as .bin; give it an extension a browser opens.
+				if client.MediaType(d.MIME) == "text/html" {
+					html := strings.TrimSuffix(p, ".bin") + ".html"
+					if err = os.Rename(p, html); err == nil {
+						p = html
+					}
+				}
+				paths = append(paths, p)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(errOut, "tincan council: could not save %s (%s): %v\n", a.Name, a.ID, err)
+		}
+	}
+	return paths
+}
+
+// councilResultBlock is the JSON in the reply's last fenced
+// council-result block.
+func councilResultBlock(res client.Result) (string, bool) {
+	if res.Reply == nil {
+		return "", false
+	}
+	const open = "```council-result\n"
+	body := res.Reply.Body
+	i := strings.LastIndex(body, open)
+	if i < 0 {
+		return "", false
+	}
+	block, _, ok := strings.Cut(body[i+len(open):], "\n```")
+	if !ok {
+		return "", false
+	}
+	block = strings.TrimSpace(block)
+	if !json.Valid([]byte(block)) {
+		return "", false
+	}
+	return block, true
 }
 
 // councilDir resolves the --dir flag: the service's own folder, where
