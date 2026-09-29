@@ -118,7 +118,7 @@ func TestStoreRecordScoresIdempotent(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, filepath.Join(t.TempDir(), "council.db"))
 	putCouncil(t, s, CouncilRecord{RequestID: "r1", State: CouncilCompleted, Category: "writing"})
-	scores := []ScoreRow{
+	scores := []Standing{
 		{Member: "claude-web", Score: 0.9, Placement: 1, Ballots: 4},
 		{Member: "gemini-web", Score: 0.4, Placement: 2, Ballots: 4},
 	}
@@ -151,11 +151,11 @@ func TestStoreFailedCouncilRecordsNoScores(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "council.db"))
 	putCouncil(t, s, CouncilRecord{RequestID: "r1", State: CouncilFailed})
 
-	err := s.RecordScores(ctx, "r1", "debugging", []ScoreRow{{Member: "grok-web", Score: 1, Placement: 1, Ballots: 3}})
+	err := s.RecordScores(ctx, "r1", "debugging", []Standing{{Member: "grok-web", Score: 1, Placement: 1, Ballots: 3}})
 	if !errors.Is(err, ErrCouncilNotCompleted) {
 		t.Errorf("err = %v, want ErrCouncilNotCompleted", err)
 	}
-	if err := s.RecordScores(ctx, "unknown", "debugging", []ScoreRow{{Member: "grok-web", Score: 1, Placement: 1, Ballots: 3}}); !errors.Is(err, ErrCouncilNotFound) {
+	if err := s.RecordScores(ctx, "unknown", "debugging", []Standing{{Member: "grok-web", Score: 1, Placement: 1, Ballots: 3}}); !errors.Is(err, ErrCouncilNotFound) {
 		t.Errorf("unknown council err = %v, want ErrCouncilNotFound", err)
 	}
 	board, err := s.Leaderboard(ctx, "")
@@ -170,7 +170,7 @@ func TestStoreFailedCouncilRecordsNoScores(t *testing.T) {
 func TestStoreLeaderboard(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, filepath.Join(t.TempDir(), "council.db"))
-	record := func(id, category string, rows ...ScoreRow) {
+	record := func(id, category string, rows ...Standing) {
 		t.Helper()
 		putCouncil(t, s, CouncilRecord{RequestID: id, State: CouncilCompleted, Category: category})
 		if err := s.RecordScores(ctx, id, category, rows); err != nil {
@@ -178,19 +178,19 @@ func TestStoreLeaderboard(t *testing.T) {
 		}
 	}
 	record("c1", "debugging",
-		ScoreRow{Member: "claude-web", Score: 0.8, Placement: 1, Ballots: 3},
-		ScoreRow{Member: "chatgpt-web", Score: 0.6, Placement: 2, Ballots: 3},
-		ScoreRow{Member: "gemini-web", Score: 0.1, Placement: 3, Ballots: 3},
+		Standing{Member: "claude-web", Score: 0.8, Placement: 1, Ballots: 3},
+		Standing{Member: "chatgpt-web", Score: 0.6, Placement: 2, Ballots: 3},
+		Standing{Member: "gemini-web", Score: 0.1, Placement: 3, Ballots: 3},
 	)
 	record("c2", "debugging",
-		ScoreRow{Member: "chatgpt-web", Score: 1.0, Placement: 1, Ballots: 3},
-		ScoreRow{Member: "claude-web", Score: 0.5, Placement: 2, Ballots: 3},
-		ScoreRow{Member: "gemini-web", Score: 0.0, Placement: 3, Ballots: 3},
+		Standing{Member: "chatgpt-web", Score: 1.0, Placement: 1, Ballots: 3},
+		Standing{Member: "claude-web", Score: 0.5, Placement: 2, Ballots: 3},
+		Standing{Member: "gemini-web", Score: 0.0, Placement: 3, Ballots: 3},
 	)
 	record("c3", "writing",
-		ScoreRow{Member: "gemini-web", Score: 0.9, Placement: 1, Ballots: 3},
-		ScoreRow{Member: "claude-web", Score: 0.2, Placement: 2, Ballots: 3},
-		ScoreRow{Member: "grok-web", Score: 0.1, Placement: 3, Ballots: 3},
+		Standing{Member: "gemini-web", Score: 0.9, Placement: 1, Ballots: 3},
+		Standing{Member: "claude-web", Score: 0.2, Placement: 2, Ballots: 3},
+		Standing{Member: "grok-web", Score: 0.1, Placement: 3, Ballots: 3},
 	)
 
 	type want struct {

@@ -26,7 +26,7 @@ type Verdict struct {
 	// Labels maps each label the chairman saw to the member whose answer
 	// it stood for, so authorship can be revealed after judging.
 	Labels map[string]string
-	// Unavailable is set when no candidate delivered a verdict (R17); the
+	// Unavailable is set when no candidate delivered a verdict; the
 	// council still completes with its ranking, and Reason says why.
 	Unavailable bool
 	Reason      string
@@ -67,7 +67,7 @@ func (e *Engine) chair(ctx context.Context, c Council, out Outcome) (Verdict, er
 		shown[i] = labeledAnswer{Label: labels[i], Text: a.Copy}
 		v.Labels[labels[i]] = a.Member
 	}
-	body, _, err := chairmanPrompt(c.Question, tally, shown, e.Config.Categories, randomNonce())
+	body, err := chairmanPrompt(c.Question, tally, shown, e.Config.Categories, randomNonce())
 	if err != nil {
 		v.Unavailable, v.Reason = true, err.Error()
 		return v, nil
@@ -95,8 +95,7 @@ func (e *Engine) chair(ctx context.Context, c Council, out Outcome) (Verdict, er
 		}
 		sections, ok := parseVerdict(r.Reply.Body)
 		if !ok {
-			detail, _ := truncate(strings.TrimSpace(r.Reply.Body), 300)
-			v.Failed = append(v.Failed, Absence{Member: cand, Stage: StageChairman, Reason: AbsentNoVerdict, Detail: detail})
+			v.Failed = append(v.Failed, Absence{Member: cand, Stage: StageChairman, Reason: AbsentNoVerdict, Detail: detail(r.Reply.Body)})
 			continue
 		}
 		v.Chairman = cand

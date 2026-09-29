@@ -3,7 +3,7 @@ package council
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,8 +31,11 @@ type Finished struct {
 // Status is the reply status for the council's state: a completed council
 // is answered, one without a quorum failed, and one that asked nobody
 // (bad form, too-deep chain, too few eligible members) declined.
-func (f Finished) Status() envelope.Status {
-	switch f.Outcome.State {
+func (f Finished) Status() envelope.Status { return f.Outcome.State.replyStatus() }
+
+// replyStatus is the reply status for a council that finished in state s.
+func (s CouncilState) replyStatus() envelope.Status {
+	switch s {
 	case CouncilCompleted:
 		return envelope.StatusAnswered
 	case CouncilFailed:
@@ -41,19 +44,10 @@ func (f Finished) Status() envelope.Status {
 	return envelope.StatusDeclined
 }
 
-// answerRef is a chairman's reference to an answer by its label.
-var answerRef = regexp.MustCompile(`\b((?i:answer|response)\s+)([A-Z]{1,2})\b`)
-
 // revealLabels names the author after every "Answer K" in the chairman's
 // text, now that judging is over.
 func revealLabels(s string, labels map[string]string) string {
-	return answerRef.ReplaceAllStringFunc(s, func(m string) string {
-		sub := answerRef.FindStringSubmatch(m)
-		if member, ok := labels[sub[2]]; ok {
-			return m + " (" + member + ")"
-		}
-		return m
-	})
+	return replaceLabels(s, labels, func(ref, member string) string { return ref + " (" + member + ")" })
 }
 
 // firstLine is s's first non-empty line, trimmed.
@@ -89,7 +83,7 @@ func (f Finished) statusLine() string {
 // absences is every member missing from a stage, the chairman candidates
 // that gave no verdict last.
 func (f Finished) absences() []Absence {
-	return append(append([]Absence(nil), f.Outcome.Absent...), f.Outcome.Verdict.Failed...)
+	return slices.Concat(f.Outcome.Absent, f.Outcome.Verdict.Failed)
 }
 
 // verdictShown is whether the council has a verdict to show.
@@ -113,6 +107,11 @@ func (f Finished) category() string {
 func Reply(f Finished) (string, envelope.Status) {
 	o := f.Outcome
 	v := o.Verdict
+	// A failed council carries the answers it received, cut to fit.
+	var received []Answer
+	if o.State == CouncilFailed {
+		received = receivedAnswers(o.Answers)
+	}
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
@@ -172,7 +171,7 @@ func Reply(f Finished) (string, envelope.Status) {
 	if o.State == CouncilFailed && len(o.Answers) > 0 {
 		line("")
 		line("Answers received:")
-		for _, a := range receivedAnswers(o.Answers) {
+		for _, a := range received {
 			line("")
 			line("== %s ==", a.Member)
 			line("%s", strings.TrimSpace(a.Body))
@@ -188,9 +187,9 @@ func Reply(f Finished) (string, envelope.Status) {
 		}
 	}
 
-	block, _ := json.MarshalIndent(f.result(), "", "  ")
+	block, _ := json.MarshalIndent(f.result(received), "", "  ")
 	line("")
-	line("```council-result")
+	line("%s", ResultFence)
 	line("%s", block)
 	line("```")
 	return b.String(), f.Status()
@@ -202,6 +201,9 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
+
+// ResultFence opens the reply's fenced council-result JSON block.
+const ResultFence = "```council-result"
 
 // councilResult is the council-result block.
 type councilResult struct {
@@ -254,7 +256,9 @@ type resultMember struct {
 	Reason string `json:"reason"`
 }
 
-func (f Finished) result() councilResult {
+// result is the council-result block; received are a failed council's
+// answers as the reply carries them.
+func (f Finished) result(received []Answer) councilResult {
 	o := f.Outcome
 	v := o.Verdict
 	r := councilResult{
@@ -286,10 +290,8 @@ func (f Finished) result() councilResult {
 	for _, s := range o.Standings {
 		r.Ranking = append(r.Ranking, resultRank{Member: s.Member, Placement: s.Placement, Score: s.Score, Ballots: s.Ballots})
 	}
-	if o.State == CouncilFailed {
-		for _, a := range receivedAnswers(o.Answers) {
-			r.Answers = append(r.Answers, resultAnswer{Member: a.Member, Body: a.Body})
-		}
+	for _, a := range received {
+		r.Answers = append(r.Answers, resultAnswer{Member: a.Member, Body: a.Body})
 	}
 	for _, a := range f.absences() {
 		r.Absent = append(r.Absent, resultAbsent{Member: a.Member, Stage: a.Stage, Reason: a.Reason})
@@ -308,15 +310,13 @@ const receivedAnswerBudget = 32 << 10
 
 // receivedAnswers returns the answers cut to share receivedAnswerBudget.
 func receivedAnswers(answers []Answer) []Answer {
-	lens := make([]int, len(answers))
-	for i, a := range answers {
-		lens[i] = len(a.Body)
-	}
-	shares := fit(lens, receivedAnswerBudget)
+	bodies, _ := truncateAll(answers, fit(lengths(answers), receivedAnswerBudget))
 	out := make([]Answer, len(answers))
 	for i, a := range answers {
-		a.Body, _ = truncate(a.Body, shares[i])
+		a.Body = bodies[i]
 		out[i] = a
 	}
 	return out
 }
+
+func (a Answer) parts() (string, string) { return a.Member, a.Body }

@@ -7,7 +7,6 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -281,10 +280,6 @@ func (c *canvas) encode(w io.Writer) error {
 	return png.Encode(w, c.img)
 }
 
-// cardLabel is a chairman's "Answer K" reference, replaced on the card by
-// the member's name.
-var cardLabel = regexp.MustCompile(`\b(?i:answer|response)\s+([A-Z]{1,2})\b`)
-
 // markdownMarks are markdown characters dropped from card text.
 var markdownMarks = strings.NewReplacer("**", "", "__", "", "`", "", "*", "")
 
@@ -300,12 +295,8 @@ func verdictLine(f Finished) string {
 	case o.Verdict.Unavailable:
 		return "Verdict unavailable. Ranked by blind peer review alone."
 	}
-	rec := cardLabel.ReplaceAllStringFunc(o.Verdict.Recommendation, func(m string) string {
-		if member, ok := o.Verdict.Labels[cardLabel.FindStringSubmatch(m)[1]]; ok {
-			return member
-		}
-		return m
-	})
+	// Each "Answer K" is replaced by the member's name.
+	rec := replaceLabels(o.Verdict.Recommendation, o.Verdict.Labels, func(_, member string) string { return member })
 	rec = markdownMarks.Replace(rec)
 	return strings.TrimLeft(strings.Join(strings.Fields(rec), " "), "#>- ")
 }

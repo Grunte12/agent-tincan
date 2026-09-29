@@ -45,17 +45,6 @@ type CouncilRecord struct {
 	UpdatedAt  time.Time
 }
 
-// ScoreRow is one member's peer score in one completed council.
-type ScoreRow struct {
-	RequestID string
-	Member    string
-	Score     float64
-	Placement int // 1 is the council's top answer
-	Ballots   int // valid peer ballots behind the score
-	Category  string
-	CreatedAt time.Time
-}
-
 // LeaderboardRow is one member's standing across scored councils.
 type LeaderboardRow struct {
 	Member    string
@@ -196,7 +185,7 @@ func (s *Store) UnfinishedCouncils(ctx context.Context) ([]CouncilRecord, error)
 // RecordScores stores the peer scores of a completed council under category.
 // It is idempotent per request id: once a council has scores, later calls
 // change nothing, so a restart never double-counts.
-func (s *Store) RecordScores(ctx context.Context, requestID, category string, scores []ScoreRow) error {
+func (s *Store) RecordScores(ctx context.Context, requestID, category string, scores []Standing) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -233,12 +222,19 @@ func (s *Store) RecordScores(ctx context.Context, requestID, category string, sc
 // Leaderboard ranks members by wins, then mean peer score. An empty category
 // covers every council; otherwise only councils in that category count.
 func (s *Store) Leaderboard(ctx context.Context, category string) ([]LeaderboardRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT member, COUNT(*), AVG(score), SUM(placement = 1)
-FROM scores
-WHERE ? = '' OR category = ?
-GROUP BY member
-ORDER BY SUM(placement = 1) DESC, AVG(score) DESC, member`, category, category)
+	// Two statements rather than one "? = '' OR category = ?", so a
+	// category's leaderboard can use the category index.
+	const (
+		selectFrom = `SELECT member, COUNT(*), AVG(score), SUM(placement = 1) FROM scores `
+		groupOrder = ` GROUP BY member ORDER BY SUM(placement = 1) DESC, AVG(score) DESC, member`
+	)
+	var rows *sql.Rows
+	var err error
+	if category == "" {
+		rows, err = s.db.QueryContext(ctx, selectFrom+groupOrder)
+	} else {
+		rows, err = s.db.QueryContext(ctx, selectFrom+`WHERE category = ?`+groupOrder, category)
+	}
 	if err != nil {
 		return nil, err
 	}

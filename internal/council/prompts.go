@@ -94,7 +94,7 @@ func answerPrompt(question string, inline []contextFile, attached, left []string
 	if fixed > promptCap {
 		return "", nil, errPromptTooLong
 	}
-	texts, cut := fitTexts(inline, fit(textLens(inline), promptCap-fixed))
+	texts, cut := truncateAll(inline, fit(lengths(inline), promptCap-fixed))
 	return build(texts), cut, nil
 }
 
@@ -104,21 +104,35 @@ func writeContext(b *strings.Builder, files []contextFile, texts []string, nonce
 	}
 }
 
-func textLens(files []contextFile) []int {
-	lens := make([]int, len(files))
-	for i, f := range files {
-		lens[i] = len(f.Text)
+// textPiece is a piece of prompt text that may be cut to fit: a context
+// file, an answer, or a labeled answer. name is what a cut is reported by.
+type textPiece interface {
+	parts() (name, text string)
+}
+
+func (f contextFile) parts() (string, string)   { return f.Name, f.Text }
+func (a labeledAnswer) parts() (string, string) { return a.Label, a.Text }
+
+// lengths is each piece's text length.
+func lengths[T textPiece](pieces []T) []int {
+	lens := make([]int, len(pieces))
+	for i, p := range pieces {
+		_, text := p.parts()
+		lens[i] = len(text)
 	}
 	return lens
 }
 
-func fitTexts(files []contextFile, allot []int) ([]string, []string) {
-	texts := make([]string, len(files))
+// truncateAll truncates each piece's text to its allotment and returns
+// the texts and the names of the pieces it cut.
+func truncateAll[T textPiece](pieces []T, allot []int) ([]string, []string) {
+	texts := make([]string, len(pieces))
 	var cut []string
-	for i, f := range files {
+	for i, p := range pieces {
+		name, text := p.parts()
 		var c bool
-		if texts[i], c = truncate(f.Text, allot[i]); c {
-			cut = append(cut, f.Name)
+		if texts[i], c = truncate(text, allot[i]); c {
+			cut = append(cut, name)
 		}
 	}
 	return texts, cut
@@ -140,9 +154,9 @@ FINAL RANKING:
 // reviewPrompt is one reviewer's prompt: the question, the context files,
 // and the answers in the order given, fit to promptCap. Context text is
 // cut first, then the rest is shared evenly across the answers. It returns
-// the labels of answers that were cut and the names of cut context files,
-// and errPromptTooLong when even the fixed parts do not fit.
-func reviewPrompt(question string, inline []contextFile, answers []labeledAnswer, nonce string) (string, []string, []string, error) {
+// the labels of answers that were cut, and errPromptTooLong when even the
+// fixed parts do not fit.
+func reviewPrompt(question string, inline []contextFile, answers []labeledAnswer, nonce string) (string, []string, error) {
 	build := func(ctxTexts, ansTexts []string) string {
 		var b strings.Builder
 		b.WriteString(newChat + "\n" + fmt.Sprintf(reviewInstructions, nonce) + "\n\nQuestion:\n" + question)
@@ -156,36 +170,14 @@ func reviewPrompt(question string, inline []contextFile, answers []labeledAnswer
 	fixed := len(build(make([]string, len(inline)), make([]string, len(answers)))) + truncReserve*(len(inline)+len(answers))
 	avail := promptCap - fixed
 	if avail < 0 {
-		return "", nil, nil, errPromptTooLong
+		return "", nil, errPromptTooLong
 	}
-	ansLens := answerLens(answers)
-	ctxAllot := fit(textLens(inline), avail-sum(ansLens))
-	ctxTexts, ctxCut := fitTexts(inline, ctxAllot)
+	ansLens := lengths(answers)
+	ctxAllot := fit(lengths(inline), avail-sum(ansLens))
+	ctxTexts, _ := truncateAll(inline, ctxAllot)
 	ansAllot := fit(ansLens, avail-sum(ctxAllot))
-	ansTexts, cut := cutAnswers(answers, ansAllot)
-	return build(ctxTexts, ansTexts), cut, ctxCut, nil
-}
-
-func answerLens(answers []labeledAnswer) []int {
-	lens := make([]int, len(answers))
-	for i, a := range answers {
-		lens[i] = len(a.Text)
-	}
-	return lens
-}
-
-// cutAnswers truncates each answer to its allotment and returns the texts
-// and the labels of the answers it cut.
-func cutAnswers(answers []labeledAnswer, allot []int) ([]string, []string) {
-	texts := make([]string, len(answers))
-	var cut []string
-	for i, a := range answers {
-		var c bool
-		if texts[i], c = truncate(a.Text, allot[i]); c {
-			cut = append(cut, a.Label)
-		}
-	}
-	return texts, cut
+	ansTexts, cut := truncateAll(answers, ansAllot)
+	return build(ctxTexts, ansTexts), cut, nil
 }
 
 // tallyLine is one answer's line in the chairman's peer tally.
@@ -210,10 +202,9 @@ MINORITY: a minority answer worth a second look and why, or "none"`
 
 // chairmanPrompt is the chairman's prompt: the question, the peer tally,
 // and the answers in the order given, fit to promptCap by sharing the room
-// the fixed parts leave across the answers. It returns the labels of
-// answers that were cut, and errPromptTooLong when even the fixed parts do
-// not fit.
-func chairmanPrompt(question string, tally []tallyLine, answers []labeledAnswer, categories []string, nonce string) (string, []string, error) {
+// the fixed parts leave across the answers. It returns errPromptTooLong
+// when even the fixed parts do not fit.
+func chairmanPrompt(question string, tally []tallyLine, answers []labeledAnswer, categories []string, nonce string) (string, error) {
 	build := func(texts []string) string {
 		var b strings.Builder
 		b.WriteString(newChat + "\n" + fmt.Sprintf(chairmanInstructions, nonce) + "\n\nQuestion:\n" + question + "\n\nPeer tally, best first:")
@@ -232,8 +223,8 @@ func chairmanPrompt(question string, tally []tallyLine, answers []labeledAnswer,
 	}
 	fixed := len(build(make([]string, len(answers)))) + truncReserve*len(answers)
 	if fixed > promptCap {
-		return "", nil, errPromptTooLong
+		return "", errPromptTooLong
 	}
-	texts, cut := cutAnswers(answers, fit(answerLens(answers), promptCap-fixed))
-	return build(texts), cut, nil
+	texts, _ := truncateAll(answers, fit(lengths(answers), promptCap-fixed))
+	return build(texts), nil
 }

@@ -7,16 +7,12 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
+	"github.com/mvanhorn/agent-tincan/internal/policy"
 )
 
 // MinMembers is the smallest council: fewer members cannot rank each
 // other meaningfully once each one's vote on its own answer is dropped.
 const MinMembers = 3
-
-// relayHopLimit mirrors the relay's hop limit (policy.Config.HopLimit's
-// default). A convening request at the limit leaves no hop for the asks
-// Council would send to its members.
-const relayHopLimit = 4
 
 // Exclusion reasons, one label per reason.
 const (
@@ -57,8 +53,10 @@ type Eligibility struct {
 // chair, so a council cannot widen who reaches whom.
 func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Request) Eligibility {
 	var e Eligibility
-	if conv.Hop >= relayHopLimit {
-		e.Decline = fmt.Sprintf("the request chain is too deep: it is at hop %d of %d, so Council cannot ask anyone", conv.Hop, relayHopLimit)
+	// A convening request at the relay's hop limit leaves no hop for the
+	// asks Council would send to its members.
+	if conv.Hop >= policy.DefaultHopLimit {
+		e.Decline = fmt.Sprintf("the request chain is too deep: it is at hop %d of %d, so Council cannot ask anyone", conv.Hop, policy.DefaultHopLimit)
 		return e
 	}
 	inChain := func(name string) bool { return name == conv.From || slices.Contains(conv.Chain, name) }
@@ -69,9 +67,9 @@ func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Req
 	for _, m := range roster {
 		profiles[m.Name] = onboard.ProfileOf(m)
 	}
-	// fit is "" for an agent that may sit or chair when named, else the
-	// reason it may not.
-	fit := func(name string) string {
+	// mayName is "" for an agent that may sit or chair when named, else
+	// the reason it may not.
+	mayName := func(name string) string {
 		if listed(name) {
 			return ""
 		}
@@ -85,7 +83,7 @@ func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Req
 			e.Decline = fmt.Sprintf("%s is not on the roster", name)
 			return e
 		}
-		if r := fit(name); r != "" && !inChain(name) {
+		if r := mayName(name); r != "" && !inChain(name) {
 			e.Decline = fmt.Sprintf("%s cannot sit on a council: %s. The owner can list it in council.json", name, r)
 			return e
 		}
@@ -126,7 +124,7 @@ func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Req
 		}
 		// Not an agent name: every agent of that kind, in roster order.
 		for _, m := range roster {
-			if profiles[m.Name].Kind == c && fit(m.Name) == "" {
+			if profiles[m.Name].Kind == c && mayName(m.Name) == "" {
 				candidates = append(candidates, m.Name)
 			}
 		}

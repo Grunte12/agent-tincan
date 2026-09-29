@@ -23,8 +23,7 @@ const DefaultAgentName = "council"
 
 // DefaultRenewEvery is how often every queued and running council's
 // claim is renewed with a progress note. It stays well under the relay's
-// 30-minute claim lease, which a council waiting in the queue can outlast
-// (KTD2).
+// 30-minute claim lease, which a council waiting in the queue can outlast.
 const DefaultRenewEvery = 5 * time.Minute
 
 // handleTimeout bounds handling one delivered request on the poll loop:
@@ -45,9 +44,6 @@ type ServiceConfig struct {
 	// Relay is the client the service polls, asks members, and replies
 	// with, as its own agent identity.
 	Relay *client.Relay
-	// Agent is the service's agent name, used in logs (DefaultAgentName
-	// when empty).
-	Agent string
 	// Config is council.json.
 	Config Config
 	// Store keeps councils and scores.
@@ -66,10 +62,9 @@ type ServiceConfig struct {
 
 // Service is the Council teammate. It claims each convening request as
 // soon as it is delivered and runs councils one at a time from a queue,
-// since each web member handles one ask at a time anyway (KTD2).
+// since each web member handles one ask at a time anyway.
 type Service struct {
 	relay      *client.Relay
-	agent      string
 	cfg        Config
 	store      *Store
 	reportDir  string
@@ -96,7 +91,6 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	}
 	s := &Service{
 		relay:      cfg.Relay,
-		agent:      cfg.Agent,
 		cfg:        cfg.Config,
 		store:      cfg.Store,
 		reportDir:  cfg.ReportDir,
@@ -105,9 +99,6 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		log:        cfg.Log,
 		notes:      map[string]string{},
 		wake:       make(chan struct{}, 1),
-	}
-	if s.agent == "" {
-		s.agent = DefaultAgentName
 	}
 	if s.renewEvery <= 0 {
 		s.renewEvery = DefaultRenewEvery
@@ -125,7 +116,7 @@ func (s *Service) logf(format string, args ...any) {
 
 // Run refuses to serve unless the relay stores kind council for this
 // agent: only then does the relay hold agents' councils for the owner's
-// approval (KTD14). It then queues the councils a previous run left
+// approval. It then queues the councils a previous run left
 // unfinished, and polls, runs, and renews claims until ctx is cancelled.
 func (s *Service) Run(ctx context.Context) error {
 	me, err := s.relay.WhoAmI(ctx)
@@ -184,7 +175,7 @@ func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.logf("request %s: panic: %v", req.ID, p)
-			s.reply(hctx, req, "Council hit an internal error handling this request.", envelope.StatusFailed)
+			s.sendFinal(hctx, req, "Council hit an internal error handling this request.", envelope.StatusFailed)
 		}
 	}()
 	s.Handle(hctx, req)
@@ -207,7 +198,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	switch {
 	case err == nil && rec.State != CouncilQueued && rec.State != CouncilRunning:
 		s.logf("request %s from %s: redelivered after the council %s, resending its reply", req.ID, req.From, rec.State)
-		s.sendFinal(ctx, req, rec.Reply, Finished{Outcome: Outcome{State: rec.State}}.Status(), rec.ReportPath, rec.CardPath)
+		s.sendFinal(ctx, req, rec.Reply, rec.State.replyStatus(), rec.ReportPath, rec.CardPath)
 		return
 	case err == nil:
 		if s.enqueue(req) {
@@ -226,24 +217,38 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	r, err := ParseRequest(req.Body, s.cfg)
 	if err != nil {
 		s.logf("request %s from %s: declined: %v", req.ID, req.From, err)
-		s.reply(ctx, req, "Council declined: "+err.Error(), envelope.StatusDeclined)
+		s.sendFinal(ctx, req, "Council declined: "+err.Error(), envelope.StatusDeclined)
 		return
 	}
 	if r.Op == OpLeaderboard {
 		s.leaderboard(ctx, req, r)
 		return
 	}
-	raw, err := json.Marshal(req)
-	if err == nil {
-		err = s.store.PutCouncil(ctx, CouncilRecord{RequestID: req.ID, State: CouncilQueued, Request: string(raw)})
+	rec, ok := s.newRecord(req, CouncilQueued)
+	if !ok {
+		return
 	}
-	if err != nil {
+	if err := s.store.PutCouncil(ctx, rec); err != nil {
 		s.logf("request %s: store: %v", req.ID, err)
 		return
 	}
 	s.enqueue(req)
 	s.logf("request %s from %s: council queued", req.ID, req.From)
 	s.renewOne(ctx, req.ID)
+}
+
+// newRecord is req's council record in state, carrying req serialized so
+// a restart can run it again. When req cannot be serialized it logs why
+// and returns false, with the record's Request left empty.
+func (s *Service) newRecord(req envelope.Request, state CouncilState) (CouncilRecord, bool) {
+	rec := CouncilRecord{RequestID: req.ID, State: state}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		s.logf("request %s: store: %v", req.ID, err)
+		return rec, false
+	}
+	rec.Request = string(raw)
+	return rec, true
 }
 
 // enqueue adds req to the queue unless it is already queued or running.
@@ -413,8 +418,8 @@ func (s *Service) run(ctx context.Context, req envelope.Request) {
 	if err != nil {
 		if _, answered := errors.AsType[*client.APIError](err); answered && ctx.Err() == nil {
 			s.logf("request %s: no longer open (%v), dropping the council", req.ID, err)
-			raw, _ := json.Marshal(req)
-			if err := s.store.PutCouncil(context.WithoutCancel(ctx), CouncilRecord{RequestID: req.ID, State: CouncilFailed, Request: string(raw)}); err != nil {
+			rec, _ := s.newRecord(req, CouncilFailed)
+			if err := s.store.PutCouncil(context.WithoutCancel(ctx), rec); err != nil {
 				s.logf("request %s: store: %v", req.ID, err)
 			}
 			return
@@ -426,8 +431,8 @@ func (s *Service) run(ctx context.Context, req envelope.Request) {
 	if cur.ID != "" {
 		req = cur
 	}
-	raw, _ := json.Marshal(req)
-	if err := s.store.PutCouncil(ctx, CouncilRecord{RequestID: req.ID, State: CouncilRunning, Request: string(raw)}); err != nil {
+	rec, _ := s.newRecord(req, CouncilRunning)
+	if err := s.store.PutCouncil(ctx, rec); err != nil {
 		s.logf("request %s: store: %v", req.ID, err)
 	}
 
@@ -491,10 +496,8 @@ func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) 
 		}
 	}
 	body, status := Reply(f)
-	rec := CouncilRecord{RequestID: req.ID, State: f.Outcome.State, Reply: body, ReportPath: f.ReportPath, CardPath: f.CardPath}
-	if raw, err := json.Marshal(req); err == nil {
-		rec.Request = string(raw)
-	}
+	rec, _ := s.newRecord(req, f.Outcome.State)
+	rec.Reply, rec.ReportPath, rec.CardPath = body, f.ReportPath, f.CardPath
 	if f.Outcome.State == CouncilCompleted {
 		rec.Category = f.category()
 	}
@@ -502,11 +505,7 @@ func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) 
 		s.logf("request %s: store: %v", req.ID, err)
 	}
 	if f.Outcome.State == CouncilCompleted {
-		rows := make([]ScoreRow, len(f.Outcome.Standings))
-		for i, st := range f.Outcome.Standings {
-			rows[i] = ScoreRow{Member: st.Member, Score: st.Score, Placement: st.Placement, Ballots: st.Ballots}
-		}
-		if err := s.store.RecordScores(fctx, req.ID, rec.Category, rows); err != nil {
+		if err := s.store.RecordScores(fctx, req.ID, rec.Category, f.Outcome.Standings); err != nil {
 			s.logf("request %s: recording scores: %v", req.ID, err)
 		}
 	}
@@ -520,7 +519,7 @@ func (s *Service) leaderboard(ctx context.Context, req envelope.Request, r Reque
 	rows, err := s.store.Leaderboard(ctx, r.Category)
 	if err != nil {
 		s.logf("request %s: leaderboard: %v", req.ID, err)
-		s.reply(ctx, req, "Council could not read its leaderboard.", envelope.StatusFailed)
+		s.sendFinal(ctx, req, "Council could not read its leaderboard.", envelope.StatusFailed)
 		return
 	}
 	body := leaderboardText(rows, r.Category)
@@ -587,11 +586,6 @@ func (s *Service) sendFinal(ctx context.Context, req envelope.Request, body stri
 	if _, err := s.relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
 		s.logf("request %s: reply failed: %v", req.ID, err)
 	}
-}
-
-// reply sends a reply without attachments.
-func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status) {
-	s.sendFinal(ctx, req, body, status)
 }
 
 // convenedAt is when req was sent, or now for a request without a time.

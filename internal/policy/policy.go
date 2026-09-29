@@ -28,11 +28,14 @@ var (
 	ErrRateLimited   = errors.New("too many requests from this agent; slow down")
 )
 
+// DefaultHopLimit is the longest allowed chain when Config.HopLimit is 0.
+const DefaultHopLimit = 4
+
 // Config tunes the policy.
 type Config struct {
 	Approval      *Approval
 	UrgentPerHour int // max urgent requests per sender per hour; default 5
-	HopLimit      int // longest allowed chain; default 4
+	HopLimit      int // longest allowed chain; default DefaultHopLimit
 	PerMinute     int // max new requests per sender per minute; default 30
 	Now           func() time.Time
 }
@@ -52,7 +55,7 @@ type Policy struct {
 // New builds a Policy over the relay store.
 func New(st *store.Store, cfg Config) *Policy {
 	if cfg.HopLimit == 0 {
-		cfg.HopLimit = 4
+		cfg.HopLimit = DefaultHopLimit
 	}
 	if cfg.PerMinute == 0 {
 		cfg.PerMinute = 30

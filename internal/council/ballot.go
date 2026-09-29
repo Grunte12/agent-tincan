@@ -11,10 +11,26 @@ import (
 // counts, so a header quoted from an answer cannot stand in for it.
 var rankingHeader = regexp.MustCompile(`(?i)FINAL\s+RANKING\s*:`)
 
+// answerLabel is a reference to an answer by its label: "Answer K" or
+// "response K". The label is group 1.
+var answerLabel = regexp.MustCompile(`\b(?i:answer|response)\s+([A-Z]{1,2})\b`)
+
+// replaceLabels replaces every answerLabel in s whose label is in labels
+// with repl(the reference, the member it stands for).
+func replaceLabels(s string, labels map[string]string, repl func(ref, member string) string) string {
+	return answerLabel.ReplaceAllStringFunc(s, func(m string) string {
+		if member, ok := labels[answerLabel.FindStringSubmatch(m)[1]]; ok {
+			return repl(m, member)
+		}
+		return m
+	})
+}
+
 var (
 	// rankedItem is one numbered line: "1. ...", "2) ...".
 	rankedItem = regexp.MustCompile(`^\s*\**\s*\d+\s*[.):]\s*(.*)$`)
-	// namedLabel is "Answer K" anywhere in an item.
+	// namedLabel is answerLabel as a ballot item may write it, with the
+	// label in bold: "Answer **K**".
 	namedLabel = regexp.MustCompile(`\b(?i:answer|response)\s+\**([A-Z]{1,2})\b`)
 	// bareLabel is an item that starts with the label alone: "K - solid".
 	bareLabel = regexp.MustCompile(`^\**([A-Z]{1,2})\**(?:$|[\s.):,*-])`)

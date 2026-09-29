@@ -72,8 +72,8 @@ footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
 <section class="panel verdict">
   {{range .Sections}}<h3>{{.Head}}</h3><p class="text">{{.Text}}</p>{{end}}
 </section>
-{{if .Chairmen}}<p class="note">The chairman saw the answers as
-{{range $i, $l := .Chairmen}}{{if $i}}, {{end}}Answer {{$l.Label}} = {{$l.Member}}{{end}}.
+{{if .Labels}}<p class="note">The chairman saw the answers as
+{{range $i, $l := .Labels}}{{if $i}}, {{end}}Answer {{$l.Label}} = {{$l.Member}}{{end}}.
 The chairman writes the verdict but cannot change the peer ranking.</p>{{end}}
 {{else if .VerdictUnavailable}}
 <h2>Verdict</h2>

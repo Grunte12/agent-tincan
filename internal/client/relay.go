@@ -738,6 +738,9 @@ func NormalizeTargets(targets []string, self string) ([]string, error) {
 	return out, nil
 }
 
+// newGroupID is a fresh group id for a batch of requests.
+func newGroupID() string { return "group-" + rand.Text() }
+
 // SendGroup sends ordinary requests, uploading separate attachments per target.
 // Rejected sends remain visible as failed entries in this client's local record.
 func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, kind envelope.Kind, parent string, attachPaths []string, urgent bool) (GroupResult, error) {
@@ -745,7 +748,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 	if err != nil {
 		return GroupResult{}, err
 	}
-	g := GroupResult{Group: "group-" + rand.Text()}
+	g := GroupResult{Group: newGroupID()}
 	for _, target := range targets {
 		req := envelope.Request{To: target, Body: body, Kind: kind, ParentID: parent, Group: g.Group, Urgent: urgent}
 		ups, err := r.UploadFiles(ctx, attachPaths)

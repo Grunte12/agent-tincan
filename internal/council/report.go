@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 //go:embed templates/report.html.tmpl
@@ -33,7 +35,7 @@ type reportView struct {
 	VerdictShown, VerdictUnavailable                 bool
 	VerdictReason                                    string
 	Sections                                         []reportSection
-	Chairmen                                         []labelView
+	Labels                                           []labelView
 	Ranking                                          []rankView
 	Answers                                          []answerView
 	Ballots                                          []ballotView
@@ -121,9 +123,9 @@ func (f Finished) reportView() reportView {
 			}
 		}
 		for l, m := range v.Labels {
-			rv.Chairmen = append(rv.Chairmen, labelView{l, m})
+			rv.Labels = append(rv.Labels, labelView{l, m})
 		}
-		slices.SortFunc(rv.Chairmen, func(a, b labelView) int { return strings.Compare(a.Label, b.Label) })
+		slices.SortFunc(rv.Labels, func(a, b labelView) int { return strings.Compare(a.Label, b.Label) })
 	}
 	placement := map[string]int{}
 	for _, s := range o.Standings {
@@ -199,6 +201,8 @@ func SaveArtifacts(dir string, f Finished) (reportPath, cardPath string, err err
 
 // SaveLeaderboardCard draws the leaderboard card for category ("" is
 // overall) into dir and returns its path, owner-only like the reports.
+// Each category has one file, replaced on every request, so the folder
+// does not grow with each leaderboard asked for.
 func SaveLeaderboardCard(dir string, rows []LeaderboardRow, category string, at time.Time) (string, error) {
 	var card bytes.Buffer
 	if err := DrawLeaderboard(&card, rows, category, at); err != nil {
@@ -208,7 +212,7 @@ func SaveLeaderboardCard(dir string, rows []LeaderboardRow, category string, at 
 	if category != "" {
 		name += "-" + safeName(category)
 	}
-	path := filepath.Join(dir, at.Format("20060102-150405")+"-"+name+".png")
+	path := filepath.Join(dir, name+".png")
 	return path, writePrivate(path, card.Bytes())
 }
 
@@ -240,17 +244,8 @@ func writePrivate(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("council artifacts: %w", err)
 	}
-	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
+	if err := client.WritePrivateFile(path, data); err != nil {
 		return fmt.Errorf("council artifacts: %w", err)
 	}
-	if err := fh.Chmod(0o600); err != nil {
-		fh.Close()
-		return fmt.Errorf("council artifacts: %w", err)
-	}
-	if _, err := fh.Write(data); err != nil {
-		fh.Close()
-		return fmt.Errorf("council artifacts: %w", err)
-	}
-	return fh.Close()
+	return nil
 }

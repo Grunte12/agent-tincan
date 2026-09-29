@@ -30,22 +30,20 @@ import (
 // doctor run the service; the owner's commands sit beside them.
 func councilCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "council",
+		Use:   `council ["question" | command]`,
 		Short: "Run Council, which puts one question to every model on the team and returns a verdict",
-		Long: "Council is a teammate that runs on the owner's machine: any teammate asks it a question, every\n" +
+		Long: "Put a question to every model on the team: tincan council \"question\" sends it to Council as this\n" +
+			"agent, shows each stage as Council reports it, prints the verdict and ranking, and saves the report\n" +
+			"and scorecard to a local folder. Council asks are held for the owner's approval; run in a terminal on\n" +
+			"an admin device, tincan council approves its own request, and anywhere else it waits for approval\n" +
+			"like any ask.\n\n" +
+			"Council is a teammate that runs on the owner's machine: any teammate asks it a question, every\n" +
 			"model on the team answers, the members rank each other's answers blind, and a chairman writes the\n" +
 			"verdict. Set it up once with tincan council install, then check it with tincan council doctor.\n" +
 			"See docs/adapters/council.md.",
-		Args: cobra.NoArgs,
+		Args: cobra.ArbitraryArgs,
 	}
 	cmd.AddCommand(councilServeCmd(), councilInstallCmd(), councilDoctorCmd(), councilLeaderboardCmd())
-	cmd.Use = `council ["question" | command]`
-	cmd.Long = "Put a question to every model on the team: tincan council \"question\" sends it to Council as this\n" +
-		"agent, shows each stage as Council reports it, prints the verdict and ranking, and saves the report\n" +
-		"and scorecard to a local folder. Council asks are held for the owner's approval; run in a terminal on\n" +
-		"an admin device, tincan council approves its own request, and anywhere else it waits for approval\n" +
-		"like any ask.\n\n" + cmd.Long
-	cmd.Args = cobra.ArbitraryArgs
 	var to, chairman string
 	var members, attach []string
 	var asJSON bool
@@ -102,7 +100,7 @@ var councilPollEvery = 2 * time.Second
 
 // councilInteractive reports whether the owner is at a terminal: stdin
 // and stdout are both terminals. A script or an agent's shell is not, so
-// its council waits for approval like any other ask (KTD14).
+// its council waits for approval like any other ask.
 var councilInteractive = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
@@ -133,7 +131,7 @@ func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJ
 	if err != nil {
 		return err
 	}
-	req, err := r.SendAttached(ctx, to, "council: "+string(raw), envelope.KindAsk, "", client.AttachmentIDs(ups), false)
+	req, err := r.SendAttached(ctx, to, council.RequestPrefix+" "+string(raw), envelope.KindAsk, "", client.AttachmentIDs(ups), false)
 	if err != nil {
 		return err
 	}
@@ -207,7 +205,7 @@ func councilAgent(ctx context.Context, r *client.Relay) string {
 }
 
 // selfApprove approves held request id through the same path as tincan
-// approve, but only when the owner is at a terminal (KTD14). It returns
+// approve, but only when the owner is at a terminal. It returns
 // why the request is still held, or "" once approved.
 func selfApprove(ctx context.Context, id string) string {
 	if !councilInteractive() {
@@ -290,7 +288,7 @@ func councilResultBlock(res client.Result) (string, bool) {
 	if res.Reply == nil {
 		return "", false
 	}
-	const open = "```council-result\n"
+	const open = council.ResultFence + "\n"
 	body := res.Reply.Body
 	i := strings.LastIndex(body, open)
 	if i < 0 {

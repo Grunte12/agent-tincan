@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 
@@ -51,11 +50,19 @@ func (r *Relay) SendEach(ctx context.Context, outs []Outgoing, kind envelope.Kin
 	if len(norm) != len(outs) {
 		return GroupResult{}, nil, errors.New("each target may appear once in a batch")
 	}
-	g = GroupResult{Group: "group-" + rand.Text()}
+	g = GroupResult{Group: newGroupID()}
 	errs = make([]error, len(outs))
+	// The relay's attachment support is checked once, at the first target
+	// with files, and that answer applies to every target with files.
+	var checked bool
+	var attachErr error
 	for i, o := range outs {
 		req := envelope.Request{To: o.To, Body: o.Body, Kind: kind, ParentID: parent, Group: g.Group}
-		err := r.uploadEach(ctx, o.Files, &req)
+		if len(o.Files) > 0 && !checked {
+			_, attachErr = r.requireAttachments(ctx)
+			checked = true
+		}
+		err := r.uploadEach(ctx, o.Files, attachErr, &req)
 		if err == nil {
 			var sent envelope.Request
 			if err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent); err == nil {
@@ -77,14 +84,15 @@ func (r *Relay) SendEach(ctx context.Context, outs []Outgoing, kind envelope.Kin
 	return g, errs, nil
 }
 
-// uploadEach uploads files and names them on req. An error wraps
+// uploadEach uploads files and names them on req. attachErr is the
+// requireAttachments result for this batch. An error wraps
 // ErrUploadFailed.
-func (r *Relay) uploadEach(ctx context.Context, files []OutgoingFile, req *envelope.Request) error {
+func (r *Relay) uploadEach(ctx context.Context, files []OutgoingFile, attachErr error, req *envelope.Request) error {
 	if len(files) == 0 {
 		return nil
 	}
-	if _, err := r.requireAttachments(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrUploadFailed, err)
+	if attachErr != nil {
+		return fmt.Errorf("%w: %w", ErrUploadFailed, attachErr)
 	}
 	for _, f := range files {
 		up, err := r.upload(ctx, f.Name, f.MIME, bytes.NewReader(f.Data), int64(len(f.Data)))

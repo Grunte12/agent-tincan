@@ -362,11 +362,11 @@ func TestServiceAnswersLeaderboard(t *testing.T) {
 	r := newServiceRig(t, relay.Config{}, time.Minute)
 	for _, c := range []struct {
 		id, category string
-		scores       []ScoreRow
+		scores       []Standing
 	}{
-		{"c1", "debugging", []ScoreRow{{Member: "alpha", Score: 1, Placement: 1, Ballots: 2}, {Member: "bravo", Score: 0.5, Placement: 2, Ballots: 2}}},
-		{"c2", "writing", []ScoreRow{{Member: "bravo", Score: 1, Placement: 1, Ballots: 2}, {Member: "alpha", Score: 0, Placement: 2, Ballots: 2}}},
-		{"c3", "debugging", []ScoreRow{{Member: "alpha", Score: 1, Placement: 1, Ballots: 2}, {Member: "bravo", Score: 0, Placement: 2, Ballots: 2}}},
+		{"c1", "debugging", []Standing{{Member: "alpha", Score: 1, Placement: 1, Ballots: 2}, {Member: "bravo", Score: 0.5, Placement: 2, Ballots: 2}}},
+		{"c2", "writing", []Standing{{Member: "bravo", Score: 1, Placement: 1, Ballots: 2}, {Member: "alpha", Score: 0, Placement: 2, Ballots: 2}}},
+		{"c3", "debugging", []Standing{{Member: "alpha", Score: 1, Placement: 1, Ballots: 2}, {Member: "bravo", Score: 0, Placement: 2, Ballots: 2}}},
 	} {
 		if err := r.store.PutCouncil(t.Context(), CouncilRecord{RequestID: c.id, State: CouncilCompleted}); err != nil {
 			t.Fatal(err)

@@ -67,8 +67,8 @@ const (
 	DeliveryLeftOut  = "left out"
 )
 
-// Engine runs a council's answer and review stages over the relay and
-// scores the answers.
+// Engine runs a council's answer and review stages over the relay, scores
+// the answers, and has a chairman write the verdict.
 type Engine struct {
 	Relay Relay
 	// Config supplies the stage time limits.
@@ -165,8 +165,9 @@ type Outcome struct {
 }
 
 // Run runs the answer stage, then, with a quorum of answers, the review
-// stage, scores the ballots, and has a chairman write the verdict. An error is returned only when ctx ends;
-// every other problem is in the Outcome.
+// stage, scores the ballots, and has a chairman write the verdict. An
+// error is returned only when ctx ends; every other problem is in the
+// Outcome.
 func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 	e.defaults()
 	var out Outcome
@@ -409,7 +410,7 @@ func (e *Engine) reviewFor(question string, inline []contextFile, reviewer strin
 		rev.Labels[labels[i]] = answers[i].Member
 		shown = append(shown, labeledAnswer{Label: labels[i], Text: answers[i].Copy})
 	}
-	body, cut, _, err := reviewPrompt(question, inline, shown, nonce)
+	body, cut, err := reviewPrompt(question, inline, shown, nonce)
 	return body, rev, cut, err
 }
 
@@ -489,13 +490,8 @@ func failedSend(to string, err error) client.Result {
 func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit time.Duration) error {
 	deadline := e.Now().Add(limit)
 	var mu sync.Mutex
-	poll := func(wait time.Duration) {
-		open := map[string]string{} // member -> request id
-		for m, r := range res {
-			if r.Request.ID != "" && !r.Done() {
-				open[m] = r.Request.ID
-			}
-		}
+	// poll waits up to wait on each open ask: member -> request id.
+	poll := func(open map[string]string, wait time.Duration) {
 		var wg sync.WaitGroup
 		for m, id := range open {
 			wg.Go(func() {
@@ -514,7 +510,13 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !slices.ContainsFunc(mapValues(res), func(r client.Result) bool { return r.Request.ID != "" && !r.Done() }) {
+		open := map[string]string{} // member -> request id
+		for m, r := range res {
+			if r.Request.ID != "" && !r.Done() {
+				open[m] = r.Request.ID
+			}
+		}
+		if len(open) == 0 {
 			return nil
 		}
 		left := deadline.Sub(e.Now())
@@ -522,10 +524,10 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 			break
 		}
 		if left >= time.Second {
-			poll(min(left.Truncate(time.Second), client.MaxInlineWait))
+			poll(open, min(left.Truncate(time.Second), client.MaxInlineWait))
 			continue
 		}
-		poll(0)
+		poll(open, 0)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -551,14 +553,6 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 	return ctx.Err()
 }
 
-func mapValues(m map[string]client.Result) []client.Result {
-	out := make([]client.Result, 0, len(m))
-	for _, r := range m {
-		out = append(out, r)
-	}
-	return out
-}
-
 // absence is why a member whose last known result is r gave no answer in
 // stage.
 func absence(member, stage string, r client.Result) Absence {
@@ -574,9 +568,19 @@ func absence(member, stage string, r client.Result) Absence {
 		a.Reason = AbsentNeedsInput
 	}
 	if r.Reply != nil && (a.Reason == AbsentFailed || a.Reason == AbsentDeclined) {
-		a.Detail, _ = truncate(strings.TrimSpace(r.Reply.Body), 300)
+		a.Detail = detail(r.Reply.Body)
 	}
 	return a
+}
+
+// detailBytes caps an Absence's Detail.
+const detailBytes = 300
+
+// detail is a member's reply body as an Absence's Detail: trimmed and cut
+// to detailBytes.
+func detail(body string) string {
+	d, _ := truncate(strings.TrimSpace(body), detailBytes)
+	return d
 }
 
 // elapsed is how long a member took from the ask to its reply.

@@ -30,8 +30,9 @@ type Request struct {
 	Category string
 }
 
-// structuredMarker starts a structured request.
-const structuredMarker = "council:"
+// RequestPrefix starts a structured request: "council:" then one JSON
+// object.
+const RequestPrefix = "council:"
 
 // FormHelp is the fixed text that shows the structured form.
 const FormHelp = `Anything without "council:" first is the question, asked of the default council. For more control put "council:" first and one JSON object after it. To convene: council: {"question":"...","members":["..."],"chairman":"..."} or council: {"question":"...","exclude":["..."]} (question required, the rest optional, members or exclude but not both). For the leaderboard: council: {"op":"leaderboard","category":"..."} (category optional).`
@@ -51,7 +52,7 @@ type wireRequest struct {
 // with every default. A "council:" form is parsed strictly; a bad one is
 // an error carrying the reason and FormHelp, for a declined reply.
 func ParseRequest(body string, cfg Config) (Request, error) {
-	raw, ok := history.StructuredBody(body, structuredMarker)
+	raw, ok := history.StructuredBody(body, RequestPrefix)
 	if !ok {
 		q := strings.TrimSpace(body)
 		if q == "" {

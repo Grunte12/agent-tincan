@@ -1455,12 +1455,22 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		ToKind string `json:"to_kind,omitempty"`
 	}
 	out := make([]heldRequest, len(reqs))
+	kinds := map[string]string{} // target -> kind, for the lookups that succeeded
 	for i, req := range reqs {
 		req.Body = approvalPreview(req.Body)
 		out[i] = heldRequest{Request: req}
-		if a, ok, err := s.lookupAgent(r.Context(), req.To); err == nil && ok {
-			out[i].ToKind = a.Kind
+		kind, seen := kinds[req.To]
+		if !seen {
+			a, ok, err := s.lookupAgent(r.Context(), req.To)
+			if err != nil {
+				continue
+			}
+			if ok {
+				kind = a.Kind
+			}
+			kinds[req.To] = kind
 		}
+		out[i].ToKind = kind
 	}
 	writeJSON(w, http.StatusOK, out)
 }
