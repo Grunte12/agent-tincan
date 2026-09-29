@@ -430,3 +430,53 @@ func TestRequestsWaitingCountsWholeBacklog(t *testing.T) {
 		t.Fatalf("wakes = %q, want one naming all 3 requests", rc.bodies)
 	}
 }
+
+// A schedule agent checks its inbox on its own cron: wake.json declares the
+// interval, which must be a positive Go duration.
+func TestLoadConfigSchedule(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "wake.json")
+	os.WriteFile(p, []byte(`{"fo":{"method":"schedule","every":"5m"}}`), 0o600)
+	c, err := LoadConfig(p)
+	if err != nil || c["fo"].Method != Schedule || c["fo"].Interval() != 5*time.Minute {
+		t.Fatalf("schedule load: %+v %v", c, err)
+	}
+	for _, bad := range []string{
+		`{"fo":{"method":"schedule"}}`,
+		`{"fo":{"method":"schedule","every":"0s"}}`,
+		`{"fo":{"method":"schedule","every":"-5m"}}`,
+		`{"fo":{"method":"schedule","every":"often"}}`,
+	} {
+		os.WriteFile(p, []byte(bad), 0o600)
+		if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "fo") {
+			t.Errorf("config %s: err = %v, want a rejection naming fo", bad, err)
+		}
+	}
+}
+
+// The relay never wakes a schedule agent; it only reports its interval.
+func TestScheduleAgentGetsNoRelayWake(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{
+		"fo":      {Method: Schedule, Every: "5m"},
+		"grokbot": {Method: Webhook, URL: ts.URL},
+	}, nil, Options{Debounce: time.Millisecond, ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{}})
+	queued(w, "fo", 2)
+	w.Replied(context.Background(), envelope.Request{ID: "x", From: "fo", To: "grokbot"})
+	w.RequestsWaiting("fo")
+	w.Flush()
+	if rc.count() != 0 {
+		t.Fatalf("schedule agent was woken %d times", rc.count())
+	}
+	if got := w.WakeMethod("fo"); got != Schedule {
+		t.Fatalf("fo wake = %q, want schedule", got)
+	}
+	if got := w.CheckEvery("fo"); got != 5*time.Minute {
+		t.Fatalf("fo check every = %v, want 5m", got)
+	}
+	for _, a := range []string{"grokbot", "nobody"} {
+		if got := w.CheckEvery(a); got != 0 {
+			t.Errorf("%s check every = %v, want 0", a, got)
+		}
+	}
+}

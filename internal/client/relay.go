@@ -67,6 +67,12 @@ type AgentInfo struct {
 	Queued       int       `json:"queued,omitempty"`
 	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
 	Claimed      int       `json:"claimed,omitempty"`
+	// CheckEverySeconds, ExpectReplySeconds and Overdue are the relay's
+	// schedule facts (see envelope.Target), set only for an agent on wake
+	// method schedule and left out otherwise and by older relays.
+	CheckEverySeconds  int  `json:"check_every_seconds,omitempty"`
+	ExpectReplySeconds int  `json:"expect_reply_seconds,omitempty"`
+	Overdue            bool `json:"overdue,omitempty"`
 }
 
 // Roster is the relay's agent list with what the relay says about itself.
@@ -271,9 +277,36 @@ func (r *Relay) Base() string {
 // Send queues a request. parent is the request this one continues, or "".
 // The urgent flag prioritizes time-critical requests.
 func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string, urgent bool) (envelope.Request, error) {
-	var out envelope.Request
-	err := r.call(ctx, r.api, "POST", "/v1/send", map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent}, &out)
+	out, err := r.send(ctx, map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent})
+	return out.Request, err
+}
+
+// sent is the relay's send response: the queued request and, for a
+// recipient on a schedule, its target facts (absent from older relays).
+type sent struct {
+	envelope.Request
+	Target *envelope.Target `json:"target,omitempty"`
+}
+
+func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
+	var out sent
+	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	return out, err
+}
+
+// asked finishes an ask whose send returned s: without a wait it reports
+// the request as sent, otherwise it waits up to wait for the reply. Either
+// way the send response's target facts are carried onto the result.
+func (r *Relay) asked(ctx context.Context, s sent, wait time.Duration) (Result, error) {
+	if wait <= 0 {
+		return Result{Request: s.Request, Status: sentStatus(s.Request), Target: s.Target}, nil
+	}
+	res, err := r.Get(ctx, s.ID, wait)
+	if err != nil {
+		return res, err
+	}
+	res.Target = s.Target
+	return res, nil
 }
 
 // Get returns a request's state, waiting up to wait for it to finish.
@@ -290,14 +323,11 @@ func (r *Relay) Get(ctx context.Context, id string, wait time.Duration) (Result,
 // Ask sends a request and waits up to wait for the reply. If the reply is not
 // in yet, the returned Result has the request id and a non-final status.
 func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Duration, urgent bool) (Result, error) {
-	req, err := r.Send(ctx, to, body, envelope.KindAsk, parent, urgent)
+	s, err := r.send(ctx, map[string]any{"to": to, "body": body, "kind": envelope.KindAsk, "parent_id": parent, "urgent": urgent})
 	if err != nil {
 		return Result{}, err
 	}
-	if wait <= 0 {
-		return Result{Request: req, Status: sentStatus(req)}, nil
-	}
-	return r.Get(ctx, req.ID, wait)
+	return r.asked(ctx, s, wait)
 }
 
 // What a poll does with unseen replies to this agent's own requests. No

@@ -1165,3 +1165,99 @@ func TestApprovedHeldNotesRequestKeepsNotesTTL(t *testing.T) {
 		t.Errorf("approved history ttl = %v, want 24h", got)
 	}
 }
+
+// scheduleHarness joins fo from strangerAddr on a fake clock and installs a
+// real waker with fo on a 5m schedule, instinct on 1m, muse waiting, and
+// grokbot on a webhook.
+func scheduleHarness(t *testing.T) (*harness, *fakeClock) {
+	t.Helper()
+	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	h := newHarnessDir(t, Config{Now: clk.Now}, identity.Config{Now: clk.Now})
+	h.joinAt(strangerAddr, "fo")
+	h.srv.SetWakeNamer(wake.New(wake.Config{
+		"fo":       {Method: wake.Schedule, Every: "5m"},
+		"instinct": {Method: wake.Schedule, Every: "1m"},
+		"muse":     {Method: wake.Wait},
+		"grokbot":  {Method: wake.Webhook, URL: "http://127.0.0.1:1/hook"},
+	}, nil, wake.Options{}))
+	return h, clk
+}
+
+// The roster reports a schedule agent's interval, the reply window a sender
+// should expect, and whether it has stopped checking its inbox: overdue once
+// its last poll (or its join, if it never polled) is more than two intervals
+// plus a 5m grace ago. Sending asks does not count as checking.
+func TestRosterScheduleFacts(t *testing.T) {
+	h, clk := scheduleHarness(t)
+	fo := agentInfo(t, h, macAddr, "fo")
+	if fo.Wake != wake.Schedule || fo.CheckEverySeconds != 300 || fo.ExpectReplySeconds != 600 || fo.Overdue {
+		t.Fatalf("just joined, never polled: %+v", fo)
+	}
+	if in := agentInfo(t, h, macAddr, "instinct"); in.CheckEverySeconds != 60 || in.ExpectReplySeconds != 360 {
+		t.Fatalf("1m schedule: %+v", in)
+	}
+	clk.advance(30 * time.Minute)
+	if fo := agentInfo(t, h, macAddr, "fo"); !fo.Overdue {
+		t.Fatalf("never polled, joined 30m ago: want overdue: %+v", fo)
+	}
+	h.do(strangerAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	clk.advance(3 * time.Minute)
+	if fo := agentInfo(t, h, macAddr, "fo"); fo.Overdue {
+		t.Fatalf("polled 3m ago: want not overdue: %+v", fo)
+	}
+	clk.advance(12 * time.Minute) // exactly 2*5m + 5m since the poll
+	if fo := agentInfo(t, h, macAddr, "fo"); fo.Overdue {
+		t.Fatalf("polled exactly 15m ago: want not overdue yet: %+v", fo)
+	}
+	clk.advance(9 * time.Minute)
+	h.send(strangerAddr, "muse", "still here")
+	clk.advance(time.Minute)
+	if fo := agentInfo(t, h, macAddr, "fo"); !fo.Overdue {
+		t.Fatalf("polled 25m ago, sent 1m ago: want overdue: %+v", fo)
+	}
+	rec := h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
+	var raw struct{ Agents []map[string]any }
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range raw.Agents {
+		if a["name"] != "muse" && a["name"] != "grokbot" {
+			continue
+		}
+		for _, k := range []string{"check_every_seconds", "expect_reply_seconds", "overdue"} {
+			if _, ok := a[k]; ok {
+				t.Errorf("%s roster entry has %s: %v", a["name"], k, a)
+			}
+		}
+	}
+}
+
+// The send response names the recipient's schedule so the asker can say when
+// to expect a reply; a recipient on any other method gets no target.
+func TestSendResponseCarriesScheduleTarget(t *testing.T) {
+	h, clk := scheduleHarness(t)
+	var out struct {
+		envelope.Request
+		Target *envelope.Target `json:"target"`
+	}
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"fo","body":"hi"}`, http.StatusCreated, &out)
+	if out.ID == "" || out.Target == nil || out.Target.CheckEverySeconds != 300 || out.Target.ExpectReplySeconds != 600 || out.Target.Overdue {
+		t.Fatalf("send to schedule agent: %+v target %+v", out.Request, out.Target)
+	}
+	clk.advance(30 * time.Minute)
+	out.Target = nil
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"fo","body":"hi again"}`, http.StatusCreated, &out)
+	if out.Target == nil || !out.Target.Overdue {
+		t.Fatalf("send to overdue schedule agent: target %+v", out.Target)
+	}
+	for _, to := range []string{"grokbot", "muse"} {
+		from := museAddr
+		if to == "muse" {
+			from = grokAddr
+		}
+		rec := h.do(from, "POST", "/v1/send", `{"to":"`+to+`","body":"hi"}`, http.StatusCreated, nil)
+		if strings.Contains(rec.Body.String(), `"target"`) {
+			t.Errorf("send to %s has a target: %s", to, rec.Body.String())
+		}
+	}
+}

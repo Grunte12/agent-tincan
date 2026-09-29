@@ -172,6 +172,26 @@ type Result struct {
 	// asker was handling another request addressed to it, so a fresh session
 	// woken by the reply knows which request to finish.
 	Parent *Parent `json:"parent,omitempty"`
+	// Target is what the relay said about the recipient when the request
+	// was sent. It is wire-only: the relay never stores it or returns it
+	// from a get; the client copies it from the send response onto the
+	// Result that an ask returns. Nil unless the recipient checks its inbox
+	// on a schedule, and always nil from a relay that predates schedules.
+	Target *Target `json:"target,omitempty"`
+}
+
+// Target is the relay's schedule facts about a recipient that checks its
+// inbox on its own interval instead of being woken.
+type Target struct {
+	// CheckEverySeconds is how often the recipient checks its inbox.
+	CheckEverySeconds int `json:"check_every_seconds,omitempty"`
+	// ExpectReplySeconds is how long a sender should expect to wait for a
+	// reply: one interval plus a grace for a late check.
+	ExpectReplySeconds int `json:"expect_reply_seconds,omitempty"`
+	// Overdue is set when the recipient has missed its checks: its last
+	// inbox poll (its join, if it never polled) is more than two intervals
+	// plus the grace ago.
+	Overdue bool `json:"overdue,omitempty"`
 }
 
 // Exchange is one clarification round; At is when the question was asked.

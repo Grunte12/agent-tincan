@@ -396,3 +396,29 @@ func TestExplicitUrgencyAcrossSendMethods(t *testing.T) {
 		}
 	}
 }
+
+// A send response's target facts reach the Result that Ask returns, whether
+// Ask waited (and so returns a separate Get) or not.
+func TestAskCarriesScheduleTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/v1/send" {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"r1","to":"fo","status":"queued","target":{"check_every_seconds":300,"expect_reply_seconds":600}}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(envelope.Result{Request: envelope.Request{ID: "r1", To: "fo"}, Status: envelope.StatusQueued})
+	}))
+	defer srv.Close()
+	r, _ := client.NewRelay(srv.URL, "")
+	want := envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600}
+	for _, wait := range []time.Duration{0, time.Second} {
+		res, err := r.Ask(t.Context(), "fo", "hi", "", wait, false)
+		if err != nil || res.Request.ID != "r1" || res.Target == nil || *res.Target != want {
+			t.Errorf("Ask wait %v: target %+v, err %v", wait, res.Target, err)
+		}
+		res, err = r.AskAttached(t.Context(), "fo", "hi", "", nil, wait, false)
+		if err != nil || res.Request.ID != "r1" || res.Target == nil || *res.Target != want {
+			t.Errorf("AskAttached wait %v: target %+v, err %v", wait, res.Target, err)
+		}
+	}
+}

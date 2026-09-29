@@ -133,6 +133,10 @@ type Server struct {
 	// back whenever it changes.
 	versions     map[string]string
 	pollFeatures map[string]pollFeatures
+	// started is when this relay process started. lastPoll is not
+	// persisted, so a schedule agent that has not polled since then is
+	// measured from here rather than flagged overdue by a restart.
+	started time.Time
 	// pollMu orders each poll-feature update with its store write, so two
 	// overlapping polls persist in the order they changed the state.
 	pollMu sync.Mutex
@@ -170,7 +174,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, stopping: make(chan struct{})}
+		versionWritten: map[string]time.Time{}, stopping: make(chan struct{}), started: cfg.Now()}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -571,7 +575,33 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if s.events != nil {
 		s.events.Queued(r.Context(), req)
 	}
-	writeJSON(w, http.StatusCreated, req)
+	writeJSON(w, http.StatusCreated, sendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
+}
+
+// sendResponse is the queued request with, for a recipient on a schedule,
+// the target facts a sender needs to say when to expect a reply. Older
+// clients decode it as a plain request and ignore target.
+type sendResponse struct {
+	envelope.Request
+	Target *envelope.Target `json:"target,omitempty"`
+}
+
+// recipientTarget is the schedule facts for agent, nil unless it is on
+// wake method schedule. A failed join-time lookup measures from the
+// relay's start.
+func (s *Server) recipientTarget(ctx context.Context, agent string) *envelope.Target {
+	every := s.checkEvery(agent)
+	if every <= 0 {
+		return nil
+	}
+	var joined time.Time
+	if a, ok, err := s.lookupAgent(ctx, agent); err == nil && ok {
+		joined = a.JoinedAt
+	}
+	s.mu.Lock()
+	last := s.lastPoll[agent]
+	s.mu.Unlock()
+	return s.scheduleTarget(every, last, joined, s.cfg.Now())
 }
 
 // handlePoll holds a long-poll until requests for the caller, or unseen
@@ -965,8 +995,51 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 // WakeNamer reports an agent's wake method name. Set by package wake.
 type WakeNamer interface{ WakeMethod(agent string) string }
 
-// SetWakeNamer installs the wake method lookup for the agent list.
+// SetWakeNamer installs the wake method lookup for the agent list. If w
+// also implements Scheduler, schedule agents' facts are reported too.
 func (s *Server) SetWakeNamer(w WakeNamer) { s.wake = w }
+
+// Scheduler reports how often an agent on wake method schedule checks its
+// inbox, 0 for an agent on any other method. Set by package wake.
+type Scheduler interface {
+	CheckEvery(agent string) time.Duration
+}
+
+// ScheduleGrace is the allowance for a schedule agent's late check: the
+// reply window a sender is shown is one interval plus it, and an agent is
+// overdue after two intervals plus it without polling.
+const ScheduleGrace = 5 * time.Minute
+
+// checkEvery is agent's schedule interval, 0 when it is not on schedule.
+func (s *Server) checkEvery(agent string) time.Duration {
+	if sc, ok := s.wake.(Scheduler); ok {
+		return sc.CheckEvery(agent)
+	}
+	return 0
+}
+
+// scheduleTarget computes a schedule agent's facts from its interval and
+// its last inbox poll. An agent that has not polled since the relay
+// started is measured from the later of its join and the relay's start.
+// Other activity, such as sending asks, does not count as checking. Nil
+// when every is not positive.
+func (s *Server) scheduleTarget(every time.Duration, lastPoll, joined, now time.Time) *envelope.Target {
+	if every <= 0 {
+		return nil
+	}
+	since := lastPoll
+	if since.IsZero() {
+		since = joined
+		if s.started.After(since) {
+			since = s.started
+		}
+	}
+	return &envelope.Target{
+		CheckEverySeconds:  int(every / time.Second),
+		ExpectReplySeconds: int((every + ScheduleGrace) / time.Second),
+		Overdue:            now.Sub(since) > 2*every+ScheduleGrace,
+	}
+}
 
 // handleAgents lists the roster for joined agents and for admin devices,
 // which need not be joined (onboarding runs from an admin laptop).
@@ -1002,6 +1075,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
 		if s.wake != nil {
 			info.Wake = s.wake.WakeMethod(a.Name)
+			if t := s.scheduleTarget(s.checkEvery(a.Name), last, a.JoinedAt, now); t != nil {
+				info.CheckEverySeconds, info.ExpectReplySeconds, info.Overdue = t.CheckEverySeconds, t.ExpectReplySeconds, t.Overdue
+			}
 		}
 		out = append(out, info)
 	}

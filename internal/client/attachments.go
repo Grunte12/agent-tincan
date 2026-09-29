@@ -174,25 +174,25 @@ func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) 
 // sending if not, since an older relay would deliver the request without
 // them.
 func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent bool) (envelope.Request, error) {
+	out, err := r.sendAttached(ctx, to, body, kind, parent, attachments, urgent)
+	return out.Request, err
+}
+
+func (r *Relay) sendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string, urgent bool) (sent, error) {
 	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent, "urgent": urgent}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
-		return envelope.Request{}, err
+		return sent{}, err
 	}
-	var out envelope.Request
-	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
-	return out, err
+	return r.send(ctx, in)
 }
 
 // AskAttached is Ask with attachments; see SendAttached.
 func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration, urgent bool) (Result, error) {
-	req, err := r.SendAttached(ctx, to, body, envelope.KindAsk, parent, attachments, urgent)
+	s, err := r.sendAttached(ctx, to, body, envelope.KindAsk, parent, attachments, urgent)
 	if err != nil {
 		return Result{}, err
 	}
-	if wait <= 0 {
-		return Result{Request: req, Status: sentStatus(req)}, nil
-	}
-	return r.Get(ctx, req.ID, wait)
+	return r.asked(ctx, s, wait)
 }
 
 // ReplyAttached is Reply with attachments; see SendAttached.
