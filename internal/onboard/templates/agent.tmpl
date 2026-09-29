@@ -344,6 +344,7 @@ The extension reads a Copilot conversation from copilot.com's own page data with
 {{template "setup.tools" .}}
 On the relay host, in wake.json (chmod 600): set {{.Name}} to its wake method ({{.Wake}} now; one of webhook, email, wait, channel, command, schedule, none). Secret fields: url, bearer_token and hmac_secret for webhook; email_to, agentmail_inbox and agentmail_key for email. Set them in the file only.
 For wake=command, keep tincan listen --exec <command that starts the agent> running. For wake=wait, the agent keeps tincan wait & running.
+For wake=schedule the entry also needs every (for example {"method": "schedule", "every": "5m"}), or the relay refuses to start. An agent that only runs on its own cron is better set up as kind scheduled (tincan kind {{.Name}} scheduled), whose instructions drain the inbox on every run.
 {{template "setup.cfghint" .}}
 Paste the standing instructions into {{.Name}}.
 {{- end -}}

@@ -237,6 +237,25 @@ func TestUpgradeRefusesDowngrade(t *testing.T) {
 	}
 }
 
+// A stable client is not replaced by the relay's prerelease of the same
+// version without --force, and doctor warns rather than fails.
+func TestUpgradeRefusesStableToPrerelease(t *testing.T) {
+	setVersion(t, "0.8.0")
+	m := meshWithDist(t, map[string]string{platformFile: "relay build", "VERSION": "0.8.0-rc1"})
+	exe, before := fakeExe(t)
+	var out bytes.Buffer
+	if err := upgrade(t.Context(), m.Client(t, "muse"), exe, false, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	assertUntouched(t, exe, before)
+	if !strings.Contains(out.String(), "not replacing it") {
+		t.Fatalf("output = %q", out.String())
+	}
+	if c := versionCheck(t.Context(), m.Client(t, "muse"), exe); c.Status != "warn" {
+		t.Fatalf("doctor = %+v, want warn", c)
+	}
+}
+
 // A check with --force on a newer client still reports a downgrade instead
 // of telling it to install, and changes nothing.
 func TestUpgradeCheckForceNewerClient(t *testing.T) {

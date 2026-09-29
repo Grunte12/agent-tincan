@@ -718,3 +718,15 @@ func opWakes(t *testing.T, k Kit) []string {
 	rest := k.Operator[i+len(marker):]
 	return strings.Split(rest[:strings.Index(rest, ")")], ", ")
 }
+
+// A generic agent's setup names the every field a schedule entry needs and
+// points cron-only agents at the scheduled kind.
+func TestGenericSetupExplainsSchedule(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "g", Wake: "none", Kind: KindGeneric}}})
+	setup := strings.Join(block(t, k, "g").Setup, "\n")
+	for _, want := range []string{`"every": "5m"`, "kind scheduled"} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("generic setup missing %q:\n%s", want, setup)
+		}
+	}
+}

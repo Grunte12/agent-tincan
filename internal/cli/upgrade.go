@@ -97,13 +97,13 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 		fmt.Fprintf(out, "tincan %s is up to date (matches the relay's %s build of %s).\n", current, name, available)
 		return nil
 	}
-	if !force && client.Newer(Version, m.Version) {
+	if !force && client.Ahead(Version, m.Version) {
 		fmt.Fprintf(out, "tincan %s at %s is newer than the relay's release %s; not replacing it with the older build.\n%s\nTo install the relay's %s anyway, run tincan upgrade --force.\n",
 			current, exe, strings.TrimPrefix(m.Version, "v"), relayBehindAdvice(Version), strings.TrimPrefix(m.Version, "v"))
 		return nil
 	}
 	if check {
-		if client.Newer(Version, m.Version) {
+		if client.Ahead(Version, m.Version) {
 			fmt.Fprintf(out, "tincan %s at %s is newer than the relay's release %s; installing it would downgrade.\n%s\n", current, exe, strings.TrimPrefix(m.Version, "v"), relayBehindAdvice(Version))
 			return nil
 		}

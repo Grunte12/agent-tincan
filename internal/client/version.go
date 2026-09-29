@@ -13,6 +13,18 @@ var developmentVersion = regexp.MustCompile(`(^|[.-])(dev|dirty)([.-]|$)|-[0-9]+
 // Newer reports whether release a is newer than b. Invalid and development
 // builds are skipped, as are prerelease clients unless a is a prerelease.
 func Newer(a, b string) bool {
+	return newer(a, b, false)
+}
+
+// Ahead reports whether release a sorts after release b in full semver
+// order, so a stable release is ahead of its own prereleases. Unlike Newer,
+// which never offers a prerelease to a stable client, it is for refusing a
+// downgrade. Invalid and development builds are never ahead.
+func Ahead(a, b string) bool {
+	return newer(a, b, true)
+}
+
+func newer(a, b string, stableBeatsPrerelease bool) bool {
 	av, bv := releaseVersion.FindStringSubmatch(a), releaseVersion.FindStringSubmatch(b)
 	if av == nil || bv == nil || developmentVersion.MatchString(a) || developmentVersion.MatchString(b) {
 		return false
@@ -24,7 +36,7 @@ func Newer(a, b string) bool {
 			}
 		}
 	}
-	if bv[4] != "" && av[4] == "" {
+	if bv[4] != "" && av[4] == "" && !stableBeatsPrerelease {
 		return false
 	}
 	for i := 1; i <= 3; i++ {
