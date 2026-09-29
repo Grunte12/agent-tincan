@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -81,7 +82,7 @@ const extractSchema = `{
 }
 `
 
-// codexExtractArgs are the flags for one extractor run, in order, before
+// CodexExtractArgs are the flags for one extractor run, in order, before
 // the prompt argument. Verified against codex-cli 0.155.1:
 //   - --sandbox read-only: no writes, no network for any command.
 //   - -c approval_policy=never: never wait for a human (exec has no -a).
@@ -94,7 +95,7 @@ const extractSchema = `{
 //     browser, the screen or the web.
 //   - --ephemeral: no session file under ~/.codex/sessions.
 //   - --skip-git-repo-check: the scratch dir is not a git checkout.
-func codexExtractArgs(cwd, schema, out string) []string {
+func CodexExtractArgs(cwd, schema, out string) []string {
 	return []string{
 		"exec",
 		"--ignore-user-config",
@@ -157,9 +158,9 @@ func (c *CodexExtractor) Extract(ctx context.Context, question string) (Query, e
 	if bin == "" {
 		bin = "codex"
 	}
-	cmd := exec.CommandContext(ctx, bin, append(codexExtractArgs(cwd, schema, out), extractInstructions)...)
+	cmd := exec.CommandContext(ctx, bin, append(CodexExtractArgs(cwd, schema, out), extractInstructions)...)
 	cmd.Dir = cwd
-	cmd.Env = extractEnv(os.Environ())
+	cmd.Env = ExtractEnv(os.Environ())
 	cmd.Stdin = strings.NewReader(question)
 	cmd.Stdout = io.Discard
 	var stderr tailBuffer
@@ -167,19 +168,21 @@ func (c *CodexExtractor) Extract(ctx context.Context, question string) (Query, e
 	if err := cmd.Run(); err != nil {
 		return Query{}, fmt.Errorf("query extractor: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	raw, err := readCapped(out, 64<<10)
+	raw, err := ReadCapped(out, 64<<10)
 	if err != nil {
 		return Query{}, fmt.Errorf("query extractor wrote no answer: %w", err)
 	}
 	return parseExtraction(raw)
 }
 
-// extractEnv is the environment for the extractor run: the service's own,
-// minus anything that would point a tincan client at a relay identity.
-func extractEnv(env []string) []string {
+// ExtractEnv is the environment for an extractor run: env minus every
+// variable starting with one of the prefixes. TINCAN_ is always dropped, so
+// nothing points a tincan client at a relay identity.
+func ExtractEnv(env []string, prefixes ...string) []string {
+	prefixes = append([]string{"TINCAN_"}, prefixes...)
 	out := env[:0:0]
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "TINCAN_") {
+		if slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(kv, p) }) {
 			continue
 		}
 		out = append(out, kv)
@@ -253,16 +256,20 @@ const structuredMarker = "query:"
 const structuredHelp = `Put "query:" on the first line and one JSON object after it, with only these fields: source (chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli), mode (latest, search or conversation), terms (the words to search for, up to 8), conversation_id (with mode conversation), count (0 to 20), want_images and with_images (true or false). For example: query: {"source":"chatgpt","mode":"latest","count":1}`
 
 // structuredBody reports whether body is a structured query and returns
-// its JSON text. The first line, trimmed and in any case, must be exactly
-// "query:" (the JSON on the following lines) or "query:" followed by
-// optional spaces or tabs and a JSON object starting with "{" on the same line.
-// Anything else, such as "Query: what did I ask ChatGPT", is a free-text
-// question.
-func structuredBody(body string) (string, bool) {
+// its JSON text (see StructuredBody). Anything else, such as "Query: what
+// did I ask ChatGPT", is a free-text question.
+func structuredBody(body string) (string, bool) { return StructuredBody(body, structuredMarker) }
+
+// StructuredBody reports whether body is a structured request under marker
+// and returns its JSON text. The first line, trimmed and in any case, must
+// be exactly marker (the JSON on the following lines) or marker followed by
+// optional spaces or tabs and a JSON object starting with "{" on the same
+// line.
+func StructuredBody(body, marker string) (string, bool) {
 	first, rest, _ := strings.Cut(body, "\n")
 	head := strings.TrimSpace(first)
-	n := len(structuredMarker)
-	if len(head) < n || !strings.EqualFold(head[:n], structuredMarker) {
+	n := len(marker)
+	if len(head) < n || !strings.EqualFold(head[:n], marker) {
 		return "", false
 	}
 	switch inline := strings.TrimLeft(head[n:], " \t"); {
@@ -337,8 +344,8 @@ func ValidateServiceQuery(q Query) error {
 	return nil
 }
 
-// readCapped reads at most limit bytes of path.
-func readCapped(path string, limit int64) ([]byte, error) {
+// ReadCapped reads at most limit bytes of path.
+func ReadCapped(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

@@ -1132,7 +1132,7 @@ func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
 	}
 	// First delivery: the send goes through, then the agent dies before
 	// it replies (no handleSafely, so no failure reply either).
-	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, "web-serve", func(ctx context.Context, req envelope.Request) {
+	n, err := PollAndHandle(ctx, rig.agent.Relay, time.Second, "web-serve", func(ctx context.Context, req envelope.Request) {
 		defer func() { _ = recover() }()
 		rig.agent.Handle(ctx, req)
 	})

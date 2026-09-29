@@ -118,18 +118,16 @@ type ServiceResult struct {
 // InstallService writes the history service definition: a launchd agent
 // on macOS, a systemd user unit on Linux. It does not load or enable it.
 func InstallService(o ServiceOptions) (ServiceResult, error) {
-	if err := o.fill(); err != nil {
-		return ServiceResult{}, err
+	goos := o.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
 	}
-	o.findTools()
-	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
-	return installServiceDef(o, serviceDef{
-		label:       ServiceLabel,
-		unit:        systemdUnit,
-		launchd:     launchdTemplate,
-		systemd:     systemdTemplate,
-		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path},
-		unsupported: "no history service definition for " + o.GOOS + "; run tincan history serve under your own service manager",
+	return InstallServiceDef(o, ServiceDef{
+		Label:       ServiceLabel,
+		Unit:        systemdUnit,
+		Launchd:     launchdTemplate,
+		Systemd:     systemdTemplate,
+		Unsupported: "no history service definition for " + goos + "; run tincan history serve under your own service manager",
 	})
 }
 
@@ -185,6 +183,35 @@ func validateServiceBinary(b string) error {
 		return fmt.Errorf("service binary %q must be an absolute path without quotes, %% or newlines", b)
 	}
 	return nil
+}
+
+// ServiceDef is another package's service definition for InstallServiceDef.
+// Its templates may use __TINCAN_BINARY__, __HOME__ and __PATH__, filled in
+// from the options, and the placeholder/value pairs in Vars.
+type ServiceDef struct {
+	Label, Unit      string
+	Launchd, Systemd string
+	Vars             []string
+	Unsupported      string
+}
+
+// InstallServiceDef writes d the way InstallService writes the history
+// service: a launchd agent on macOS, a systemd user unit on Linux, with the
+// same PATH. It does not load or enable it.
+func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
+	if err := o.fill(); err != nil {
+		return ServiceResult{}, err
+	}
+	o.findTools()
+	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
+	return installServiceDef(o, serviceDef{
+		label:       d.Label,
+		unit:        d.Unit,
+		launchd:     d.Launchd,
+		systemd:     d.Systemd,
+		vars:        append([]string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path}, d.Vars...),
+		unsupported: d.Unsupported,
+	})
 }
 
 // serviceDef is one service definition: its launchd label and plist
@@ -361,18 +388,17 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	if _, err := ParseWebSite(string(site)); err != nil {
 		return ServiceResult{}, err
 	}
-	if err := o.fill(); err != nil {
-		return ServiceResult{}, err
+	goos := o.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
 	}
 	agent := WebAgentName(site)
-	o.findTools()
-	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
-	return installServiceDef(o, serviceDef{
-		label:       WebServiceLabel(site),
-		unit:        "tincan-" + agent + ".service",
-		launchd:     webLaunchdTemplate,
-		systemd:     webSystemdTemplate,
-		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path, "__SITE__", string(site), "__AGENT__", agent},
-		unsupported: "no web agent service definition for " + o.GOOS + "; run tincan web serve under your own service manager",
+	return InstallServiceDef(o, ServiceDef{
+		Label:       WebServiceLabel(site),
+		Unit:        "tincan-" + agent + ".service",
+		Launchd:     webLaunchdTemplate,
+		Systemd:     webSystemdTemplate,
+		Vars:        []string{"__SITE__", string(site), "__AGENT__", agent},
+		Unsupported: "no web agent service definition for " + goos + "; run tincan web serve under your own service manager",
 	})
 }

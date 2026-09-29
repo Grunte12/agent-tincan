@@ -37,9 +37,9 @@ func webSiteFlag(site string) (history.Source, error) {
 	return history.ParseWebSite(site)
 }
 
-// webConfigPath is a web agent's own client config: TINCAN_CONFIG when set,
-// else ~/.config/tincan/<agent>.json.
-func webConfigPath(agent string) string {
+// serviceConfigPath is a service agent's own client config (web agents,
+// notes): TINCAN_CONFIG when set, else ~/.config/tincan/<agent>.json.
+func serviceConfigPath(agent string) string {
 	if os.Getenv("TINCAN_CONFIG") != "" {
 		return client.ConfigPath()
 	}
@@ -73,7 +73,7 @@ func webServeCmd() *cobra.Command {
 				name = history.WebAgentName(src)
 			}
 			if configPath == "" {
-				configPath = webConfigPath(name)
+				configPath = serviceConfigPath(name)
 			}
 			configPath = expandHome(configPath)
 			cfg, err := client.LoadConfigFrom(configPath)
@@ -84,7 +84,7 @@ func webServeCmd() *cobra.Command {
 				return fmt.Errorf("no relay configured in %s: run TINCAN_CONFIG=%s tincan join <code> --relay http://tincan-relay", configPath, configPath)
 			}
 			if cfg.Agent != "" && cfg.Agent != name {
-				return wrongWebAgent(name, configPath+" is joined as", cfg.Agent)
+				return wrongServeAgent("web serve", name, configPath+" is joined as", cfg.Agent)
 			}
 			if allowPath == "" {
 				allowPath = history.DefaultWebAllowlistPath(name)
@@ -115,7 +115,7 @@ func webServeCmd() *cobra.Command {
 				return fmt.Errorf("web serve: could not confirm this agent's identity with the relay: %w", client.RejoinHint(err, cfg.Relay))
 			}
 			if me.Name != name {
-				return wrongWebAgent(name, "the relay knows the machine using "+configPath+" as", me.Name)
+				return wrongServeAgent("web serve", name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			// A connected extension that reports the site ungranted cannot
 			// serve it, so the service waits here for the grant rather than
@@ -198,12 +198,13 @@ func expandHome(p string) string {
 	return p
 }
 
-// wrongWebAgent is the refusal when web serve would run as another agent
-// and so poll and claim that agent's requests.
-func wrongWebAgent(name, who, agent string) error {
-	return fmt.Errorf("web serve refuses to run: %s %q, not %q, so it would claim that agent's requests. "+
+// wrongServeAgent is the refusal when a service's serve command (web serve,
+// notes serve) would run as another agent and so poll and claim that
+// agent's requests.
+func wrongServeAgent(command, name, who, agent string) error {
+	return fmt.Errorf("%s refuses to run: %s %q, not %q, so it would claim that agent's requests. "+
 		"Point --config (or TINCAN_CONFIG) at %s's own config, normally ~/.config/tincan/%s.json "+
-		"(join it with TINCAN_CONFIG=~/.config/tincan/%s.json tincan join <code> --relay <relay url>)", who, agent, name, name, name, name)
+		"(join it with TINCAN_CONFIG=~/.config/tincan/%s.json tincan join <code> --relay <relay url>)", command, who, agent, name, name, name, name)
 }
 
 func webInstallCmd() *cobra.Command {

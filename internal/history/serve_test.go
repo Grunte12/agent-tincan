@@ -1206,7 +1206,7 @@ func TestPollAndHandlePingFailurePreservesWork(t *testing.T) {
 				t.Fatal(err)
 			}
 			var handled []string
-			n, err := pollAndHandle(t.Context(), relay, time.Second, "history-serve", func(_ context.Context, req envelope.Request) { handled = append(handled, req.ID) })
+			n, err := PollAndHandle(t.Context(), relay, time.Second, "history-serve", func(_ context.Context, req envelope.Request) { handled = append(handled, req.ID) })
 			if err != nil || n != 1 || !slices.Equal(handled, []string{"work"}) {
 				t.Fatalf("handled %v (%d): %v", handled, n, err)
 			}

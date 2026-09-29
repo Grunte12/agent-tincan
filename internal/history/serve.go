@@ -319,12 +319,12 @@ func (s *Service) logf(format string, args ...any) {
 // RequestTimeout. Poll errors back off and retry; only a 403 (this agent
 // is not joined) stops the loop.
 func (s *Service) Run(ctx context.Context) error {
-	return runPolling(ctx, s.PollOnce, s.logf)
+	return RunPolling(ctx, s.PollOnce, s.logf)
 }
 
-// runPolling calls pollOnce until ctx is cancelled, backing off on errors.
+// RunPolling calls pollOnce until ctx is cancelled, backing off on errors.
 // Only a 403 (the agent is not joined) stops it.
-func runPolling(ctx context.Context, pollOnce func(context.Context) (int, error), logf func(string, ...any)) error {
+func RunPolling(ctx context.Context, pollOnce func(context.Context) (int, error), logf func(string, ...any)) error {
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
@@ -353,12 +353,12 @@ func runPolling(ctx context.Context, pollOnce func(context.Context) (int, error)
 // PollOnce waits up to Hold for requests, then handles each one serially.
 // It returns how many requests it handled.
 func (s *Service) PollOnce(ctx context.Context) (int, error) {
-	return pollAndHandle(ctx, s.Relay, s.Hold, "history-serve", s.handleSafely)
+	return PollAndHandle(ctx, s.Relay, s.Hold, "history-serve", s.handleSafely)
 }
 
-// pollAndHandle waits up to hold (client.DefaultPollHold when zero) for
+// PollAndHandle waits up to hold (client.DefaultPollHold when zero) for
 // requests, then handles each one serially.
-func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, surface string, handle func(context.Context, envelope.Request)) (int, error) {
+func PollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, surface string, handle func(context.Context, envelope.Request)) (int, error) {
 	if hold == 0 {
 		hold = client.DefaultPollHold
 	}
@@ -539,7 +539,7 @@ func replyDetached(ctx context.Context, relay *client.Relay, req envelope.Reques
 // its relay-set chain, and its sender, is on the allowlist (or the
 // allowlist is AllowAll).
 func (s *Service) denied(req envelope.Request) string {
-	return chainDenied(s.Allowlist, req, "history", "read the owner's conversation history", s.logf)
+	return ChainDenied(s.Allowlist, req, "history", "read the owner's conversation history", s.logf)
 }
 
 // window reads the owner's window file, if one is configured.
@@ -550,12 +550,12 @@ func (s *Service) window() (Window, error) {
 	return LoadWindow(s.WindowFile)
 }
 
-// chainDenied returns why req may not use agent, or "" when every agent in
+// ChainDenied returns why req may not use agent, or "" when every agent in
 // its relay-set chain, and its sender, is on the allowlist. An allowlist
 // of AllowAll admits any joined agent: the relay already refuses anyone
 // who has not joined. Only relay-set fields are consulted, never the body. what says what access grants, for
 // the reply.
-func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent, what string, logf func(string, ...any)) string {
+func ChainDenied(allowlist func() ([]string, error), req envelope.Request, agent, what string, logf func(string, ...any)) string {
 	if allowlist == nil {
 		return fmt.Sprintf("Declined: the %s agent has no allowlist configured.", agent)
 	}

@@ -159,6 +159,8 @@ ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in Ope
 
 History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. Copilot answers come back as text, without images. It is always listening.
 
+Notes. The notes agent is a small Tincan service on the Mac where you use Agent Notes, not a model. Any agent can ask it to save a note, search your notes, or read one back, and a save comes back with the new note's id. Saves wait on the relay up to 30 days and are kept on the Mac until they are written, so a note is not lost while the Mac sleeps ([details](docs/adapters/notes.md)).
+
 ChatGPT, Claude and Grok on the web (chatgpt-web, claude-web and grok-web). These make your own ChatGPT, Claude and Grok accounts teammates. A Tincan service on your Mac has the Chrome extension open a background tab in your logged-in ChatGPT, Claude or Grok, type the message, and read the answer back, with any generated images attached. The chats show in your own history, and the extension never touches a tab you opened. Grok is optional: you grant the extension grok.com on its options page first, and xAI's terms prohibit automated access, so turn it on only if you accept that risk to the account ([details](docs/adapters/web-agents.md#grok-grant-it-first)).
 
 Gemini on the web (gemini-web). The same for your Gemini account, once you grant Gemini on the extension's options page. Google's terms do not allow automated access and its enforcement can reach your whole Google account, and Gemini answers can draw on Gmail, Drive and Calendar if they are connected, so give it an allowlist ([details](docs/adapters/web-agents.md#gemini)).
@@ -167,7 +169,7 @@ Perplexity on the web (perplexity-web). Ask Perplexity through your own signed-i
 
 Copilot on the web (copilot-web). The same for the Microsoft Copilot of a personal Microsoft account (copilot.microsoft.com, now copilot.com), once you grant Copilot on the extension's options page; replies end with a "Sources:" list of the answer's links. The Microsoft Services Agreement does not allow automated access and Microsoft's enforcement can reach your whole Microsoft account, so turn it on only if you accept that ([details](docs/adapters/web-agents.md#copilot)).
 
-Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
+Who can use history, notes and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it. Notes has two files, one for search and read and one for add.
 
 In one table:
 
@@ -184,6 +186,7 @@ In one table:
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
 | history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension | Always listening (long-polls the relay) |
+| notes | A small Tincan service on the Mac with Agent Notes | Saves, searches and reads notes through the helper inside the Agent Notes app | Always listening (long-polls the relay); saves wait up to 30 days while the Mac sleeps |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
 | grok-web | Your own Grok account, as a teammate | Same as chatgpt-web, on grok.com, once you grant the extension grok.com | Always listening (a Tincan service on your Mac) |
@@ -503,7 +506,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
 | `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, grok-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. | Claude Code |
-| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web |
+| `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, notes, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web |
 | `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
 
 Notes that apply to every method:
@@ -528,6 +531,7 @@ Notes that apply to every method:
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
+| Notes agent | `notes` | wait | [notes.md](docs/adapters/notes.md) |
 | ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 
 Any other agent can use kind `generic` with whichever wake fits.
@@ -1045,6 +1049,49 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 [docs/adapters/history.md](docs/adapters/history.md)
 
+### The notes agent
+
+#### What it is
+
+A Go service, `tincan notes serve`, not a model. It runs on the Mac where the owner uses Agent Notes and drives the `agent-notes` helper inside the app. Teammates ask it to add a note (title, Markdown body, tags), search notes (up to 20 matches with id, title, tags and a snippet), or read one note by id. It never edits, archives or deletes a note. Every note it adds carries the `from-agent` tag and records which agent asked. Agent Tincan's operator prompt routes requests to save, find or read a note to it.
+
+#### How it joins
+
+```bash
+tincan invite notes --kind notes                                            # relay machine (or an admin device)
+TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay http://tincan-relay
+```
+
+The agent must be named `notes`, and the relay must be from this release or later so requests to kind `notes` wait 30 days instead of 24 hours.
+
+#### How it wakes
+
+Wait: the service long-polls the relay. Set `{ "notes": { "method": "wait" } }` in `wake.json`.
+
+#### How it sends and receives
+
+Requests are either structured (`note:` then one JSON object, parsed in Go, no model) or free text, which a tool-less `codex exec` step turns into an operation; an add always saves the sender's text verbatim. Each add is written to a spool on the Mac before the library is touched and created with an idempotency key, so it is saved at most once and kept for retry when the helper fails. Replies come from fixed templates in Go.
+
+#### One-time setup
+
+```bash
+tincan notes install --library-root <Agent Notes library folder>
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.notes.plist
+tincan notes doctor
+```
+
+Grant the tincan binary Files and Folders access to the library's folder in System Settings > Privacy & Security. It needs an Agent Notes build whose helper supports `create --idempotency-key`.
+
+#### Limits and gotchas
+
+- By default every joined agent may search, read and add, including the ChatGPT connector in OpenAI's cloud. Narrow it with `~/.config/tincan/notes-allow.txt` (search and read) and `~/.config/tincan/notes-add-allow.txt` (add).
+- Search and read cover active notes only.
+- An add that expires on the relay may still be saved when the Mac returns; agents search notes for the title before resending.
+
+#### Adapter doc
+
+[docs/adapters/notes.md](docs/adapters/notes.md)
+
 ### The web agents (chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web and copilot-web)
 
 #### What it is
@@ -1147,7 +1194,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `notes`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `generic`. History, notes and the web agents are services, so their blocks carry setup only, no standing instructions of their own. The notes block carries the lines to add to the teammates that use it. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 

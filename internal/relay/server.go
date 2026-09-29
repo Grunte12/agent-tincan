@@ -28,14 +28,15 @@ import (
 
 // Config tunes the relay.
 type Config struct {
-	RequestTTL    time.Duration // how long an unanswered request lives
-	PollHold      time.Duration // max time a long-poll is held
-	DeliveryLease time.Duration // how long a delivered request waits for a claim
-	ClaimLease    time.Duration // how long a claim lasts before the request is requeued
-	MaxWait       time.Duration // cap on get-reply waits
-	SweepEvery    time.Duration
-	Now           func() time.Time
-	Attachments   AttachmentConfig
+	RequestTTL      time.Duration // how long an unanswered request lives
+	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
+	PollHold        time.Duration // max time a long-poll is held
+	DeliveryLease   time.Duration // how long a delivered request waits for a claim
+	ClaimLease      time.Duration // how long a claim lasts before the request is requeued
+	MaxWait         time.Duration // cap on get-reply waits
+	SweepEvery      time.Duration
+	Now             func() time.Time
+	Attachments     AttachmentConfig
 	// Version is this relay's tincan build, reported to agents in the
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
@@ -44,6 +45,9 @@ type Config struct {
 func (c *Config) defaults() {
 	if c.RequestTTL == 0 {
 		c.RequestTTL = 24 * time.Hour
+	}
+	if c.NotesRequestTTL == 0 {
+		c.NotesRequestTTL = 30 * 24 * time.Hour
 	}
 	if c.PollHold == 0 {
 		c.PollHold = client.DefaultPollHold
@@ -97,18 +101,21 @@ type Replier interface {
 
 // Server is the relay.
 type Server struct {
-	cfg    Config
-	dir    *identity.Directory
-	store  *store.Store
-	hub    *hub
-	prep   Preparer
-	events Events
-	wake   WakeNamer
-	conn   Connector
-	dist   *dist
-	blobs  string   // attachment directory, "" when attachments are off
-	key    string   // relay key, proves this relay's identity to its agents (hello)
-	urls   []string // addresses advertised to agents in whoami
+	cfg Config
+	dir *identity.Directory
+	// lookupAgent is how requestTTL reads the recipient's kind; it is
+	// dir.Agent, replaced in tests to simulate a failed lookup.
+	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
+	store       *store.Store
+	hub         *hub
+	prep        Preparer
+	events      Events
+	wake        WakeNamer
+	conn        Connector
+	dist        *dist
+	blobs       string   // attachment directory, "" when attachments are off
+	key         string   // relay key, proves this relay's identity to its agents (hello)
+	urls        []string // addresses advertised to agents in whoami
 
 	// upgrader installs the dist release over the relay binary; nil when off.
 	upgrader SelfUpgrader
@@ -164,6 +171,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}, stopping: make(chan struct{})}
+	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
 	states, err := st.PollFeatures(context.Background())
@@ -540,7 +548,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prepared := req
-	req, err = s.store.Enqueue(r.Context(), req, s.cfg.RequestTTL)
+	req, err = s.store.Enqueue(r.Context(), req, s.requestTTL(r.Context(), req.To))
 	if err != nil {
 		if rf, ok := s.prep.(Refunder); ok {
 			rf.Refund(prepared)
@@ -1380,7 +1388,12 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Sweep(r.Context())
-	req, err := s.store.Release(r.Context(), r.PathValue("id"), s.cfg.RequestTTL)
+	id := r.PathValue("id")
+	ttl := s.cfg.RequestTTL
+	if held, _, err := s.store.Request(r.Context(), id); err == nil {
+		ttl = s.requestTTL(r.Context(), held.To)
+	}
+	req, err := s.store.Release(r.Context(), id, ttl)
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
@@ -1425,6 +1438,23 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "declined"})
 }
 
+// requestTTL is how long a request to agent lives unanswered: notes agents
+// get NotesRequestTTL so an add survives the notes Mac being offline for
+// days; every other kind, and an unknown agent, gets RequestTTL. A failed
+// lookup is logged and gets NotesRequestTTL: keeping a non-notes request
+// longer than needed is cheaper than expiring a note after a day.
+func (s *Server) requestTTL(ctx context.Context, agent string) time.Duration {
+	a, ok, err := s.lookupAgent(ctx, agent)
+	if err != nil {
+		log.Printf("request ttl: look up %s: %v (using notes ttl %v)", agent, err, s.cfg.NotesRequestTTL)
+		return s.cfg.NotesRequestTTL
+	}
+	if ok && a.Kind == onboard.KindNotes {
+		return s.cfg.NotesRequestTTL
+	}
+	return s.cfg.RequestTTL
+}
+
 func (s *Server) notifyApproval(ctx context.Context, held envelope.Request) {
 	if held.ApprovalNotify == "" {
 		return
@@ -1440,7 +1470,7 @@ func (s *Server) notifyApproval(ctx context.Context, held envelope.Request) {
 	// the request with tincan held.
 	req := envelope.Request{From: "relay", To: held.ApprovalNotify, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"},
 		Body: fmt.Sprintf("held for approval: %s -> %s (request %s). Owner: see it with tincan held, then run tincan approve %s or tincan deny %s. Only the owner may decide.", held.From, held.To, held.ID, held.ID, held.ID)}
-	req, err := s.store.Enqueue(ctx, req, s.cfg.RequestTTL)
+	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
 	if err != nil {
 		s.record(ctx, "approval_notify_failed", held.ID, held.TraceID, "relay", "")
 		return
