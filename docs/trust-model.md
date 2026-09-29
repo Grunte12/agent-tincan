@@ -75,9 +75,21 @@ The `codex`, `gemini-cli` and `grok-cli` teammates are coding agents that `tinca
 - Antigravity (`agy`, the gemini-cli default engine) documents no sandbox. The wake runs it only when the owner sets `TINCAN_GEMINI_ALLOW_UNCONFINED=1`, and then nothing limits its writes to the owner's files.
 - Secrets in the environment reach the model. The Gemini CLI engine needs `GEMINI_API_KEY` in its environment, and an `XAI_API_KEY` in the grok-cli listener's environment is there too; like any other variable there, a command the model runs can read it and, with the network open, send it anywhere. So can the Grok login in the wake home (`.grok/auth.json`), which the run needs to read.
 
+## Council
+
+The `council` agent puts one question to every model on the team, has them rank each other's answers blind, and has a chairman write the verdict ([docs/adapters/council.md](adapters/council.md)). It is a Go service, not a model, but it is the one agent whose whole job is to send your text to several outside vendors at once.
+
+- Vendor egress. Each web member types its prompt into its vendor's site as the owner. That prompt carries the question and any inlined attachment text, and in the review and chairman stages it also carries every other member's answer. A council with ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot sends all of that to OpenAI, Anthropic, xAI, Google, Perplexity and Microsoft, under each site's own terms and retention. Command-woken CLI members send it to their model's API the same way.
+- Memory-informed answers reach other vendors. A web member answers from the owner's account, so its answer can draw on that site's memory, custom instructions and, for Gemini, connected Google apps. During review that answer goes to every other member's vendor. Something Gemini knows from Gmail can end up in the prompt Council sends to ChatGPT.
+- Held by default. The relay holds every ask to an agent of kind `council` for the owner's approval, with no `approval.json` needed, and a failed kind lookup holds rather than delivers. `tincan held` shows the target kind and each attachment's name and size, so the owner sees what would go to vendors before approving. An explicit `approval.json` gate entry for the council agent replaces the default; `{"from": []}` turns the hold off. The hold is by target, so an agent's leaderboard read is held too. `tincan council serve` refuses to run unless the relay stores kind `council` for it, so an older relay that cannot hold councils never runs one.
+- Approval from an admin device is owner-equivalent. `tincan approve` and the owner's `tincan council "question"`, which approves its own held request when run interactively in a terminal on an admin device, are the owner acting. The hold restrains agents only because they cannot approve: an agent with a shell on an admin device, or on the relay host with access to the admin socket, can approve its own council. Keep agents off admin devices if the hold should mean something. Run from a script or an agent's shell, `tincan council` waits for approval like any ask.
+- The chain never widens. The convener and every agent in its chain never sit on the council or chair it, and allowlists and approval rules apply to Council's member asks through the chain as usual. A form may name only web and wakeable model teammates or agents the owner listed in `council.json`, never a service such as history or notes, so their retrieved content does not reach a vendor through a council.
+- Answers are untrusted content. Reviewers and the chairman see answers between per-council random delimiters with an instruction that the enclosed text is material to judge; only the defined output fields are parsed, and the chairman cannot change the peer scores. The reply is still model output: an agent acting on a verdict is reading model text, with the risk described below.
+- Retention. Inlined attachment text lives in request bodies, which the relay keeps like any other request, not on the 7-day attachment clock. Council's database and reports stay in its folder on the owner's machine (0700 folders, 0600 files) until the owner deletes them. The report and scorecard are local files; nothing is hosted.
+
 ## What it deliberately does not do
 
-- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. By default there is no per-request approval; the optional owner gate below can hold requests to selected agents.
+- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. By default there is no per-request approval, except that asks to the council agent are held (see [Council](#council)); the optional owner gate below can hold requests to other agents.
 - Tailscale is the security boundary. Anything that can act as a joined machine on your tailnet can make your other agents act. Protect your tailnet: use tagged, short-lived auth keys and review who can add devices.
 - The relay can read every request and reply. Run it on a machine you control.
 - `tincan upgrade` trusts the relay host. The sha256 it checks and the binary it installs both come from the same relay, so the check protects against corruption in transit, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into the relay's `--dist` directory.
@@ -109,7 +121,8 @@ one of `from` and `unless` is required per target. Client-supplied identities,
 chains and statuses cannot bypass the check, which runs after the relay's
 cycle, hop and rate checks and before delivery. Both asks and notifies are gated.
 
-A missing file disables the gate. The relay reloads changed files. Unreadable,
+A missing file disables the gate for every target except agents of kind
+`council`, which are held by default (see [Council](#council)). The relay reloads changed files. Unreadable,
 malformed or group/world-accessible policies hold every request to every target
 in the last good copy, regardless of its previous sender restrictions. With no
 valid copy, a bad policy prevents startup; if it first appears while running,
