@@ -3,6 +3,7 @@ package onboard
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -201,13 +202,13 @@ func TestEmptyRosterAndOffline(t *testing.T) {
 
 func TestRecipes(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL})
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "generic", "second-agent", "relay-host"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "scheduled", "generic", "second-agent", "relay-host"} {
 		r := recipe(t, k, kind)
 		if r.Title == "" || len(r.Steps) < 2 {
 			t.Errorf("recipe %s too thin: %+v", kind, r)
 		}
 	}
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "generic"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "scheduled", "generic"} {
 		r := recipe(t, k, kind)
 		all := strings.Join(r.Steps, "\n")
 		inv := strings.Index(all, "tincan invite <name> --kind "+kind)
@@ -672,4 +673,48 @@ func TestInstructionsNameMCPReloadPerKind(t *testing.T) {
 	if got := block(t, k, "a").Instructions; strings.Contains(got, "different build") {
 		t.Errorf("chatgpt runs no local tincan mcp but was told to reload one: %s", got)
 	}
+}
+
+// A scheduled agent cannot be woken; a platform cron starts a fresh session
+// on its own interval. Its instructions must stand alone in that cron job,
+// and its setup names the wake.json schedule entry, the matching cron and
+// the proxy join.
+func TestScheduledBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "fo", Kind: KindScheduled}}})
+	a := block(t, k, "fo")
+	if a.Wake != "schedule" {
+		t.Errorf("scheduled wake = %q, want schedule", a.Wake)
+	}
+	for _, want := range []string{"tincan inbox", "no memory", "reply", "needs_input", "replies to your own requests", "finish the work that was waiting", "progress", "needs a human", "inbox is empty", "do nothing else"} {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("scheduled instructions missing %q:\n%s", want, a.Instructions)
+		}
+	}
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{"wake.json", "chmod 600", `{"fo": {"method": "schedule", "every": "5m"}}`, "restart the relay", "refuses to start", "same interval", "every 5 minutes", "cron job", "tincan join <code> --relay " + relayURL + " --proxy http://localhost:<port>"} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("scheduled setup missing %q:\n%s", want, setup)
+		}
+	}
+	r := recipe(t, k, KindScheduled)
+	if !strings.Contains(r.Title, "schedule") {
+		t.Errorf("scheduled recipe title %q", r.Title)
+	}
+	if all := strings.Join(r.Steps, "\n"); !strings.Contains(all, `"method": "schedule"`) || !strings.Contains(all, "--proxy http://localhost:<port>") {
+		t.Errorf("scheduled recipe lacks the schedule entry or proxy tip:\n%s", all)
+	}
+	if !slices.Contains(opWakes(t, k), "schedule") {
+		t.Errorf("operator wake methods should list schedule:\n%s", k.Operator)
+	}
+}
+
+func opWakes(t *testing.T, k Kit) []string {
+	t.Helper()
+	const marker = "for each wake method in use ("
+	i := strings.Index(k.Operator, marker)
+	if i < 0 {
+		t.Fatalf("operator prompt lacks the wake-method list:\n%s", k.Operator)
+	}
+	rest := k.Operator[i+len(marker):]
+	return strings.Split(rest[:strings.Index(rest, ")")], ", ")
 }

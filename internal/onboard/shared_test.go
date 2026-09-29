@@ -122,6 +122,8 @@ func TestExpectOnline(t *testing.T) {
 		{KindChatGPT, "none", false},
 		{KindCodex, "command", false},
 		{KindCodex, "webhook", false}, // non-generic kinds ignore wake
+		{KindScheduled, "schedule", false},
+		{KindGeneric, "schedule", false},
 		{"", "webhook", false},
 	}
 	for _, c := range cases {

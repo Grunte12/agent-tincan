@@ -42,11 +42,12 @@ const (
 	KindGeminiWeb     = "gemini-web"
 	KindPerplexityWeb = "perplexity-web"
 	KindCopilotWeb    = "copilot-web"
+	KindScheduled     = "scheduled"
 	KindGeneric       = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -101,6 +102,7 @@ var defaultWake = map[string]string{
 	KindGeminiWeb:     "wait",
 	KindPerplexityWeb: "wait",
 	KindCopilotWeb:    "wait",
+	KindScheduled:     "schedule",
 	KindGeneric:       "none",
 }
 
@@ -244,11 +246,11 @@ func Build(o Options) (Kit, error) {
 		op.Team = append(op.Team, teamLine{Name: m.Name, Kind: kind, Wake: wake, ExpectOnline: expectOnline(kind, wake)})
 	}
 	if len(roster) == 0 {
-		for _, w := range []string{"webhook", "email", "wait", "channel", "command", "none"} {
+		for _, w := range []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"} {
 			wakes[w] = true
 		}
 	}
-	for _, w := range []string{"webhook", "email", "wait", "channel", "command", "none"} {
+	for _, w := range []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"} {
 		if wakes[w] {
 			op.WakeMethods = append(op.WakeMethods, w)
 		}
