@@ -122,7 +122,7 @@ func TestStoreRecordScoresIdempotent(t *testing.T) {
 		{Member: "claude-web", Score: 0.9, Placement: 1, Ballots: 4},
 		{Member: "gemini-web", Score: 0.4, Placement: 2, Ballots: 4},
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := s.RecordScores(ctx, "r1", "writing", scores); err != nil {
 			t.Fatalf("record %d: %v", i, err)
 		}
