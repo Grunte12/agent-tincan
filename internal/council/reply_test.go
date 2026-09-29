@@ -175,3 +175,32 @@ func TestReplyVerdictUnavailableKeepsRanking(t *testing.T) {
 		t.Errorf("block category = %v, verdict = %v; want uncategorized and no verdict", res["category"], res["verdict"])
 	}
 }
+
+func TestReplyNoQuorumFitsRelayBodyLimit(t *testing.T) {
+	long := strings.Repeat("<b>a long web answer</b> ", 64<<10/25)
+	f := Finished{
+		RequestID: "req-10",
+		Question:  "Which queue should we use?",
+		Asked:     []string{"claude-web", "chatgpt-web", "gemini-web", "grok-web"},
+		Outcome: Outcome{
+			State:  CouncilFailed,
+			Reason: "only 2 of 4 members answered in time, and a council needs at least 3",
+			Answers: []Answer{
+				{Member: "claude-web", Body: long},
+				{Member: "gemini-web", Body: long},
+			},
+		},
+		ReportPath: "/tmp/report.html",
+	}
+	text, _ := Reply(f)
+	if len(text) > envelope.DefaultMaxBody {
+		t.Fatalf("reply is %d bytes, over the relay's %d byte body limit", len(text), envelope.DefaultMaxBody)
+	}
+	if !strings.Contains(text, "[truncated:") {
+		t.Errorf("reply does not say the answers were cut")
+	}
+	res := resultBlock(t, text)
+	if answers, _ := res["answers"].([]any); len(answers) != 2 {
+		t.Errorf("block answers = %d, want 2", len(answers))
+	}
+}

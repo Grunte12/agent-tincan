@@ -172,7 +172,7 @@ func Reply(f Finished) (string, envelope.Status) {
 	if o.State == CouncilFailed && len(o.Answers) > 0 {
 		line("")
 		line("Answers received:")
-		for _, a := range o.Answers {
+		for _, a := range receivedAnswers(o.Answers) {
 			line("")
 			line("== %s ==", a.Member)
 			line("%s", strings.TrimSpace(a.Body))
@@ -287,7 +287,7 @@ func (f Finished) result() councilResult {
 		r.Ranking = append(r.Ranking, resultRank{Member: s.Member, Placement: s.Placement, Score: s.Score, Ballots: s.Ballots})
 	}
 	if o.State == CouncilFailed {
-		for _, a := range o.Answers {
+		for _, a := range receivedAnswers(o.Answers) {
 			r.Answers = append(r.Answers, resultAnswer{Member: a.Member, Body: a.Body})
 		}
 	}
@@ -298,4 +298,25 @@ func (f Finished) result() councilResult {
 		r.Excluded = append(r.Excluded, resultMember{Member: x.Name, Reason: x.Reason})
 	}
 	return r
+}
+
+// receivedAnswerBudget caps the answers a failed council's reply carries,
+// once in the text and once in the result block. JSON can escape a byte to
+// six, so both copies stay under the relay's 256 KB body limit; the report
+// keeps every answer in full.
+const receivedAnswerBudget = 32 << 10
+
+// receivedAnswers returns the answers cut to share receivedAnswerBudget.
+func receivedAnswers(answers []Answer) []Answer {
+	lens := make([]int, len(answers))
+	for i, a := range answers {
+		lens[i] = len(a.Body)
+	}
+	shares := fit(lens, receivedAnswerBudget)
+	out := make([]Answer, len(answers))
+	for i, a := range answers {
+		a.Body, _ = truncate(a.Body, shares[i])
+		out[i] = a
+	}
+	return out
 }
