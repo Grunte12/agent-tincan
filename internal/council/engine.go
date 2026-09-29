@@ -41,8 +41,9 @@ const pollStep = 100 * time.Millisecond
 
 // Stages.
 const (
-	StageAnswer = "answer"
-	StageReview = "review"
+	StageAnswer   = "answer"
+	StageReview   = "review"
+	StageChairman = "chairman"
 )
 
 // Why a member is absent from a stage.
@@ -54,6 +55,8 @@ const (
 	AbsentNeedsInput = "needs input"
 	// AbsentUnranked is an answer no valid ballot ranked.
 	AbsentUnranked = "not ranked"
+	// AbsentNoVerdict is a chairman whose reply had no verdict to parse.
+	AbsentNoVerdict = "no verdict in reply"
 )
 
 // How a context file reached a member.
@@ -91,6 +94,8 @@ type Council struct {
 	Request  envelope.Request
 	Question string
 	Members  []Seat
+	// Chairmen is the chairman failover order (Eligibility.Chairmen).
+	Chairmen []string
 }
 
 // Answer is one member's answer.
@@ -143,12 +148,14 @@ type Outcome struct {
 	Absent    []Absence
 	Context   []ContextNote
 	// Truncated names the members whose answers reviewers saw cut to fit.
-	Truncated              []string
-	AnswerTime, ReviewTime time.Duration
+	Truncated []string
+	// Verdict is the chairman's, set when State is CouncilCompleted.
+	Verdict                           Verdict
+	AnswerTime, ReviewTime, ChairTime time.Duration
 }
 
 // Run runs the answer stage, then, with a quorum of answers, the review
-// stage, and scores the ballots. An error is returned only when ctx ends;
+// stage, scores the ballots, and has a chairman write the verdict. An error is returned only when ctx ends;
 // every other problem is in the Outcome.
 func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 	e.defaults()
@@ -245,7 +252,10 @@ func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
 		}
 	}
 	out.State = CouncilCompleted
-	return out, nil
+	start = e.Now()
+	out.Verdict, err = e.chair(ctx, c, out)
+	out.ChairTime = e.Now().Sub(start)
+	return out, err
 }
 
 func (e *Engine) defaults() {
