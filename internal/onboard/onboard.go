@@ -478,3 +478,25 @@ func indent(s string) string {
 	}
 	return b.String()
 }
+
+// Profile is how the kit reads one roster entry.
+type Profile struct {
+	Kind, Wake string
+	// Service: a Tincan Go service rather than a model agent. Web agents
+	// are services that front a model, so Web is set with it.
+	Service, Web bool
+	// ExpectOnline: the agent is normally connected, not woken on demand.
+	ExpectOnline bool
+}
+
+// ProfileOf resolves m's kind and wake method the way Build does (stored
+// kind, then runtime name, then generic; the kind's default wake when m
+// has none), so other packages classify agents exactly as the kit does.
+func ProfileOf(m Member) Profile {
+	kind := resolveKind(m, nil)
+	wake := m.Wake
+	if wake == "" {
+		wake = defaultWake[kind]
+	}
+	return Profile{Kind: kind, Wake: wake, Service: isService(kind), Web: isWebKind(kind), ExpectOnline: expectOnline(kind, wake)}
+}
