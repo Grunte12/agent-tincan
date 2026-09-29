@@ -180,6 +180,14 @@ type Result struct {
 	Target *Target `json:"target,omitempty"`
 }
 
+// SendResponse is the relay's reply to a send: the queued request and, for
+// a recipient on a schedule, its schedule facts. Older relays send only the
+// request and older clients ignore Target.
+type SendResponse struct {
+	Request
+	Target *Target `json:"target,omitempty"`
+}
+
 // Target is the relay's schedule facts about a recipient that checks its
 // inbox on its own interval instead of being woken.
 type Target struct {

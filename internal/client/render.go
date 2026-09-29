@@ -96,7 +96,7 @@ func (a AgentInfo) OverdueNote(now time.Time) string {
 	return "overdue: last check " + ageAgo(now.Sub(a.LastPoll))
 }
 
-// ageAgo renders d like LastSeen does: "just now", "12m ago", "3h ago",
+// ageAgo renders an age for LastSeen and OverdueNote: "just now", "12m ago", "3h ago",
 // "2d ago".
 func ageAgo(d time.Duration) string {
 	switch {

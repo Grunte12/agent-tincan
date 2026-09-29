@@ -103,16 +103,7 @@ func (a AgentInfo) LastSeen(now time.Time) string {
 	if last.IsZero() {
 		return "never seen"
 	}
-	d := now.Sub(last)
-	switch {
-	case d < time.Minute:
-		return "last seen just now"
-	case d < time.Hour:
-		return fmt.Sprintf("last seen %dm ago", int(d/time.Minute))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("last seen %dh ago", int(d/time.Hour))
-	}
-	return fmt.Sprintf("last seen %dd ago", int(d/(24*time.Hour)))
+	return "last seen " + ageAgo(now.Sub(last))
 }
 
 func (a AgentInfo) Backlog(now time.Time) string {
@@ -281,12 +272,8 @@ func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, p
 	return out.Request, err
 }
 
-// sent is the relay's send response: the queued request and, for a
-// recipient on a schedule, its target facts (absent from older relays).
-type sent struct {
-	envelope.Request
-	Target *envelope.Target `json:"target,omitempty"`
-}
+// sent is the relay's send response.
+type sent = envelope.SendResponse
 
 func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	var out sent

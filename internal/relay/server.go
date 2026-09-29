@@ -575,15 +575,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if s.events != nil {
 		s.events.Queued(r.Context(), req)
 	}
-	writeJSON(w, http.StatusCreated, sendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
-}
-
-// sendResponse is the queued request with, for a recipient on a schedule,
-// the target facts a sender needs to say when to expect a reply. Older
-// clients decode it as a plain request and ignore target.
-type sendResponse struct {
-	envelope.Request
-	Target *envelope.Target `json:"target,omitempty"`
+	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
 }
 
 // recipientTarget is the schedule facts for agent, nil unless it is on
@@ -594,13 +586,16 @@ func (s *Server) recipientTarget(ctx context.Context, agent string) *envelope.Ta
 	if every <= 0 {
 		return nil
 	}
-	var joined time.Time
-	if a, ok, err := s.lookupAgent(ctx, agent); err == nil && ok {
-		joined = a.JoinedAt
-	}
 	s.mu.Lock()
 	last := s.lastPoll[agent]
 	s.mu.Unlock()
+	var joined time.Time
+	if last.IsZero() {
+		// Only an agent that has never polled is measured from its join.
+		if a, ok, err := s.lookupAgent(ctx, agent); err == nil && ok {
+			joined = a.JoinedAt
+		}
+	}
 	return s.scheduleTarget(every, last, joined, s.cfg.Now())
 }
 
