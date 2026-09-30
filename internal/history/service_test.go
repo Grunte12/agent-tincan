@@ -108,7 +108,11 @@ func TestInstallServiceRejectsUnsafeBinary(t *testing.T) {
 func TestInstallWebServiceDarwinWritesPlistNotLoaded(t *testing.T) {
 	for _, site := range WebSites {
 		home := t.TempDir()
-		res, err := InstallWebService(site, ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin <can>/tincan", UID: 501})
+		o := ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin <can>/tincan", UID: 501}
+		if WebSiteTakesThread(site) {
+			o.Thread = "0d0d0d0d-1111-7222-8333-000000000001"
+		}
+		res, err := InstallWebService(site, o)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -98,6 +98,9 @@ type WebAgent struct {
 	Allowlist func() ([]string, error)
 	// StatePath holds each asker's last conversation id (0600).
 	StatePath string
+	// Thread is the one conversation of a site that has one (a dot's DM
+	// thread, from --thread). Every request goes there.
+	Thread string
 	// JournalPath is the send journal (0600): each request this agent
 	// has sent, so a requeued request is never sent twice. Empty turns
 	// the journal off.
@@ -318,13 +321,28 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		return
 	}
 
-	// 2. Threading and the message.
-	wr, err := parseWebRequest(req.Body)
-	if err != nil {
-		w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: %v. %s", label, err, threadingHelp), envelope.StatusFailed, nil)
-		return
+	// 2. Threading and the message. A site with one thread takes the
+	// whole body as the message: a threading line is text to it.
+	var wr webRequest
+	if site.oneThread {
+		thread, ok := site.canonical(w.Thread)
+		if !ok {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; run it with --thread <id>, the id in https://%s/dots/<id>.", label, w.Name, site.host), envelope.StatusFailed, nil)
+			return
+		}
+		wr = webRequest{mode: threadConversation, convID: thread, message: strings.TrimSpace(req.Body)}
+		if wr.message == "" {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: there is no message to send.", label), envelope.StatusFailed, nil)
+			return
+		}
+	} else {
+		var err error
+		if wr, err = parseWebRequest(req.Body); err != nil {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: %v. %s", label, err, threadingHelp), envelope.StatusFailed, nil)
+			return
+		}
 	}
-	if wr.mode == threadConversation {
+	if wr.mode == threadConversation && !site.oneThread {
 		id, ok := site.canonical(wr.convID)
 		if !ok {
 			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: %q is not a %s conversation id. %s", label, wr.convID, label, threadingHelp), envelope.StatusFailed, nil)
@@ -405,8 +423,19 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	// its own because ctx may be spent by then.
 	defer w.closeTab(ctx, res.ConversationID)
 	anchor.since = res.Submitted()
-	entry := webSend{ConversationID: res.ConversationID, PrevUserID: anchor.prevUser, SubmittedAt: anchor.since, Recorded: time.Now().UTC(), State: webSendSent}
+	// A send that confirmed its message in the conversation (dots.send)
+	// names it: the wait binds to that message from the start.
+	if id := res.MessageID; id != "" && len(id) <= 128 && !strings.ContainsFunc(id, unicode.IsControl) {
+		anchor.bound = id
+	}
+	entry := webSend{ConversationID: res.ConversationID, PrevUserID: anchor.prevUser, SubmittedAt: anchor.since, UserMessageID: anchor.bound, Recorded: time.Now().UTC(), State: webSendSent}
 	w.journal(req.ID, entry)
+	if site.oneThread {
+		// One fixed thread: no used list (not a history source) and no
+		// per-asker memory.
+		w.answer(ctx, req, anchor, entry, note)
+		return
+	}
 	if w.UsedPath != "" {
 		if err := recordWebUsed(w.UsedPath, res.ConversationID, time.Now()); err != nil {
 			w.logf("used list %s: %v", w.UsedPath, err)
@@ -592,6 +621,12 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 		return w.rateLimitReply() + clickedNote(err, label)
 	}
 	switch {
+	case errors.Is(err, ErrPaused):
+		return "Nothing was sent: " + label + " is paused; unpause it in ChatGPT and ask again."
+	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrNotFound):
+		return fmt.Sprintf("Nothing was sent: %s's thread %s was not found; check the --thread the %s agent runs with.", label, convID, w.Name)
+	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrTimeout) && clickedNote(err, label) != "":
+		return fmt.Sprintf("Sorry, the message was sent to %s, but it did not show up in the conversation in time; ask for the reply later instead of sending it again.", label)
 	case errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("No %s conversation with id %s was found. Start a new one with \"new chat\" on the first line.", label, convID)
 	case errors.Is(err, ErrTimeout), errors.Is(err, context.DeadlineExceeded):
@@ -639,6 +674,8 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 		return fmt.Sprintf("Sorry, %s is rate-limiting this account right now. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", label, label, convID)
 	}
 	switch {
+	case errors.Is(err, errOrphaned) && w.site() != nil && w.site().oneThread:
+		return fmt.Sprintf("Sorry, another message was sent to %s (conversation %s) before it answered this one, so there is no reply to return.", label, convID)
 	case errors.Is(err, errOrphaned):
 		return fmt.Sprintf("Sorry, another message was sent in the %s conversation %s before this one was answered, so there is no reply to return.", label, convID)
 	case errors.Is(err, errThreadTooLong):
@@ -648,6 +685,9 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 	}
 	if errors.As(err, &ue) && !errors.Is(err, ErrTimeout) {
 		return fmt.Sprintf("Sorry, %s. The message was sent to %s (conversation %s), but the reply could not be read.", ue.Error(), label, convID)
+	}
+	if w.site() != nil && w.site().oneThread {
+		return fmt.Sprintf("Sorry, %s did not answer in time. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", label, label, convID)
 	}
 	return fmt.Sprintf("Sorry, %s did not finish answering in time. The message was sent; the conversation is %s.", label, convID)
 }

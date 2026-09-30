@@ -85,7 +85,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("bard")
-	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity or copilot)` {
+	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity, copilot or dots)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -102,7 +102,12 @@ func TestCooldownsAreIndependentPerSite(t *testing.T) {
 				t.Fatalf("cooldown on %s: %s has %s left", limited, s, left)
 			}
 		}
-		_, err := c.Send(context.Background(), limited, "hi", "", true)
+		// A site with one thread (dots) always sends into it.
+		conv, newChat := "", true
+		if siteFor(limited).oneThread {
+			conv, newChat = "0d0d0d0d-1111-7222-8333-000000000001", false
+		}
+		_, err := c.Send(context.Background(), limited, "hi", conv, newChat)
 		if !errors.Is(err, ErrRateLimited) || err.Error() != "source unavailable: "+string(limited)+": "+siteLabel(limited)+" is rate-limiting this account right now; try again later" {
 			t.Fatalf("send to %s during its cooldown: %v", limited, err)
 		}
@@ -147,7 +152,7 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity or copilot" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web or copilot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity, copilot or dots" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web, copilot-web or dot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
 	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli" {
@@ -174,6 +179,9 @@ func TestSiteTableNames(t *testing.T) {
 	}
 	if got := [3]string{WebAgentName(SourcePerplexity), siteLabel(SourcePerplexity), siteOf(SourcePerplexity)}; got != [3]string{"perplexity-web", "Perplexity", "www.perplexity.ai"} {
 		t.Fatalf("perplexity: %v", got)
+	}
+	if got := [3]string{WebAgentName(SourceDots), siteLabel(SourceDots), siteOf(SourceDots)}; got != [3]string{"dot-web", "your dot", "chatgpt.com"} || IsLiveSource(SourceDots) {
+		t.Fatalf("dots: %v", got)
 	}
 	for _, src := range []Source{SourceCodex, SourceClaudeCode, "bard"} {
 		if IsLiveSource(src) || WebAgentName(src) != "" {

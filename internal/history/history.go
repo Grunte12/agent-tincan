@@ -42,6 +42,9 @@ const (
 	// SourcePerplexity is www.perplexity.ai. It fronts the perplexity-web
 	// agent only and is not a history source (not in Sources).
 	SourcePerplexity Source = "perplexity"
+	// SourceDots is the owner's OpenAI dot's DM on chatgpt.com. It fronts
+	// the dot-web agent only and is not a history source (not in Sources).
+	SourceDots Source = "dots"
 )
 
 // Sources lists every valid history Source: the live sites that are

@@ -273,3 +273,48 @@ func TestWebServeWithoutExtensionStartsAndDoesNotLoop(t *testing.T) {
 		t.Fatal("web serve did not stop")
 	}
 }
+
+// The dots site needs its thread: web serve and web install refuse it
+// without a valid --thread, and install keeps the thread in the service;
+// no other site takes --thread.
+func TestWebDotsNeedsThread(t *testing.T) {
+	t.Setenv("TINCAN_RELAY", "")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	cfg := filepath.Join(t.TempDir(), "dot-web.json")
+	for _, args := range [][]string{
+		{"web", "serve", "--site", "dots", "--config", cfg, "--allowlist", allow},
+		{"web", "serve", "--site", "dots", "--thread", "not/a/thread", "--config", cfg, "--allowlist", allow},
+		{"web", "serve", "--site", "chatgpt", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--config", cfg, "--allowlist", allow},
+	} {
+		_, err := run(t, Root(), args...)
+		if err == nil || !strings.Contains(err.Error(), "--thread") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	if _, err := run(t, Root(), "web", "install", "--site", "dots", "--binary", "/opt/tincan/tincan"); err == nil || !strings.Contains(err.Error(), "--thread") {
+		t.Fatalf("install without --thread: %v", err)
+	}
+	if _, err := run(t, Root(), "web", "install", "--site", "grok", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan"); err == nil {
+		t.Fatal("install --site grok --thread accepted")
+	}
+	out, err := run(t, Root(), "web", "install", "--site", "dots", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	def := filepath.Join(home, ".config", "systemd", "user", "tincan-dot-web.service")
+	want := "--thread 0d0d0d0d-1111-7222-8333-000000000001"
+	if runtime.GOOS == "darwin" {
+		def = filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.web.dots.plist")
+		want = "<string>--thread</string>\n    <string>0d0d0d0d-1111-7222-8333-000000000001</string>"
+	}
+	b, err := os.ReadFile(def)
+	if err != nil || !strings.Contains(string(b), want) || !strings.Contains(string(b), "dot-web.json") {
+		t.Fatalf("definition %s (%v):\n%s", def, err, b)
+	}
+}

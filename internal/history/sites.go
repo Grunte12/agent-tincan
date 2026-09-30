@@ -78,6 +78,13 @@ type webSite struct {
 	// sources: the site's answers carry web source links, which the web
 	// agent's reply lists after the answer text (see sourcesFooter).
 	sources bool
+	// grantAs, when set, is the site whose extension grant this one runs
+	// under (dots under chatgpt): the extension's hello does not list it.
+	grantAs Source
+	// oneThread: the site's web agent serves one fixed conversation (a
+	// dot's DM), given with --thread. Every request goes there, the
+	// threading first line is sent as text, and each send names it.
+	oneThread bool
 }
 
 // canonical returns id in the site's canonical form.
@@ -208,6 +215,26 @@ var webSites = []*webSite{
 		listInTab:       true,
 		notLoggedIn:     copilotNotLoggedIn,
 		sources:         true,
+	},
+	{
+		source:   SourceDots,
+		label:    "your dot",
+		host:     "chatgpt.com",
+		agent:    "dot-web",
+		opPrefix: "dots",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewDots(c)
+			r.Now = now
+			return r
+		},
+		nodes:       dotsNodes,
+		stable:      &stableRule{polls: DefaultDotStablePolls, span: DefaultDotStableFor},
+		convPath:    dotsConvPath,
+		canonID:     dotsCanonicalID,
+		notLoggedIn: dotsNotLoggedIn,
+		webOnly:     true,
+		grantAs:     SourceChatGPT,
+		oneThread:   true,
 	},
 }
 
