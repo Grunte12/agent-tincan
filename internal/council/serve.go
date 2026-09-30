@@ -488,11 +488,18 @@ func (s *Service) run(ctx context.Context, req envelope.Request) {
 		i := slices.IndexFunc(roster, func(m onboard.Member) bool { return m.Name == name })
 		seats = append(seats, Seat{Name: name, Web: onboard.ProfileOf(roster[i]).Web})
 	}
+	var webChairmen []string
+	for _, name := range el.Chairmen {
+		i := slices.IndexFunc(roster, func(m onboard.Member) bool { return m.Name == name })
+		if i >= 0 && onboard.ProfileOf(roster[i]).Web {
+			webChairmen = append(webChairmen, name)
+		}
+	}
 	f.Asked = el.Members
 	s.logf("request %s from %s: convening %s", req.ID, req.From, strings.Join(el.Members, ", "))
 
 	e := &Engine{Relay: s.relay, Config: s.cfg}
-	out, err := e.Run(ctx, Council{Request: req, Question: r.Question, Members: seats, Chairmen: el.Chairmen,
+	out, err := e.Run(ctx, Council{Request: req, Question: r.Question, Members: seats, Chairmen: el.Chairmen, WebChairmen: webChairmen,
 		Progress: func(note string) { s.progress(ctx, req.ID, note) }})
 	if err != nil {
 		s.logf("request %s: stopped mid-council, it runs again at the next start: %v", req.ID, err)

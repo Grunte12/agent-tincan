@@ -96,6 +96,9 @@ type Council struct {
 	Members  []Seat
 	// Chairmen is the chairman failover order (Eligibility.Chairmen).
 	Chairmen []string
+	// WebChairmen are the Chairmen that are web agents, whose replies end
+	// with a footer the verdict must not include.
+	WebChairmen []string
 	// Progress, when set, is told of each stage change, for the progress
 	// notes that renew the convening request's claim.
 	Progress func(note string)
