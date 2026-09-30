@@ -374,8 +374,9 @@ Details: docs/adapters/history.md and docs/adapters/web-agents.md in the repo.
 ## PART D: add Council (every model on the team answers one question)
 
 Council is LLM Council on the subscriptions your owner already has: it puts
-one question to every model on the team (the web teammates from PART C, plus
-Codex, Gemini CLI and Grok CLI), has them rank each other's answers blind,
+one question to every model on the team (the web teammates from PART C,
+including dot-web if you added it in C10, plus Codex, Gemini CLI and Grok
+CLI), has them rank each other's answers blind,
 and has a chairman model write the verdict, with an HTML report and a PNG
 scorecard. It is a service, not a model. It needs at least 3 teammates that
 can sit on a council, usually web teammates from PART C.
@@ -383,8 +384,10 @@ can sit on a council, usually web teammates from PART C.
 D1. Upgrade in this order: the relay first (from an admin device,
     `tincan relay-upgrade --from-github v0.10.0`, or put the release in the
     relay's --dist and run `tincan relay-upgrade`), then `tincan upgrade` on
-    each agent, then install Council. An older relay refuses the council
-    kind and cannot hold councils for your owner's approval.
+    each agent, then for a dot `tincan kind dot-web dot-web` on an admin
+    device (dot-web refuses to start without that kind), then install
+    Council. An older relay refuses the council kind and cannot hold
+    councils for your owner's approval.
 D2. On an admin device (PART A6), get an invite code for the name council
     with kind council. The service runs only as the agent named council.
 D3. On the Mac that runs the web teammates, install tincan (above), then join
@@ -405,6 +408,10 @@ D4. Approval: the relay holds every ask to council for your owner, even with
     relay notify the operator about each held council, the relay's
     approval.json (chmod 600) can carry {"gate": {}, "notify": "<operator>"};
     {"gate": {"council": {"from": []}}} turns the hold off.
+    dot-web sits on councils by default. Council's asks to it skip the dot's
+    own hold only when your owner approved that council question; every
+    other ask to dot-web is still held. To keep the dot off councils, add
+    dot-web to "exclude" in Council's council.json.
 D5. Teach the team: run `tincan onboard --section agents`. The council block
     carries lines to add to the standing instructions of each teammate that
     should convene one: convene only by asking council, only for a real

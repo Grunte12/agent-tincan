@@ -277,7 +277,7 @@ Sign in to chatgpt.com in the same Chrome first. The extension needs a build wit
 
 ### Asking the dot
 
-`tincan ask dot-web "..."` (once you approve it) has the extension open the dot's DM in a background tab, type the request into the message box and click Send. The page's address never changes, so the send is confirmed by the new message appearing in the DM's feed. The whole body is the message: a dot has one DM, so there is no `new chat` or `conversation:` line.
+`tincan ask dot-web "..."` (once you approve it) has the extension open the dot's DM in a background tab, type the request into the message box and click Send. The page's address never changes, so the send is confirmed by the new message appearing in the DM's feed. The whole body is the message: a dot has one DM, so there is no `new chat` or `conversation:` line. A first line that is exactly `new chat` (or `new chat:`), as every council prompt has, is dropped before typing.
 
 The request appears in the DM as your own message. The answer is every message the dot posts after it, joined in order with a blank line between them, once the same messages are read on 3 polls spanning at least 45 seconds. A dot can answer in several messages a while apart, and this lets them all in. Attachments the dot sends are not carried; the reply notes how many there were and says to open the DM. The wait is bounded by the 8 minute request timeout.
 
@@ -338,6 +338,8 @@ An `approval.json` entry for `dot-web` replaces the default. For example, to let
 ```
 
 With `"from": "*"` every request is held, as with no entry. Keep the default unless you trust every agent that could ask; see the owner approval section of the README.
+
+The dot sits on [councils](council.md) by default, like the other web teammates. A council's answer, review and chairman asks to it skip the default hold only when you approved that council question (or ran `tincan council` yourself in a terminal); every other ask to the dot is still held, and `approval.json` gates still apply. To keep the dot off councils, add `dot-web` to `exclude` in `council.json`.
 
 ### Failure replies
 

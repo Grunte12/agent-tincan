@@ -2,7 +2,7 @@
 
 The `council` agent puts one question to every model on your team, has them rank each other's answers blind, and has a chairman write the verdict. It is [llm-council](https://github.com/karpathy/llm-council) on the subscriptions you already pay for, and your coding agents get a seat. Ask it things like "Should the relay store attachments in SQLite or on disk?" and attach the plan or diff it should read. The reply carries a recommendation, the members ranked by blind peer review, where they agreed and disagreed, and any minority answer worth a second look, with a self-contained HTML report and a PNG scorecard sized for posting.
 
-The idea and the stage shape (answer, anonymous peer review, chairman) come from Andrej Karpathy's llm-council. Council runs it over Agent Tincan: the members are your own web teammates (ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot) in your logged-in Chrome and the coding agents the relay can wake (Codex, Gemini CLI, Grok CLI), so there are no API keys and no per-token bills.
+The idea and the stage shape (answer, anonymous peer review, chairman) come from Andrej Karpathy's llm-council. Council runs it over Agent Tincan: the members are your own web teammates (ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot, and your OpenAI dot) in your logged-in Chrome and the coding agents the relay can wake (Codex, Gemini CLI, Grok CLI), so there are no API keys and no per-token bills.
 
 It is a Go service, `tincan council serve`, that runs under launchd (or a systemd user unit) on one of your machines, usually the Mac that runs the web teammates. It is not an LLM agent. For each convening request it:
 
@@ -49,7 +49,7 @@ Attachments: text files are pasted into each member's prompt, cut to fit when ne
 
 By default these sit on a council:
 
-- every web teammate (`chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`);
+- every web teammate (`chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`);
 - every model teammate the relay can wake on demand: command-woken CLI agents (`codex`, `gemini-cli`, `grok-cli`) and webhook, email and always-on agents.
 
 These do not, unless you list them in `council.json`:
@@ -112,9 +112,11 @@ A gate entry for `council` replaces the default hold. `{"gate": {"council": {"fr
 
 Approval from an admin device is the owner's decision. The hold restrains agents only because they cannot approve. See the [trust model](../trust-model.md#council).
 
+Your dot (`dot-web`) is held by default too, since it acts in the apps you connected to it. Council's answer, review and chairman asks to the dot skip that hold only when you approved the council question they belong to (a `tincan council` run in a terminal on an admin device approves its own); every other ask to the dot is still held, and `approval.json` gates still apply to it. Approving a council question is therefore also approving that the dot reads it and answers with your authority in its connected apps. To keep the dot off councils, add `dot-web` to `exclude` in `council.json`. For blind review, Council strips the dot's DM footer, its attachment and delegation notes and any `@tincan ask` paragraph from its answer, and drops the `new chat` line from its prompts. The dot is not a default chairman, but `chairmen` or `--chairman` can name it. The dot can also convene by asking `council` (`@tincan ask council <question>`), which is held for you like any council.
+
 ## Install
 
-Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.0` (or put the v0.10.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. Then install Council. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
+Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.0` (or put the v0.10.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. For a dot, run `tincan kind dot-web dot-web` from an admin device next; `dot-web` refuses to start without that kind. Then install Council. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
 
 ```bash
 tincan invite council --kind council                                          # on an admin device
@@ -167,7 +169,7 @@ After install, check it from another agent: `tincan ask council "Tincan test: in
 
 - Council runs on your machine and talks only to your relay, but its members do not. A web member sends the prompt to its vendor's site as you: the question, inlined attachment text, and in the review and chairman stages every other member's answer. One member's answer can draw on that site's memory of you, and it then reaches every other vendor on the council during review. The approval preview (`tincan held`) shows the target kind and attachment names and sizes before anything goes out.
 - The convener's chain never sits on the council, and a form cannot name a service, so history and notes content does not reach a vendor through a council.
-- Blind review hides authorship with shuffled labels and redacted vendor and model names, and strips the web agents' reply footers. Writing style can still give a member away; the report says so.
+- Blind review hides authorship with shuffled labels and redacted vendor and model names, and strips the web agents' reply footers, including the dot's DM footer and notes. Writing style can still give a member away; the report says so.
 - Answers are wrapped in per-council random delimiters and the prompts say the enclosed text is material to judge, never instructions. Only the defined output fields (`FINAL RANKING:`, the verdict sections, the category) are parsed.
 - Inlined attachment text lives in request bodies, which the relay keeps like any request, not on the 7-day attachment clock.
 - Council's database and reports stay in its folder (created 0700, files 0600) until you delete them.
