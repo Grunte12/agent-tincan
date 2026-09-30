@@ -182,6 +182,62 @@ func TestOwnerApprovalLifecycle(t *testing.T) {
 	}
 }
 
+// AE5 on the relay the test rig runs (no approval.json): an agent's ask to a
+// council-kind agent comes back held, wakes nobody and pushes no notice, and
+// the owner's held listing names the target kind and what it carries.
+func TestCouncilAskHeldByDefault(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Server.SetAttachmentDir(t.TempDir())
+	if ok, err := m.Store.SetAgentKind(t.Context(), "muse", "council"); !ok || err != nil {
+		t.Fatalf("set kind: %v %v", ok, err)
+	}
+	wakes := &approvalWakes{}
+	m.Server.SetEvents(wakes)
+	sender, admin := m.Client(t, "grokbot"), m.Client(t, "admin")
+	upload, err := sender.UploadAttachment(t.Context(), "plan.md", "text/markdown", strings.NewReader("draft!"), 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := sender.SendAttached(t.Context(), "muse", "which design?", envelope.KindAsk, "", []string{upload.ID}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Status != envelope.StatusHeld {
+		t.Fatalf("council ask status %q, want held", req.Status)
+	}
+	if len(wakes.targets) != 0 || m.Server.QueuedCount("muse") != 0 {
+		t.Fatalf("held council ask queued or woke %v", wakes.targets)
+	}
+	for _, who := range []string{"grokbot", "instinct", "muse"} {
+		inbox, err := m.Client(t, who).Poll(t.Context(), time.Millisecond)
+		if err != nil || len(inbox.Requests) != 0 {
+			t.Fatalf("%s got %+v %v; want no notice", who, inbox, err)
+		}
+	}
+	var held []struct {
+		envelope.Request
+		ToKind string `json:"to_kind"`
+	}
+	if err := admin.Raw(t.Context(), "GET", "/v1/admin/held", nil, &held); err != nil || len(held) != 1 {
+		t.Fatalf("held list: %+v %v", held, err)
+	}
+	h := held[0]
+	if h.ID != req.ID || h.ToKind != "council" || len(h.Attachments) != 1 || h.Attachments[0].Name != "plan.md" || h.Attachments[0].Size != 6 {
+		t.Fatalf("held entry = %+v", h)
+	}
+	// Old clients decode the listing as plain requests.
+	var old []envelope.Request
+	if err := admin.Raw(t.Context(), "GET", "/v1/admin/held", nil, &old); err != nil || len(old) != 1 || old[0].ID != req.ID {
+		t.Fatalf("old decode: %+v %v", old, err)
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Server.QueuedCount("muse") != 1 {
+		t.Fatal("approved council ask not queued")
+	}
+}
+
 func TestApprovalUsesRecordedChainAndFailsClosed(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	path := filepath.Join(t.TempDir(), "approval.json")

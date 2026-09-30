@@ -61,3 +61,31 @@ func TestApprovalCommands(t *testing.T) {
 		t.Fatalf("agent list: %v", err)
 	}
 }
+
+// tincan held shows the target's kind and each attachment's name and size,
+// so the owner sees what a council ask would send on to vendors.
+func TestHeldListsKindAndAttachments(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Server.SetAttachmentDir(t.TempDir())
+	if ok, err := m.Store.SetAgentKind(t.Context(), "muse", "council"); !ok || err != nil {
+		t.Fatalf("set kind: %v %v", ok, err)
+	}
+	sender := m.Client(t, "grokbot")
+	up, err := sender.UploadAttachment(t.Context(), "design.md", "text/markdown", strings.NewReader("twelve bytes"), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := sender.SendAttached(t.Context(), "muse", "which design?", envelope.KindAsk, "", []string{up.ID}, false)
+	if err != nil || req.Status != envelope.StatusHeld {
+		t.Fatalf("send: %+v %v", req, err)
+	}
+	out, err := run(t, heldCmd(), "--relay", m.URL("admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{req.ID, "grokbot -> muse (council)", "which design?", "design.md (12 bytes)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("held output missing %q:\n%s", want, out)
+		}
+	}
+}

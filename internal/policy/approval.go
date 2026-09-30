@@ -16,6 +16,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
+// defaultHoldTTL is how long a held request waits for approval when
+// approval.json sets no hold_ttl, or there is no file.
+const defaultHoldTTL = 2 * time.Hour
+
 type approvalRule struct {
 	From   json.RawMessage `json:"from,omitempty"`
 	Unless []string        `json:"unless,omitempty"`
@@ -97,7 +101,7 @@ func (a *Approval) reload() error {
 	if c.Gate == nil {
 		return errors.New("approval.json requires gate object")
 	}
-	ttl := 2 * time.Hour
+	ttl := defaultHoldTTL
 	if c.HoldTTL != "" {
 		ttl, err = time.ParseDuration(c.HoldTTL)
 		if err != nil || ttl < time.Millisecond {
@@ -175,6 +179,21 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// holdDefaults reports whether the policy Held last read has an entry for
+// target, and the hold TTL and notify target a default hold should use: the
+// file's, or 2 hours and no notice when there is no file. Nil-safe.
+func (a *Approval) holdDefaults(target string) (entry bool, ttl time.Duration, notify string) {
+	if a != nil {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+	}
+	if a == nil || a.good == nil || a.missing {
+		return false, defaultHoldTTL, ""
+	}
+	_, entry = a.good.Gate[target]
+	return entry, a.ttl, a.good.Notify
 }
 
 // Reject ambiguous JSON rather than letting a repeated field replace a rule.

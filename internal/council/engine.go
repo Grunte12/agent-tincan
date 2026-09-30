@@ -1,0 +1,630 @@
+package council
+
+import (
+	"bytes"
+	"context"
+	crand "crypto/rand"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+)
+
+// Relay is the part of the relay client the engine uses; *client.Relay
+// implements it.
+type Relay interface {
+	SendEach(ctx context.Context, outs []client.Outgoing, kind envelope.Kind, parent string) (client.GroupResult, []error, error)
+	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
+	Cancel(ctx context.Context, id string) error
+	FetchAttachment(ctx context.Context, id string) ([]byte, client.DownloadedAttachment, error)
+}
+
+// maxBatch is the most member asks sent under one group id, the relay's
+// per-group cap.
+const maxBatch = 8
+
+// maxForwardBytes caps the attachment bytes one council uploads to its
+// members. A file past it is inlined when it is text and left out
+// otherwise.
+var maxForwardBytes int64 = 20 << 20
+
+// pollStep is how often a stage re-checks its asks once less than a
+// second is left, since relay waits are whole seconds.
+const pollStep = 100 * time.Millisecond
+
+// Stages.
+const (
+	StageAnswer   = "answer"
+	StageReview   = "review"
+	StageChairman = "chairman"
+)
+
+// Why a member is absent from a stage.
+const (
+	AbsentTimedOut   = "timed out"
+	AbsentHeld       = "held by a gate"
+	AbsentFailed     = "failed"
+	AbsentDeclined   = "declined"
+	AbsentNeedsInput = "needs input"
+	// AbsentUnranked is an answer no valid ballot ranked.
+	AbsentUnranked = "not ranked"
+	// AbsentNoVerdict is a chairman whose reply had no verdict to parse.
+	AbsentNoVerdict = "no verdict in reply"
+)
+
+// How a context file reached a member.
+const (
+	DeliveryInlined  = "inlined"
+	DeliveryCut      = "inlined, cut to fit"
+	DeliveryAttached = "attached"
+	DeliveryLeftOut  = "left out"
+)
+
+// Engine runs a council's answer and review stages over the relay, scores
+// the answers, and has a chairman write the verdict.
+type Engine struct {
+	Relay Relay
+	// Config supplies the stage time limits.
+	Config Config
+	// Now and After are the clock; nil means the real one.
+	Now   func() time.Time
+	After func(time.Duration) <-chan time.Time
+	// Rand shuffles reviewers' labels and answer order; nil seeds one.
+	Rand *rand.Rand
+}
+
+// Seat is one council member. Web members read only text, so context
+// files are inlined for them and attached for the rest.
+type Seat struct {
+	Name string
+	Web  bool
+}
+
+// Council is one council to run.
+type Council struct {
+	// Request is the claimed convening request: every member ask is its
+	// child, and its attachments are the context sent with the question.
+	Request  envelope.Request
+	Question string
+	Members  []Seat
+	// Chairmen is the chairman failover order (Eligibility.Chairmen).
+	Chairmen []string
+	// Progress, when set, is told of each stage change, for the progress
+	// notes that renew the convening request's claim.
+	Progress func(note string)
+}
+
+// progress reports note through c's hook, if it has one.
+func (c Council) progress(format string, args ...any) {
+	if c.Progress != nil {
+		c.Progress(fmt.Sprintf(format, args...))
+	}
+}
+
+// Answer is one member's answer.
+type Answer struct {
+	Member    string
+	RequestID string
+	// Body is the member's full reply; Copy is what reviewers and the
+	// chairman see (see reviewerCopy).
+	Body, Copy string
+	Elapsed    time.Duration
+}
+
+// Review is one reviewer's ballot.
+type Review struct {
+	Reviewer  string
+	RequestID string
+	Body      string
+	// Labels maps each label this reviewer was shown to the member whose
+	// answer it stood for.
+	Labels map[string]string
+	// Ranked is the parsed ballot as members, best first, own answer
+	// included as the reviewer ranked it.
+	Ranked []string
+	// Valid is whether the ballot counted in the tally.
+	Valid bool
+}
+
+// Absence is a member missing from a stage, and why.
+type Absence struct {
+	Member, Stage, Reason string
+	// Detail is the member's own reply text for a failure or decline.
+	Detail string
+}
+
+// ContextNote says how one context file reached one member.
+type ContextNote struct {
+	File, Member, Delivery string
+}
+
+// Outcome is what the answer and review stages produced.
+type Outcome struct {
+	// State is CouncilCompleted when the answers were scored, CouncilFailed
+	// without a quorum, and CouncilDeclined when nobody could be asked.
+	State  CouncilState
+	Reason string
+	// Answers are in seat order; Standings best first.
+	Answers   []Answer
+	Reviews   []Review
+	Standings []Standing
+	Absent    []Absence
+	Context   []ContextNote
+	// Truncated names the members whose answers reviewers saw cut to fit.
+	Truncated []string
+	// Verdict is the chairman's, set when State is CouncilCompleted.
+	Verdict                           Verdict
+	AnswerTime, ReviewTime, ChairTime time.Duration
+}
+
+// Run runs the answer stage, then, with a quorum of answers, the review
+// stage, scores the ballots, and has a chairman write the verdict. An
+// error is returned only when ctx ends; every other problem is in the
+// Outcome.
+func (e *Engine) Run(ctx context.Context, c Council) (Outcome, error) {
+	e.defaults()
+	var out Outcome
+	files, fetchNotes := e.fetchContext(ctx, c)
+	out.Context = fetchNotes
+
+	start := e.Now()
+	plans, err := answerPlans(c, files, randomNonce())
+	if err != nil {
+		out.State, out.Reason = CouncilDeclined, err.Error()
+		return out, nil
+	}
+	c.progress("Answers: asked %d members", len(plans))
+	res, notes, err := e.stage(ctx, c.Request.ID, plans, e.Config.AnswerLimit)
+	if err != nil {
+		return out, err
+	}
+	out.Context = append(out.Context, notes...)
+	out.AnswerTime = e.Now().Sub(start)
+	for _, s := range c.Members {
+		r := res[s.Name]
+		if r.Status != envelope.StatusAnswered {
+			out.Absent = append(out.Absent, absence(s.Name, StageAnswer, r))
+			continue
+		}
+		out.Answers = append(out.Answers, Answer{Member: s.Name, RequestID: r.Request.ID, Body: r.Reply.Body, Copy: reviewerCopy(r.Reply.Body, s.Web), Elapsed: elapsed(r)})
+	}
+	c.progress("Answers: %d of %d in", len(out.Answers), len(c.Members))
+	if len(out.Answers) < MinMembers {
+		out.State = CouncilFailed
+		out.Reason = fmt.Sprintf("only %d of %d members answered in time, and a council needs at least %d", len(out.Answers), len(c.Members), MinMembers)
+		return out, nil
+	}
+
+	start = e.Now()
+	var inline []contextFile
+	for _, f := range files {
+		if f.text {
+			inline = append(inline, contextFile{Name: f.name, Text: string(f.data)})
+		}
+	}
+	nonce := randomNonce()
+	cut := map[string]bool{}
+	plans = nil
+	for _, a := range out.Answers {
+		body, rev, cutLabels, err := e.reviewFor(c.Question, inline, a.Member, out.Answers, nonce)
+		if err != nil {
+			out.State, out.Reason = CouncilFailed, err.Error()
+			return out, nil
+		}
+		for _, l := range cutLabels {
+			cut[rev.Labels[l]] = true
+		}
+		out.Reviews = append(out.Reviews, rev)
+		plans = append(plans, plan{member: a.Member, out: client.Outgoing{To: a.Member, Body: body}})
+	}
+	c.progress("Review: %d members ranking the answers blind", len(plans))
+	res, _, err = e.stage(ctx, c.Request.ID, plans, e.Config.ReviewLimit)
+	if err != nil {
+		return out, err
+	}
+	out.ReviewTime = e.Now().Sub(start)
+	for _, a := range out.Answers {
+		if cut[a.Member] {
+			out.Truncated = append(out.Truncated, a.Member)
+		}
+	}
+	for i := range out.Reviews {
+		rv := &out.Reviews[i]
+		r := res[rv.Reviewer]
+		rv.RequestID = r.Request.ID
+		if r.Status != envelope.StatusAnswered {
+			out.Absent = append(out.Absent, absence(rv.Reviewer, StageReview, r))
+			continue
+		}
+		rv.Body = r.Reply.Body
+		labels := make([]string, 0, len(rv.Labels))
+		for l := range rv.Labels {
+			labels = append(labels, l)
+		}
+		for _, l := range parseBallot(r.Reply.Body, labels) {
+			rv.Ranked = append(rv.Ranked, rv.Labels[l])
+		}
+		rv.Valid = len(countedBallot(*rv)) >= minBallotSize
+	}
+	standings, valid := score(out.Reviews)
+	c.progress("Review: %d of %d ballots counted", valid, len(out.Reviews))
+	if valid < MinMembers {
+		out.State = CouncilFailed
+		out.Reason = fmt.Sprintf("only %d valid ballots came back, and a council needs at least %d", valid, MinMembers)
+		return out, nil
+	}
+	out.Standings = standings
+	for _, a := range out.Answers {
+		if !slices.ContainsFunc(standings, func(s Standing) bool { return s.Member == a.Member }) {
+			out.Absent = append(out.Absent, Absence{Member: a.Member, Stage: StageReview, Reason: AbsentUnranked})
+		}
+	}
+	out.State = CouncilCompleted
+	start = e.Now()
+	out.Verdict, err = e.chair(ctx, c, out)
+	out.ChairTime = e.Now().Sub(start)
+	return out, err
+}
+
+func (e *Engine) defaults() {
+	if e.Now == nil {
+		e.Now = time.Now
+	}
+	if e.After == nil {
+		e.After = time.After
+	}
+	if e.Rand == nil {
+		e.Rand = rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
+	}
+}
+
+func randomNonce() string { return crand.Text()[:16] }
+
+// fetched is one of the convener's attachments.
+type fetched struct {
+	name string
+	mime string
+	data []byte
+	text bool
+}
+
+// fetchContext downloads the convening request's attachments. A file that
+// cannot be fetched is noted as left out for every member.
+func (e *Engine) fetchContext(ctx context.Context, c Council) ([]fetched, []ContextNote) {
+	var files []fetched
+	var notes []ContextNote
+	for _, a := range c.Request.Attachments {
+		name := a.Name
+		if name == "" {
+			name = a.ID
+		}
+		data, d, err := e.Relay.FetchAttachment(ctx, a.ID)
+		if err != nil {
+			for _, s := range c.Members {
+				notes = append(notes, ContextNote{File: name, Member: s.Name, Delivery: DeliveryLeftOut})
+			}
+			continue
+		}
+		files = append(files, fetched{name: name, mime: d.MIME, data: data, text: utf8.Valid(data) && !bytes.ContainsRune(data, 0)})
+	}
+	return files, notes
+}
+
+// plan is one member ask. fallback, when set, is sent instead if the
+// ask's files cannot be uploaded; notes say how context reached the
+// member either way.
+type plan struct {
+	member        string
+	out           client.Outgoing
+	notes         []ContextNote
+	fallback      *client.Outgoing
+	fallbackNotes []ContextNote
+}
+
+// answerPlans builds each member's answer ask. Web members get text files
+// inlined; the others get every file attached, up to maxForwardBytes
+// across the council, past which text is inlined. Binary files never
+// reach web members. When uploads fail, text is inlined instead.
+func answerPlans(c Council, files []fetched, nonce string) ([]plan, error) {
+	var forwarded int64
+	var plans []plan
+	for _, s := range c.Members {
+		p := plan{member: s.Name, out: client.Outgoing{To: s.Name}}
+		var attach []fetched
+		for _, f := range files {
+			if !s.Web && forwarded+int64(len(f.data)) <= maxForwardBytes {
+				forwarded += int64(len(f.data))
+				attach = append(attach, f)
+			}
+		}
+		var err error
+		p.out.Body, p.notes, err = answerBody(c.Question, s.Name, files, attach, nonce)
+		if err != nil {
+			return nil, err
+		}
+		if len(attach) > 0 {
+			for _, f := range attach {
+				p.out.Files = append(p.out.Files, client.OutgoingFile{Name: f.name, MIME: f.mime, Data: f.data})
+			}
+			fb := client.Outgoing{To: s.Name}
+			if fb.Body, p.fallbackNotes, err = answerBody(c.Question, s.Name, files, nil, nonce); err != nil {
+				return nil, err
+			}
+			p.fallback = &fb
+		}
+		plans = append(plans, p)
+	}
+	return plans, nil
+}
+
+// answerBody is member's answer prompt with the files in attach attached
+// and the other text files inlined.
+func answerBody(question, member string, files, attach []fetched, nonce string) (string, []ContextNote, error) {
+	var inline []contextFile
+	var attached, left []string
+	for _, f := range files {
+		switch {
+		case slices.ContainsFunc(attach, func(a fetched) bool { return a.name == f.name }):
+			attached = append(attached, f.name)
+		case f.text:
+			inline = append(inline, contextFile{Name: f.name, Text: string(f.data)})
+		default:
+			left = append(left, f.name)
+		}
+	}
+	body, cut, err := answerPrompt(question, inline, attached, left, nonce)
+	if err != nil {
+		return "", nil, err
+	}
+	var notes []ContextNote
+	for _, f := range inline {
+		d := DeliveryInlined
+		if slices.Contains(cut, f.Name) {
+			d = DeliveryCut
+		}
+		notes = append(notes, ContextNote{File: f.Name, Member: member, Delivery: d})
+	}
+	for _, n := range attached {
+		notes = append(notes, ContextNote{File: n, Member: member, Delivery: DeliveryAttached})
+	}
+	for _, n := range left {
+		notes = append(notes, ContextNote{File: n, Member: member, Delivery: DeliveryLeftOut})
+	}
+	return body, notes, nil
+}
+
+// reviewFor builds reviewer's prompt. Every reviewer gets its own labels,
+// drawn at random, and its own answer order, both kept here.
+func (e *Engine) reviewFor(question string, inline []contextFile, reviewer string, answers []Answer, nonce string) (string, Review, []string, error) {
+	labels := e.labels(len(answers))
+	rev := Review{Reviewer: reviewer, Labels: map[string]string{}}
+	var shown []labeledAnswer
+	for _, i := range e.Rand.Perm(len(answers)) {
+		rev.Labels[labels[i]] = answers[i].Member
+		shown = append(shown, labeledAnswer{Label: labels[i], Text: answers[i].Copy})
+	}
+	body, cut, err := reviewPrompt(question, inline, shown, nonce)
+	return body, rev, cut, err
+}
+
+// labels draws n distinct labels at random: single letters while they
+// last, then pairs.
+func (e *Engine) labels(n int) []string {
+	var pool []string
+	for c := 'A'; c <= 'Z'; c++ {
+		pool = append(pool, string(c))
+	}
+	if n > len(pool) {
+		for a := 'A'; a <= 'Z'; a++ {
+			for b := 'A'; b <= 'Z'; b++ {
+				pool = append(pool, string(a)+string(b))
+			}
+		}
+	}
+	e.Rand.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+	return pool[:n]
+}
+
+// stage sends plans as children of parent in batches of maxBatch, each
+// under its own group id, then waits for the replies until limit after the
+// first send: time spent sending counts against the limit. Asks still
+// waiting to be claimed at the limit are cancelled. It returns each
+// member's last known result and how context reached each member.
+func (e *Engine) stage(ctx context.Context, parent string, plans []plan, limit time.Duration) (map[string]client.Result, []ContextNote, error) {
+	deadline := e.Now().Add(limit)
+	res := map[string]client.Result{}
+	var notes []ContextNote
+	send := func(outs []client.Outgoing) []error {
+		errs := make([]error, len(outs))
+		for lo := 0; lo < len(outs); lo += maxBatch {
+			batch := outs[lo:min(lo+maxBatch, len(outs))]
+			g, berrs, err := e.Relay.SendEach(ctx, batch, envelope.KindAsk, parent)
+			for i, o := range batch {
+				switch {
+				case err != nil:
+					errs[lo+i] = err
+					res[o.To] = failedSend(o.To, err)
+				default:
+					errs[lo+i] = berrs[i]
+					res[o.To] = g.Results[i].Result
+				}
+			}
+		}
+		return errs
+	}
+	outs := make([]client.Outgoing, len(plans))
+	for i, p := range plans {
+		outs[i] = p.out
+	}
+	var retry []client.Outgoing
+	for i, err := range send(outs) {
+		p := plans[i]
+		if p.fallback != nil && errors.Is(err, client.ErrUploadFailed) {
+			retry = append(retry, *p.fallback)
+			notes = append(notes, p.fallbackNotes...)
+			continue
+		}
+		notes = append(notes, p.notes...)
+	}
+	if len(retry) > 0 {
+		send(retry)
+	}
+	if err := e.gather(ctx, res, deadline); err != nil {
+		return nil, nil, err
+	}
+	return res, notes, nil
+}
+
+func failedSend(to string, err error) client.Result {
+	return client.Result{Request: envelope.Request{To: to}, Status: envelope.StatusFailed,
+		Reply: &envelope.Reply{From: to, Status: envelope.StatusFailed, Body: err.Error()}}
+}
+
+// cancelGrace bounds the cancels an interrupted stage still sends.
+const cancelGrace = 5 * time.Second
+
+// gather polls the unfinished asks in res until each is done or deadline
+// passes, then cancels the ones not yet claimed. When ctx ends first, it
+// still cancels them, on a short context of its own, so a restarted
+// council does not leave them open beside its new asks.
+func (e *Engine) gather(ctx context.Context, res map[string]client.Result, deadline time.Time) error {
+	var mu sync.Mutex
+	// poll waits up to wait on each open ask: member -> request id. It
+	// reports whether every Get came back at once without finishing its
+	// ask: the relay does not wait on held or needs_input asks, and a Get
+	// error comes back at once too.
+	poll := func(open map[string]string, wait time.Duration) (stalled bool) {
+		var wg sync.WaitGroup
+		stalled = true
+		for m, id := range open {
+			wg.Go(func() {
+				next, err := e.Relay.Get(ctx, id, wait)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					return // a later poll tries again
+				}
+				if next.Done() || (next.Status != envelope.StatusHeld && next.Status != envelope.StatusNeedsInput) {
+					stalled = false
+				}
+				res[m] = next
+			})
+		}
+		wg.Wait()
+		return stalled
+	}
+	interrupted := func() error {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelGrace)
+		defer cancel()
+		e.closeOpen(cctx, res, false)
+		return ctx.Err()
+	}
+	for {
+		if ctx.Err() != nil {
+			return interrupted()
+		}
+		open := map[string]string{} // member -> request id
+		for m, r := range res {
+			if r.Request.ID != "" && !r.Done() {
+				open[m] = r.Request.ID
+			}
+		}
+		if len(open) == 0 {
+			return nil
+		}
+		left := deadline.Sub(e.Now())
+		if left <= 0 {
+			break
+		}
+		if left >= time.Second {
+			if !poll(open, min(left.Truncate(time.Second), client.MaxInlineWait)) {
+				continue
+			}
+			// Nothing waited: pace the next round instead of spinning
+			// against the relay.
+			select {
+			case <-ctx.Done():
+				return interrupted()
+			case <-e.After(min(left, time.Second)):
+			}
+			continue
+		}
+		poll(open, 0)
+		select {
+		case <-ctx.Done():
+			return interrupted()
+		case <-e.After(min(left, pollStep)):
+		}
+	}
+	e.closeOpen(ctx, res, true)
+	return ctx.Err()
+}
+
+// closeOpen cancels the asks in res not yet claimed. With look, it takes a
+// last look at the ones it could not cancel, which may still have a reply.
+func (e *Engine) closeOpen(ctx context.Context, res map[string]client.Result, look bool) {
+	for m, r := range res {
+		if r.Request.ID == "" || r.Done() {
+			continue
+		}
+		switch r.Status {
+		case envelope.StatusHeld, envelope.StatusQueued, envelope.StatusDelivered:
+			if e.Relay.Cancel(ctx, r.Request.ID) == nil {
+				continue // absent for the reason its status gives
+			}
+		}
+		// Claimed, waiting on input, or it moved on before the cancel: a
+		// last look may still find the reply.
+		if !look {
+			continue
+		}
+		if next, err := e.Relay.Get(ctx, r.Request.ID, 0); err == nil && next.Done() {
+			res[m] = next
+		}
+	}
+}
+
+// absence is why a member whose last known result is r gave no answer in
+// stage.
+func absence(member, stage string, r client.Result) Absence {
+	a := Absence{Member: member, Stage: stage, Reason: AbsentTimedOut}
+	switch r.Status {
+	case envelope.StatusFailed:
+		a.Reason = AbsentFailed
+	case envelope.StatusDeclined:
+		a.Reason = AbsentDeclined
+	case envelope.StatusHeld:
+		a.Reason = AbsentHeld
+	case envelope.StatusNeedsInput:
+		a.Reason = AbsentNeedsInput
+	}
+	if r.Reply != nil && (a.Reason == AbsentFailed || a.Reason == AbsentDeclined) {
+		a.Detail = detail(r.Reply.Body)
+	}
+	return a
+}
+
+// detailBytes caps an Absence's Detail.
+const detailBytes = 300
+
+// detail is a member's reply body as an Absence's Detail: trimmed and cut
+// to detailBytes.
+func detail(body string) string {
+	d, _ := truncate(strings.TrimSpace(body), detailBytes)
+	return d
+}
+
+// elapsed is how long a member took from the ask to its reply.
+func elapsed(r client.Result) time.Duration {
+	if r.Reply == nil || r.Reply.CreatedAt.IsZero() || r.Request.CreatedAt.IsZero() {
+		return 0
+	}
+	return r.Reply.CreatedAt.Sub(r.Request.CreatedAt)
+}

@@ -50,6 +50,7 @@
       </a>
       <nav class="site-nav" aria-label="Sections">
         <ul>
+          <li><a href="#council">Council</a></li>
           <li><a href="#why">Why it matters</a></li>
           <li><a href="#how">How it works</a></li>
           <li><a href="#platforms">Platforms</a></li>
@@ -88,6 +89,42 @@
             <span>Tap for sound</span>
           </button>
         </figure>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="council" aria-labelledby="council-title">
+      <div class="wrap">
+        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">New in v0.10.0: Council</span>LLM Council, but on the subscriptions you already have</h2>
+        <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
+        <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-num" aria-hidden="true">1</span>
+            <h3>Everyone answers</h3>
+            <p>Each member answers in a new chat, on its own, with the plan or diff you attached.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">2</span>
+            <h3>Blind peer review</h3>
+            <p>Each member ranks every answer under shuffled labels, with model names hidden. Votes for its own answer do not count.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">3</span>
+            <h3>A chairman's verdict</h3>
+            <p>The peer tally sets the ranking. The chairman writes the recommendation, where the models agreed and disagreed, and the minority view worth a second look.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">4</span>
+            <h3>A scorecard to post</h3>
+            <p>A local HTML report with every answer, a PNG scorecard sized for X, and a leaderboard of who wins your councils, overall and by category.</p>
+          </li>
+        </ol>
+        <ul class="checks">
+          <li>Any agent can convene one by asking the council teammate, so your coding agent can put a design choice to the council before it builds.</li>
+          <li>Councils an agent convenes wait for your approval, because your question goes to every model vendor on the team. Run it yourself from a terminal on an admin device and it starts at once.</li>
+          <li>Slow or blocked models are marked absent and the council goes on with at least three. Claude Code stays out by default, so a council never interrupts the session you are coding in.</li>
+          <li>The report and scorecard stay on your machine. Nothing is hosted. See the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/council.md">Council guide</a>.</li>
+        </ul>
       </div>
     </section>
 
@@ -386,7 +423,7 @@
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h14M5 12h14M5 18h9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 17l1.5 1.5L21 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <h3>Allowlists and approval</h3>
-            <p>The history and web agents answer only agents you have joined to your relay. Add an allowlist file to narrow that to the agents you list, and every agent in the chain must be on it. For agents with real powers, you can hold their incoming requests until you approve them. Chains that loop or run too long are refused.</p>
+            <p>The history and web agents answer only agents you have joined to your relay. Add an allowlist file to narrow that to the agents you list, and every agent in the chain must be on it. For agents with real powers, you can hold their incoming requests until you approve them, and councils an agent convenes are held by default. Chains that loop or run too long are refused.</p>
           </li>
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 9h18M8 13h3M8 16h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -444,7 +481,7 @@ Follow https://agenttincan.com/agents.txt, part C.</code></pre><button class="co
         </ol>
         <div class="start-links">
           <a class="gh-badge gh-badge-large" href="https://github.com/mvanhorn/agent-tincan"><svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-name">Agent Tincan<span class="sr-only"> on GitHub</span></span><span class="gh-stars" data-gh-stars hidden><span aria-hidden="true">&#9733;</span> <span data-gh-count></span><span class="sr-only"> stars</span></span></a>
-          <p>Upgrading to v0.9.0? Upgrade the relay first (<code>tincan relay-upgrade --from-github v0.9.0</code> from an admin device, which needs the relay started with <code>--release-url</code>; otherwise put the release in the relay's <code>--dist</code> and run <code>tincan relay-upgrade</code>), then run <code>tincan upgrade</code> on each agent, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v090">what is new</a>. The newer web and CLI teammates from v0.6.0 and v0.7.0 are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
+          <p>Upgrading to v0.10.0? Upgrade the relay first (<code>tincan relay-upgrade --from-github v0.10.0</code> from an admin device, which needs the relay started with <code>--release-url</code>; otherwise put the release in the relay's <code>--dist</code> and run <code>tincan relay-upgrade</code>), then run <code>tincan upgrade</code> on each agent, then install Council with <code>tincan council install</code>, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v0100">what is new</a>. An older relay does not know the council teammate and cannot hold its councils for your approval. The newer web and CLI teammates from v0.6.0 and v0.7.0 are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
         </div>
       </div>
     </section>

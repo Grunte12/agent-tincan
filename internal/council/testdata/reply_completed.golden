@@ -1,0 +1,87 @@
+Recommendation: Do not shard yet; Answer B (gemini-web) is right that one node handles 40 GB.
+Question: Should we shard the relay database?
+Status: 5 asked, 4 scored, 1 absent, 2 excluded
+Chairman: claude-web. Category: architecture.
+
+Ranking by blind peer review (mean Borda score, 0 to 1):
+1. claude-web 0.75 (4 ballots)
+2. gemini-web 0.50 (4 ballots)
+3. chatgpt-web 0.25 (4 ballots)
+3. grok-web 0.25 (4 ballots)
+
+Agreement: All answers agree the data fits on one node today.
+Disagreement: Answer C (grok-web) wants to shard now.
+Minority: Answer D (chatgpt-web) says to take backups first.
+
+Absent:
+- copilot-web (answer stage): timed out
+
+Excluded:
+- codex: excluded (in chain)
+- claude-code: excluded (live session)
+
+Report: /tmp/r/req-123.html
+Scorecard: /tmp/r/req-123.png
+
+```council-result
+{
+  "request_id": "req-123",
+  "status": "answered",
+  "state": "completed",
+  "question": "Should we shard the relay database?",
+  "asked": 5,
+  "category": "architecture",
+  "chairman": "claude-web",
+  "verdict": {
+    "recommendation": "Do not shard yet; Answer B (gemini-web) is right that one node handles 40 GB.",
+    "agreement": "All answers agree the data fits on one node today.",
+    "disagreement": "Answer C (grok-web) wants to shard now.",
+    "minority": "Answer D (chatgpt-web) says to take backups first."
+  },
+  "ranking": [
+    {
+      "member": "claude-web",
+      "placement": 1,
+      "score": 0.75,
+      "ballots": 4
+    },
+    {
+      "member": "gemini-web",
+      "placement": 2,
+      "score": 0.5,
+      "ballots": 4
+    },
+    {
+      "member": "chatgpt-web",
+      "placement": 3,
+      "score": 0.25,
+      "ballots": 4
+    },
+    {
+      "member": "grok-web",
+      "placement": 3,
+      "score": 0.25,
+      "ballots": 4
+    }
+  ],
+  "absent": [
+    {
+      "member": "copilot-web",
+      "stage": "answer",
+      "reason": "timed out"
+    }
+  ],
+  "excluded": [
+    {
+      "member": "codex",
+      "reason": "excluded (in chain)"
+    },
+    {
+      "member": "claude-code",
+      "reason": "excluded (live session)"
+    }
+  ],
+  "report": "/tmp/r/req-123.html",
+  "card": "/tmp/r/req-123.png"
+}
+```
