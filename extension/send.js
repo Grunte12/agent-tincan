@@ -1,7 +1,8 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send, grok.send, gemini.send, perplexity.send, copilot.send) and
-// the matching close operations (chatgpt.close, claudeai.close,
-// grok.close, gemini.close, perplexity.close, copilot.close), plus the
+// claudeai.send, grok.send, gemini.send, perplexity.send, copilot.send,
+// dots.send) and the matching close operations (chatgpt.close,
+// claudeai.close, grok.close, gemini.close, perplexity.close,
+// copilot.close, dots.close), plus the
 // in-page image capture gemini.file asks for (capture) and the Copilot
 // chat list read copilot.list asks for (readList).
 //
@@ -29,6 +30,14 @@
 // tab stays open until then because closing it may stop claude.ai from
 // finishing the reply. A tab nobody closes is closed after keepMs anyway.
 // A send that fails closes its tab at once.
+//
+// An OpenAI dot's DM (https://chatgpt.com/dots/<thread>) is the one
+// exception to step 3: its address never changes, so the send is
+// confirmed by the room feed instead. ops.js hands the sender two hooks:
+// before, called right before the click (it notes the feed as it is), and
+// confirm, polled after it every feedPollMs for at most feedWaitMs until
+// it names the new owner message. A dots send needs its thread id, and
+// never types over text already in the composer (keepDraft).
 //
 // While that tab is still open, capture fetches one of Gemini's images
 // from inside it (the isolated world's fetch, with the page's cookies), so
@@ -58,8 +67,14 @@ export const KEEP_TAB_MS = 10 * 60 * 1000;
 // the end of one of a site's tab reads and the start of the next.
 export const READ_TIMEOUT_MS = 75 * 1000;
 export const READ_GAP_MS = 3000;
+// FEED_POLL_MS and FEED_WAIT_MS pace and bound a feed-confirmed send's
+// wait for its message to show in the room feed.
+export const FEED_POLL_MS = 2000;
+export const FEED_WAIT_MS = 60 * 1000;
 
-// SELECTORS is the one table of page selectors, tried in order. login and
+// SELECTORS is the one table of page selectors, tried in order. keepDraft
+// means a composer that already holds text is never typed into or
+// cleared: the send is refused instead. login and
 // loginPaths mean the page is logged out; blocked, where a site has it,
 // means the page is an anti-bot check. stop and streaming refuse a send
 // into a conversation that is still answering, and with assistant and user
@@ -169,6 +184,21 @@ export const SELECTORS = Object.freeze({
       chat: ['a[href*="/chat/conversation/"]'],
     }),
   }),
+  // An OpenAI dot's DM on chatgpt.com: a ProseMirror composer and a Send
+  // button (both seen live). The owner may be typing in the DM too, so a
+  // composer with text in it is left alone (keepDraft). The page has no
+  // answering marks; the reply is read from the room feed by the Go side.
+  dots: Object.freeze({
+    composer: ['div[role="textbox"][aria-label="Message"]', 'div.ProseMirror[contenteditable="true"][aria-label="Message"]'],
+    send: ['button[aria-label="Send"]'],
+    stop: [],
+    streaming: [],
+    assistant: [],
+    user: [],
+    login: ['[data-testid="login-button"]', 'a[href*="/auth/login"]'],
+    loginPaths: ['/auth/login', '/log-in'],
+    keepDraft: true,
+  }),
 });
 
 // SITES says where each site's pages are and how to read a conversation id
@@ -213,6 +243,17 @@ export const SITES = Object.freeze({
     idFrom: /^https:\/\/copilot\.com\/chat\/conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/?#]|$)/,
     hiddenIsAway: true,
     workHosts: Object.freeze(['cloud.microsoft', 'office.com', 'microsoft365.com']),
+  }),
+  // A dot has one DM, its thread: there is no new chat, so a send needs
+  // the thread id (needsConversation), and newURL only names the host.
+  // The address never changes after a send, so the room feed confirms it
+  // (confirmByFeed).
+  dots: Object.freeze({
+    newURL: 'https://chatgpt.com/',
+    convURL: (id) => `https://chatgpt.com/dots/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/chatgpt\.com\/dots\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
+    needsConversation: true,
+    confirmByFeed: true,
   }),
 });
 
@@ -316,6 +357,7 @@ export function pageFill(sel, message) {
   if (!composer) return { ok: false, code: 'composer_not_found' };
   const isTextarea = composer.tagName === 'TEXTAREA';
   const read = () => (isTextarea ? String(composer.value ?? '') : String(composer.innerText ?? composer.textContent ?? ''));
+  if (sel.keepDraft === true && read().trim() !== '') return { ok: false, code: 'composer_busy', message: 'the message box already has text' };
   // Editors turn blank lines into paragraphs and may eat markdown marks, so
   // the check ignores whitespace and those marks.
   const norm = (s) => String(s).replace(/[\s#*`>_-]+/g, '');
@@ -581,7 +623,7 @@ function cleanList(r) {
   return { found: o.found === true, conversations: out };
 }
 
-// createSender returns {send(site, args), close(site, conversationId),
+// createSender returns {send(site, args, hooks), close(site, conversationId),
 // capture(site, conversationId, url), busy(), closeAllKept()}.
 // tabs and scripting are chrome.tabs and chrome.scripting (or fakes). Sends
 // to one site run one at a time, each in its own background tab. A
@@ -602,6 +644,8 @@ export function createSender({
   settleMs = 1500,
   readMs = READ_TIMEOUT_MS,
   readGapMs = READ_GAP_MS,
+  feedPollMs = FEED_POLL_MS,
+  feedWaitMs = FEED_WAIT_MS,
   listRounds = 10,
   listWaitMs = 10000,
 }) {
@@ -720,7 +764,7 @@ export function createSender({
   // was queued, so a send that waited behind others to the same site
   // still ends inside the host's bound; one with no time left opens no
   // tab, so it cannot go out after the host has reported it failed.
-  async function run(site, args, accepted) {
+  async function run(site, args, accepted, hooks) {
     const cfg = SITES[site];
     const sel = SELECTORS[site];
     if (!cfg || !sel) throw new OpError('bad_request', 'unknown site');
@@ -729,6 +773,11 @@ export function createSender({
     const late = () => now() >= deadline;
     if (late()) throw new OpError('timeout', 'the send waited too long behind other requests to the site');
     const existing = args.conversation_id && !args.new_chat ? args.conversation_id : '';
+    if (cfg.needsConversation && !existing) throw new OpError('bad_request', 'this site has no new chat; the send needs its conversation id');
+    const feed = cfg.confirmByFeed === true;
+    if (feed && !(hooks && typeof hooks.before === 'function' && typeof hooks.confirm === 'function')) {
+      throw new OpError('internal', 'a feed-confirmed send needs its feed hooks');
+    }
     const target = existing ? cfg.convURL(existing) : cfg.newURL;
 
     const tab = await tabs.create({ url: target, active: false });
@@ -766,6 +815,10 @@ export function createSender({
       // click, in case an answer started meanwhile.
       const answering = () => new OpError('send_failed', 'the conversation is still answering an earlier message');
       if (page.generating) throw answering();
+      // Text already in the composer (the owner typing) is never typed
+      // over or cleared; pageFill checks again right before it types.
+      const busy = () => new OpError('send_failed', 'the message box already has text; it was left as it is');
+      if (sel.keepDraft === true && !page.composerEmpty) throw busy();
 
       // 2. Close any startup dialog over the composer (a bounded number of
       // passes, fixed buttons only), then fill and verify.
@@ -778,6 +831,7 @@ export function createSender({
         }
       }
       const fill = await inject(tab.id, pageFill, [sel, args.message]);
+      if (fill && fill.code === 'composer_busy') throw busy();
       if (!fill || fill.ok !== true) {
         const code = fill && fill.code === 'composer_not_found' ? 'composer_not_found' : 'send_failed';
         throw new OpError(code, str(fill && fill.message, 200) || 'could not fill the message box');
@@ -801,6 +855,7 @@ export function createSender({
         if (base.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (base.blocked) throw blockedErr();
         if (base.generating) throw answering();
+        if (feed) await hooks.before();
         submittedAt = now();
         const r = await inject(tab.id, pageSubmit, [sel]);
         if (r && r.ok === true) {
@@ -810,6 +865,23 @@ export function createSender({
         if (r && r.code === 'composer_not_found') throw new OpError('composer_not_found', 'the message box went away');
         if (now() >= confirmBy) throw new OpError('send_failed', 'the send button stayed disabled');
         await sleep(pollMs);
+      }
+      // 3b. A feed-confirmed send waits for its message in the room feed:
+      // the page's address says nothing. The tab stays on the site
+      // meanwhile, and nothing is typed or clicked again.
+      if (feed) {
+        const feedBy = Math.min(deadline, now() + feedWaitMs);
+        for (;;) {
+          await sleep(feedPollMs);
+          await onSite(tab.id, cfg);
+          const messageId = await hooks.confirm();
+          if (typeof messageId === 'string' && messageId !== '') {
+            done = true;
+            keep(tab.id, site, existing);
+            return { conversation_id: existing, url: cfg.convURL(existing), submitted_at: submittedAt, message_id: messageId };
+          }
+          if (now() >= feedBy) throw new OpError('timeout', 'the message was sent but did not show in the feed in time');
+        }
       }
       for (;;) {
         await sleep(pollMs);
@@ -941,9 +1013,10 @@ export function createSender({
 
   return {
     // send runs after any earlier send to the same site has finished.
-    send(site, args) {
+    // hooks ({before, confirm}) are for a feed-confirmed site (dots).
+    send(site, args, hooks) {
       const accepted = now();
-      return enqueue(site, () => run(site, args, accepted));
+      return enqueue(site, () => run(site, args, accepted, hooks));
     },
     // readList reads Copilot's chat list from its rendered sidebar (see
     // above).

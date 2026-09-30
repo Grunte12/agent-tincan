@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, copilotConversation, OpError, OPS, SITE_ACCESS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES, PERPLEXITY_MAX_PAGES, PERPLEXITY_ENTRY_FIELDS } from '../ops.js';
+import { validate, createRunner, errorFrame, grantedSites, helloMessage, geminiImageURL, geminiImageURLs, parseBatchexecute, copilotConversation, OpError, OPS, SITE_ACCESS, SITE_ALIASES, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, GROK_MAX_PAGES, PERPLEXITY_MAX_PAGES, PERPLEXITY_ENTRY_FIELDS } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -428,7 +428,7 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   // Every op prefix but extension.* has a site entry.
   for (const op of OPS) {
     const prefix = op.split('.')[0];
-    if (prefix !== 'extension') assert.ok(Object.hasOwn(SITE_ACCESS, prefix), op);
+    if (prefix !== 'extension') assert.ok(Object.hasOwn(SITE_ACCESS, prefix) || Object.hasOwn(SITE_ACCESS, SITE_ALIASES[prefix]), op);
   }
 });
 
@@ -1205,4 +1205,119 @@ test('perplexity ops need the www.perplexity.ai grant', async () => {
   assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai', 'perplexity']);
   assert.deepEqual(SITE_ACCESS.perplexity.origins, ['https://www.perplexity.ai/*']);
   assert.deepEqual(SITE_ACCESS.perplexity.pageOrigins, ['https://www.perplexity.ai/*']);
+});
+
+// ---- OpenAI dots: the owner's DM with the dot, read from the room feed.
+
+const DOT_THREAD = '0d0d0d0d-1111-7222-8333-000000000001';
+const DOT_ROOM = '0123456789abcdef0123456789abcdef';
+const DOT_OWNER = 'user-owner__acct';
+const DOT_BOT = 'user-dot__acct';
+const DOT_TBO = `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`;
+const DOT_ROOM_URL = `https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}`;
+const DOT_FEED = `${DOT_ROOM_URL}/messages?limit=50`;
+
+function dotMessage(id, from, text, at, extra = {}) {
+  return { id, created_at: at, updated_at: at, role: 'user', account_user_id: from, content: { text, attachments: [] }, reply_to: null, deleted_at: null, ...extra };
+}
+
+function dotRoutes(over = {}) {
+  return {
+    [SESSION]: jsonResponse({ accessToken: TOKEN }),
+    [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: DOT_ROOM, is_paused: false, status: 'active', last_check_in_at: '2026-09-29T17:00:00Z' }),
+    [DOT_ROOM_URL]: jsonResponse({ id: DOT_ROOM, type: 'DM', creator_account_user_id: DOT_OWNER, members: [{ account_user_id: DOT_OWNER, role: 'user' }, { account_user_id: DOT_BOT, role: 'user' }] }),
+    [DOT_FEED]: jsonResponse({
+      items: [
+        dotMessage('m1', DOT_OWNER, 'hello dot', '2026-09-29T17:01:00Z'),
+        dotMessage('m2', DOT_BOT, 'hi, what do you need?', '2026-09-29T17:01:05Z', { content: { text: 'hi, what do you need?', attachments: [{ id: 'a1' }, { id: 'a2' }] } }),
+        dotMessage('m3', DOT_OWNER, 'gone', '2026-09-29T17:01:06Z', { deleted_at: '2026-09-29T17:01:07Z' }),
+      ],
+      prev_cursor: null,
+      next_cursor: null,
+    }),
+    ...over,
+  };
+}
+
+test('dots.detail maps the dot record, room and feed, marking the owner from creator_account_user_id', async () => {
+  const f = fakeFetch(dotRoutes());
+  const frames = await run(createRunner({ fetch: f }), 'dots.detail', { id: DOT_THREAD });
+  assert.deepEqual(frames, [
+    {
+      ok: true,
+      result: {
+        thread: DOT_THREAD,
+        room: DOT_ROOM,
+        owner: DOT_OWNER,
+        paused: false,
+        items: [
+          { id: 'm1', at: '2026-09-29T17:01:00Z', from: DOT_OWNER, text: 'hello dot', attachments: 0 },
+          { id: 'm2', at: '2026-09-29T17:01:05Z', from: DOT_BOT, text: 'hi, what do you need?', attachments: 2 },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(f.calls.map((c) => c.url), [SESSION, DOT_TBO, DOT_ROOM_URL, DOT_FEED]);
+  for (const c of f.calls.slice(1)) assert.equal(c.init.headers.Authorization, 'Bearer ' + TOKEN);
+  assert.ok(!JSON.stringify(frames).includes(TOKEN));
+});
+
+test('dots.detail: 401 or no token is not_logged_in, 429 is rate_limited with Retry-After, missing fields or non-JSON are endpoint_changed', async () => {
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [SESSION]: jsonResponse({}) })) }), 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'not_logged_in');
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [DOT_FEED]: jsonResponse({ detail: 'expired' }, 401) })) }), 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'not_logged_in');
+  const limited = new Response('{}', { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '42' } });
+  let caught;
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [DOT_TBO]: limited })) }), 'dots.detail', { id: DOT_THREAD }), (e) => ((caught = e), e.code === 'rate_limited' && e.retryAfter === 42));
+  assert.equal(errorFrame(caught).error.retry_after, 42);
+  const broken = [
+    { [DOT_TBO]: jsonResponse({ id: 'tbo-1', is_paused: false }) },
+    { [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: DOT_ROOM }) },
+    { [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: '../../me', is_paused: false }) },
+    { [DOT_ROOM_URL]: jsonResponse({ id: DOT_ROOM, members: [] }) },
+    { [DOT_FEED]: jsonResponse({ messages: [] }) },
+    { [DOT_FEED]: jsonResponse({ items: [{ id: 'm1', created_at: 'x', content: { text: 'no sender' } }] }) },
+    { [DOT_FEED]: jsonResponse('<html>not json</html>', 200, 'text/html') },
+  ];
+  for (const over of broken) {
+    await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes(over)) }), 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'endpoint_changed', JSON.stringify(Object.keys(over)));
+  }
+  // An unknown thread is not_found.
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse({}, 404) })) }), 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'not_found');
+});
+
+test('dots.send refuses a paused dot, or a send with no thread, before any tab opens', async () => {
+  const sent = [];
+  const sender = { send: async (site, a) => (sent.push([site, a]), { conversation_id: DOT_THREAD, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  const paused = fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: DOT_ROOM, is_paused: true, status: 'paused' }) }));
+  let caught;
+  await assert.rejects(run(createRunner({ fetch: paused, sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => ((caught = e), e.code === 'paused'));
+  assert.match(errorFrame(caught).error.message, /paused/);
+  const f = fakeFetch(dotRoutes());
+  const r = createRunner({ fetch: f, sender });
+  await assert.rejects(run(r, 'dots.send', { message: 'hi' }), (e) => e.code === 'bad_request' && /thread/.test(e.message));
+  await assert.rejects(run(r, 'dots.send', { message: 'hi', new_chat: true }), (e) => e.code === 'bad_request');
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [SESSION]: jsonResponse({}) })), sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => e.code === 'not_logged_in');
+  assert.deepEqual(sent, [], 'no send reached the sender');
+  assert.equal(f.calls.length, 0, 'a send with no thread fetches nothing');
+  // Without a sender the send is unsupported.
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes()) }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => e.code === 'unsupported');
+});
+
+test('dots ops need the ChatGPT grant; dots.close goes to the sender for its own site', async () => {
+  const f = fakeFetch(dotRoutes());
+  const closed = [];
+  const sender = { send: async () => ({}), close: async (site, id) => (closed.push([site, id]), { closed: 1 }) };
+  const perms = fakePermissions(['https://claude.ai/*']);
+  const r = createRunner({ fetch: f, sender, permissions: perms });
+  for (const [op, args] of [['dots.detail', { id: DOT_THREAD }], ['dots.send', { message: 'hi', conversation_id: DOT_THREAD }]]) {
+    await assert.rejects(run(r, op, args), (e) => e.code === 'permission_missing' && /ChatGPT/.test(e.message), op);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await run(r, 'dots.close', { conversation_id: DOT_THREAD }), [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(closed, [['dots', DOT_THREAD]]);
+  assert.deepEqual(await grantedSites(perms), ['claudeai']);
+  perms.granted.add('https://chatgpt.com/*');
+  assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai'], 'the hello names the site, not the alias');
+  assert.equal((await run(r, 'dots.detail', { id: DOT_THREAD }))[0].ok, true);
+  assert.deepEqual(validate({ id: 1, op: 'dots.send', args: { message: 'hi', conversation_id: DOT_THREAD } }).args, { message: 'hi', conversation_id: DOT_THREAD });
 });

@@ -1399,3 +1399,174 @@ test('runner: perplexity.send checks for a signed-in user first; signed out open
   assert.deepEqual(closed, [{ ok: true, result: { closed: 1 } }]);
   assert.deepEqual(fc.log.removed, [100]);
 });
+
+// ---- OpenAI dots: the send types into the dot's DM page and confirms by
+// the room feed, since the page's address never changes.
+
+const DOT_THREAD = '0d0d0d0d-1111-7222-8333-000000000001';
+const DOT_ROOM = '0123456789abcdef0123456789abcdef';
+const DOT_OWNER = 'owner-acct';
+const DOT_BOT = 'dot-acct';
+
+// dotFetch answers the session, the dot record, the room and its feed.
+// The feed holds an old exchange plus, for each message a dots page in
+// fc took, an owner message (after appearAfter feed reads, unless never).
+// Every feed read is counted.
+function dotFetch(fc, { paused = false, never = false, appearAfter = 1, echo = (t) => t } = {}) {
+  const calls = [];
+  let feedReads = 0;
+  const fresh = new Map();
+  const fn = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u === 'https://chatgpt.com/api/auth/session') return jsonResponse({ accessToken: 'tok' });
+    if (u === `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`) return jsonResponse({ id: 't1', messaging_room_id: DOT_ROOM, is_paused: paused, status: paused ? 'paused' : 'active' });
+    if (u === `https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}`) return jsonResponse({ id: DOT_ROOM, type: 'DM', creator_account_user_id: DOT_OWNER, members: [] });
+    if (u.startsWith(`https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}/messages?limit=`)) {
+      feedReads++;
+      const items = [
+        { id: 'old-1', created_at: '2026-09-01T00:00:00Z', account_user_id: DOT_OWNER, content: { text: 'ping', attachments: [] } },
+        { id: 'old-2', created_at: '2026-09-01T00:00:05Z', account_user_id: DOT_BOT, content: { text: 'pong', attachments: [] } },
+      ];
+      const texts = [...fc.tabs.values()].filter((p) => p.site === 'dots').flatMap((p) => p.submitted);
+      texts.forEach((t, i) => {
+        if (never) return;
+        if (!fresh.has(i)) fresh.set(i, { at: new Date().toISOString(), seen: feedReads });
+        const m = fresh.get(i);
+        if (feedReads - m.seen >= appearAfter) items.push({ id: `new-${i + 1}`, created_at: m.at, account_user_id: DOT_OWNER, content: { text: echo(t), attachments: [] } });
+      });
+      return jsonResponse({ items, prev_cursor: null, next_cursor: null });
+    }
+    return jsonResponse({ detail: 'not found' }, 404);
+  };
+  fn.calls = calls;
+  fn.feedReads = () => feedReads;
+  return fn;
+}
+
+function dotSite(url, opts = {}) {
+  return new FakeSite('dots', url, { noId: true, neverFinish: true, ...opts });
+}
+
+test('dots.send types into the DM, clicks Send, and returns the new owner message id from the feed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = dotSite(url)));
+  const f = dotFetch(fc, { appearAfter: 2, echo: (t) => ` ${t}\n` });
+  const r = createRunner({ fetch: f, sender: sender(fc) });
+  const frames = [];
+  await r.run('dots.send', { message: 'summarize the launch notes', conversation_id: DOT_THREAD }, (x) => frames.push(x));
+  assert.equal(fc.log.created.length, 1);
+  assert.equal(fc.log.created[0].url, `https://chatgpt.com/dots/${DOT_THREAD}`);
+  assert.equal(fc.log.created[0].active, false, 'background tab');
+  assert.deepEqual(page.submitted, ['summarize the launch notes']);
+  assert.equal(frames.length, 1);
+  const res = frames[0].result;
+  assert.equal(res.conversation_id, DOT_THREAD);
+  assert.equal(res.message_id, 'new-1');
+  assert.equal(res.url, `https://chatgpt.com/dots/${DOT_THREAD}`);
+  assert.ok(Number.isSafeInteger(res.submitted_at));
+  assert.ok(!JSON.stringify(frames).includes('tok'));
+  assert.ok(f.feedReads() >= 3, 'polled the feed until the message showed');
+  assert.deepEqual(fc.log.removed, [], 'tab kept open until close');
+  assertOnlyFixedScripts(fc.log);
+  const fills = fc.log.scripts.filter((x) => x.func === pageFill);
+  assert.equal(fills.length, 1);
+  assert.equal(fills[0].args[1], 'summarize the launch notes');
+});
+
+test('dots.send refuses when the composer already has text, and leaves the text alone', async () => {
+  let page;
+  const fc = fakeChrome((url) => {
+    page = dotSite(url);
+    page.composer.text = 'owner draft in progress';
+    return page;
+  });
+  const r = createRunner({ fetch: dotFetch(fc), sender: sender(fc) });
+  await assert.rejects(r.run('dots.send', { message: 'x', conversation_id: DOT_THREAD }, () => {}), (e) => e.code === 'send_failed' && /already has text/.test(e.message) && e.clicked !== true);
+  assert.equal(page.composer.text, 'owner draft in progress');
+  assert.deepEqual(page.submitted, []);
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill || x.func === pageSubmit).length, 0, 'nothing typed or clicked');
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('pageFill never types over a draft on a site that keeps drafts', () => {
+  const page = dotSite(`https://chatgpt.com/dots/${DOT_THREAD}`);
+  page.composer.text = 'draft';
+  const saved = { document: globalThis.document, location: globalThis.location };
+  globalThis.document = page.doc;
+  globalThis.location = page.location;
+  try {
+    page.composer.focus();
+    assert.deepEqual(pageFill(SELECTORS.dots, 'x'), { ok: false, code: 'composer_busy', message: 'the message box already has text' });
+    assert.equal(page.composer.text, 'draft');
+  } finally {
+    globalThis.document = saved.document;
+    globalThis.location = saved.location;
+  }
+});
+
+test('dots.send gives up, closing its own tab, when no new owner message shows in the feed', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = dotSite(url)));
+  const f = dotFetch(fc, { never: true });
+  const r = createRunner({ fetch: f, sender: sender(fc) });
+  let caught;
+  await assert.rejects(r.run('dots.send', { message: 'hello?', conversation_id: DOT_THREAD }, () => {}), (e) => ((caught = e), e.code === 'timeout'));
+  assert.equal(errorFrame(caught).error.clicked, true, 'marked as maybe sent');
+  assert.match(caught.message, /sent/);
+  assert.deepEqual(page.submitted, ['hello?']);
+  assert.deepEqual(fc.log.removed, [100]);
+  assert.ok(fc.now() >= 60000 && fc.now() < 90000, `gave up at ${fc.now()}ms`);
+  assert.ok(f.feedReads() >= 20 && f.feedReads() <= 40, `read the feed ${f.feedReads()} times`);
+  // A message with other text is not the one sent.
+  const fc2 = fakeChrome((url) => dotSite(url));
+  const r2 = createRunner({ fetch: dotFetch(fc2, { echo: () => 'something else' }), sender: sender(fc2) });
+  await assert.rejects(r2.run('dots.send', { message: 'hello?', conversation_id: DOT_THREAD }, () => {}), (e) => e.code === 'timeout');
+});
+
+test('dots.send refuses a paused dot before opening a tab', async () => {
+  const fc = fakeChrome((url) => dotSite(url));
+  const r = createRunner({ fetch: dotFetch(fc, { paused: true }), sender: sender(fc) });
+  await assert.rejects(r.run('dots.send', { message: 'x', conversation_id: DOT_THREAD }, () => {}), (e) => e.code === 'paused');
+  assert.equal(fc.log.created.length, 0);
+  // The sender alone refuses a dots send with no thread or no feed check.
+  await assert.rejects(sender(fc).send('dots', { message: 'x' }), (e) => e.code === 'bad_request');
+  await assert.rejects(sender(fc).send('dots', { message: 'x', conversation_id: DOT_THREAD }), (e) => e.code === 'internal');
+  assert.equal(fc.log.created.length, 0);
+});
+
+test('dots.close closes only the tab its send opened', async () => {
+  const fc = fakeChrome((url) => dotSite(url));
+  fc.tabs.set(2, dotSite(`https://chatgpt.com/dots/${DOT_THREAD}`)); // the owner's own DM tab
+  const r = createRunner({ fetch: dotFetch(fc), sender: sender(fc) });
+  const frames = [];
+  await r.run('dots.send', { message: 'x', conversation_id: DOT_THREAD }, (x) => frames.push(x));
+  const closed = [];
+  await r.run('dots.close', { conversation_id: 'another-thread' }, (x) => closed.push(x));
+  await r.run('chatgpt.close', { conversation_id: DOT_THREAD }, (x) => closed.push(x));
+  assert.deepEqual(fc.log.removed, []);
+  await r.run('dots.close', { conversation_id: DOT_THREAD }, (x) => closed.push(x));
+  await r.run('dots.close', { conversation_id: DOT_THREAD }, (x) => closed.push(x));
+  assert.deepEqual(closed.map((c) => c.result.closed), [0, 0, 1, 0]);
+  assert.deepEqual(fc.log.removed, [100]);
+  assert.ok(fc.tabs.has(1) && fc.tabs.has(2), "the owner's tabs stay open");
+});
+
+test('the dots selectors match the DM page markup', () => {
+  const html = `<html><body><main><div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Message"><p>draft</p></div><button aria-label="Send">Send</button></main></body></html>`;
+  const saved = { document: globalThis.document, location: globalThis.location };
+  globalThis.document = parseHTML(html);
+  globalThis.location = { href: `https://chatgpt.com/dots/${DOT_THREAD}`, pathname: `/dots/${DOT_THREAD}`, host: 'chatgpt.com' };
+  try {
+    const p = pageProbe(SELECTORS.dots);
+    assert.equal(p.composer, true);
+    assert.equal(p.composerEmpty, false);
+    assert.equal(p.loggedOut, false);
+    assert.ok(document.querySelector(SELECTORS.dots.send[0]));
+    assert.equal(SITES.dots.convURL(DOT_THREAD), `https://chatgpt.com/dots/${DOT_THREAD}`);
+    assert.equal(SITES.dots.idFrom.exec(`https://chatgpt.com/dots/${DOT_THREAD}?x=1`)[1], DOT_THREAD);
+  } finally {
+    globalThis.document = saved.document;
+    globalThis.location = saved.location;
+  }
+});

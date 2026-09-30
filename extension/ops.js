@@ -44,6 +44,14 @@
 // fields the Go side reads (copilotConversation). Its chat list has no
 // such JSON, so the sender reads it from the page's sidebar in a tab of
 // its own.
+//
+// OpenAI dots (chatgpt.com, under ChatGPT's grant): a dot's DM is read
+// from three backend endpoints with the same bearer chatgptAuth reads:
+// the dot record by thread (its room and whether it is paused), the room
+// (its creator is the owner) and the room's feed (dotRead). dots.send
+// refuses a paused dot before any tab opens, and confirms its message by
+// polling the feed for it (dotHooks), since the DM page's address never
+// changes.
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
@@ -87,6 +95,12 @@ export const SITE_ACCESS = Object.freeze({
   // to copilot.com, where the extension's tabs open.
   copilot: Object.freeze({ label: 'Copilot', origins: Object.freeze(['https://copilot.com/*', 'https://copilot.microsoft.com/*']), pageOrigins: Object.freeze(['https://copilot.com/*']), required: false }),
 });
+
+// SITE_ALIASES are op prefixes that run on another site's pages and so
+// share its grant: an OpenAI dot's DM lives on chatgpt.com. The options
+// page and the hello list only SITE_ACCESS keys, so the host checks an
+// alias's grant under its site's key (dots under chatgpt).
+export const SITE_ALIASES = Object.freeze({ dots: 'chatgpt' });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
 // site's page origins, what its operations need, or with all set every
@@ -156,6 +170,15 @@ const COPILOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const COPILOT = 'https://copilot.com';
 // COPILOT_MAX_SOURCES caps the sources kept per Copilot message.
 const COPILOT_MAX_SOURCES = 50;
+// DOT_FEED_LIMIT is how many of the latest feed messages dots.detail
+// reads, DOT_CONFIRM_LIMIT how many a send's confirmation polls read.
+// DOT_SKEW_MS is how much earlier than the send the server's created_at
+// may say, for clock skew.
+export const DOT_FEED_LIMIT = 50;
+const DOT_CONFIRM_LIMIT = 20;
+const DOT_SKEW_MS = 2 * 60 * 1000;
+// DOT_ROOM_RE is a messaging room id as it goes into a URL path.
+const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -190,6 +213,9 @@ const SPEC = Object.freeze({
   'copilot.detail': Object.freeze({ id: 'id' }),
   'copilot.send': SEND_SPEC,
   'copilot.close': CLOSE_SPEC,
+  'dots.detail': Object.freeze({ id: 'id' }),
+  'dots.send': SEND_SPEC,
+  'dots.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -468,6 +494,37 @@ export function copilotConversation(raw, id) {
     updatedAt: text(r.updateTimeUtc, 64),
     messages,
   };
+}
+
+// dotItems keeps what the Go side reads of a dot room's feed messages:
+// id, time, sender, text and how many attachments. A deleted message is
+// left out. A message without its id, time or sender is endpoint_changed.
+function dotItems(r) {
+  if (!isPlainObject(r) || !Array.isArray(r.items)) throw new OpError('endpoint_changed', 'unexpected room messages answer');
+  const out = [];
+  for (const m of r.items) {
+    if (!isPlainObject(m) || typeof m.id !== 'string' || m.id === '' || typeof m.created_at !== 'string' || typeof m.account_user_id !== 'string' || m.account_user_id === '') {
+      throw new OpError('endpoint_changed', 'unexpected room message');
+    }
+    if (m.deleted_at !== undefined && m.deleted_at !== null) continue;
+    const c = isPlainObject(m.content) ? m.content : {};
+    out.push({
+      id: m.id.slice(0, 128),
+      at: m.created_at.slice(0, 64),
+      from: m.account_user_id.slice(0, 128),
+      text: typeof c.text === 'string' ? c.text.slice(0, 512 * 1024) : '',
+      attachments: Array.isArray(c.attachments) ? c.attachments.length : 0,
+    });
+  }
+  return out;
+}
+
+// sameText compares a sent message with a feed message's text, ignoring
+// how whitespace was laid out (the editor turns blank lines into
+// paragraphs).
+function sameText(a, b) {
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  return norm(a) === norm(b);
 }
 
 // geminiId checks a Gemini conversation id (the URL's hex).
@@ -782,6 +839,50 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // copilot.com tab.
   async function copilotJSON(url) {
     return getJSON(url, { headers: { accept: 'application/json' } }, true);
+  }
+
+  // dotRoom reads the dot record for thread and its room: the room id,
+  // the owner (the room's creator) and whether the dot is paused.
+  async function dotRoom(auth, thread) {
+    const rec = await getJSON(`${CHATGPT}/backend-api/tbo/by-thread/${encodeURIComponent(thread)}`, auth, true);
+    if (!isPlainObject(rec) || typeof rec.messaging_room_id !== 'string' || !DOT_ROOM_RE.test(rec.messaging_room_id) || typeof rec.is_paused !== 'boolean') {
+      throw new OpError('endpoint_changed', 'unexpected dot record');
+    }
+    const room = await getJSON(`${CHATGPT}/backend-api/messaging/rooms/${rec.messaging_room_id}`, auth, true);
+    if (!isPlainObject(room) || typeof room.creator_account_user_id !== 'string' || room.creator_account_user_id === '') {
+      throw new OpError('endpoint_changed', 'unexpected room answer');
+    }
+    return { room: rec.messaging_room_id, owner: room.creator_account_user_id.slice(0, 128), paused: rec.is_paused };
+  }
+
+  // dotFeed reads the latest limit messages of room, oldest first.
+  async function dotFeed(auth, room, limit) {
+    return dotItems(await getJSON(`${CHATGPT}/backend-api/messaging/rooms/${room}/messages?limit=${limit}`, auth, true));
+  }
+
+  // dotHooks are the sender's feed hooks for one send of message: before
+  // notes the feed's message ids right before the click; confirm returns
+  // the id of the first owner message not among them whose text is the
+  // message and whose time is not before the click (less DOT_SKEW_MS),
+  // or null while there is none.
+  function dotHooks(auth, d, message) {
+    let seen = null;
+    let from = 0;
+    return {
+      async before() {
+        seen = new Set((await dotFeed(auth, d.room, DOT_CONFIRM_LIMIT)).map((m) => m.id));
+        from = Date.now() - DOT_SKEW_MS;
+      },
+      async confirm() {
+        for (const m of await dotFeed(auth, d.room, DOT_CONFIRM_LIMIT)) {
+          if (m.from !== d.owner || (seen && seen.has(m.id)) || !sameText(m.text, message)) continue;
+          const at = Date.parse(m.at);
+          if (Number.isNaN(at) || at < from) continue;
+          return m.id;
+        }
+        return null;
+      },
+    };
   }
 
   async function claudeOrgId() {
@@ -1121,6 +1222,21 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (a.conversation_id !== undefined) copilotId(a.conversation_id);
       return sender.send('copilot', a);
     },
+    async 'dots.detail'(a) {
+      const auth = await chatgptAuth();
+      const d = await dotRoom(auth, a.id);
+      return { thread: a.id, room: d.room, owner: d.owner, paused: d.paused, items: await dotFeed(auth, d.room, DOT_FEED_LIMIT) };
+    },
+    // A dot has one DM, so the send needs its thread and has no new chat.
+    // A paused dot is refused before any tab opens.
+    async 'dots.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      if (a.conversation_id === undefined || a.new_chat === true) throw bad('a dot send needs its thread id as conversation_id');
+      const auth = await chatgptAuth();
+      const d = await dotRoom(auth, a.conversation_id);
+      if (d.paused) throw new OpError('paused', 'the dot is paused; resume it in ChatGPT, then ask again');
+      return sender.send('dots', a, dotHooks(auth, d, a.message));
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -1146,6 +1262,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('copilot', a.conversation_id);
     },
+    async 'dots.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('dots', a.conversation_id);
+    },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).
     async 'extension.reload'(_a, emit) {
@@ -1162,7 +1282,8 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // regardless: a grant revoked while a reply is read still lets the tab
   // close.
   async function requireGrant(op) {
-    const [site, verb] = op.split('.');
+    const [prefix, verb] = op.split('.');
+    const site = Object.hasOwn(SITE_ALIASES, prefix) ? SITE_ALIASES[prefix] : prefix;
     if (!permissions || !Object.hasOwn(SITE_ACCESS, site) || verb === 'close') return;
     if (!(await siteGranted(permissions, site))) {
       throw new OpError('permission_missing', `the extension has no access to ${SITE_ACCESS[site].label}; grant it on the extension's options page`);
