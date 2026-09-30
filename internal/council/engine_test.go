@@ -162,15 +162,16 @@ func labelsIn(body string) (labels, members []string) {
 // order of their members' names in order.
 func ranking(body string, order []string) string {
 	labels, members := labelsIn(body)
-	out := "Evaluation done.\n\nFINAL RANKING:\n"
+	var out strings.Builder
+	out.WriteString("Evaluation done.\n\nFINAL RANKING:\n")
 	n := 1
 	for _, want := range order {
 		if i := slices.Index(members, want); i >= 0 {
-			out += fmt.Sprintf("%d. Answer %s\n", n, labels[i])
+			fmt.Fprintf(&out, "%d. Answer %s\n", n, labels[i])
 			n++
 		}
 	}
-	return out
+	return out.String()
 }
 
 // honest answers with "answer from <name>" plus tail, and ranks answers
