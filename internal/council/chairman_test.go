@@ -55,10 +55,16 @@ func verdictBlock(category, recommendation string) string {
 
 func (r *councilRig) chair(chairLimit time.Duration, seats []Seat, chairmen ...string) Outcome {
 	r.t.Helper()
+	return r.chairWith(chairLimit, seats, nil, chairmen...)
+}
+
+// chairWith runs a council like chair, with webChairmen marked as web.
+func (r *councilRig) chairWith(chairLimit time.Duration, seats []Seat, webChairmen []string, chairmen ...string) Outcome {
+	r.t.Helper()
 	e := r.engine(5*time.Second, 5*time.Second)
 	e.Config.ChairmanLimit = chairLimit
 	conv := r.convene("Which queue should we use?")
-	out, err := e.Run(r.t.Context(), Council{Request: conv, Question: conv.Body, Members: seats, Chairmen: chairmen})
+	out, err := e.Run(r.t.Context(), Council{Request: conv, Question: conv.Body, Members: seats, Chairmen: chairmen, WebChairmen: webChairmen})
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -123,9 +129,25 @@ func TestChairmanFooterStaysOutOfTheVerdict(t *testing.T) {
 	r.member("charlie", chairing("charlie", func(string) string {
 		return verdictBlock("architecture", "Use a queue.") + "\n\nclaude.ai conversation: 121d5309-95f2-4d5c-8ebf-5e1db586c466"
 	}))
-	out := r.chair(5*time.Second, seats(true, "alpha", "bravo", "charlie", "delta"), "charlie")
+	out := r.chairWith(5*time.Second, seats(true, "alpha", "bravo", "charlie", "delta"), []string{"charlie"}, "charlie")
 	if v := out.Verdict; v.Minority != "none" || v.Recommendation != "Use a queue." {
 		t.Fatalf("verdict = %+v", v)
+	}
+}
+
+// A chairman that is not a web agent keeps a footer-like last line: it is
+// the chairman's own text.
+func TestNonWebChairmanKeepsItsLastLine(t *testing.T) {
+	r := newCouncilRig(t, relay.Config{})
+	for _, n := range []string{"alpha", "bravo", "delta"} {
+		r.member(n, honest(n, ""))
+	}
+	r.member("charlie", chairing("charlie", func(string) string {
+		return verdictBlock("architecture", "Use a queue.") + "\n\nChatGPT conversation: abc"
+	}))
+	out := r.chairWith(5*time.Second, seats(false, "alpha", "bravo", "charlie", "delta"), nil, "charlie")
+	if v := out.Verdict; v.Minority != "none\n\nChatGPT conversation: abc" {
+		t.Fatalf("minority = %q", v.Minority)
 	}
 }
 

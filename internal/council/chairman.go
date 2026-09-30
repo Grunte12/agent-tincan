@@ -93,9 +93,13 @@ func (e *Engine) chair(ctx context.Context, c Council, out Outcome) (Verdict, er
 			v.Failed = append(v.Failed, absence(cand, StageChairman, r))
 			continue
 		}
-		// A web chairman's reply ends with its conversation footer, which
-		// would otherwise run into the last verdict section.
-		sections, ok := parseVerdict(stripWebTail(r.Reply.Body))
+		reply := r.Reply.Body
+		if slices.Contains(c.WebChairmen, cand) {
+			// Its conversation footer would otherwise run into the last
+			// verdict section.
+			reply = stripWebTail(reply)
+		}
+		sections, ok := parseVerdict(reply)
 		if !ok {
 			v.Failed = append(v.Failed, Absence{Member: cand, Stage: StageChairman, Reason: AbsentNoVerdict, Detail: detail(r.Reply.Body)})
 			continue
