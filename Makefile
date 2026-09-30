@@ -47,8 +47,6 @@ spike:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o spike/bin/spike-poller-linux-amd64 ./spike/poller
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o spike/bin/spike-poller-linux-arm64 ./spike/poller
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o spike/bin/spike-poller-darwin-arm64 ./spike/poller
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o spike/bin/spike-dotnet-linux-amd64 ./spike/dotnet
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o spike/bin/spike-dotnet-linux-arm64 ./spike/dotnet
 
 # The zip holds only what Chrome loads; tests and package.json stay out.
 EXTENSION_FILES := manifest.json background.js ops.js send.js options.html options.js icon16.png icon48.png icon128.png
