@@ -166,6 +166,10 @@ type dotsBrowser struct {
 	// the click).
 	sendErr string
 	clicked bool
+	// detailErr fails every detail read with that code (retryAfter
+	// seconds with it).
+	detailErr  string
+	retryAfter int
 }
 
 type dotReply struct {
@@ -222,6 +226,10 @@ func (b *dotsBrowser) Exchange(_ context.Context, req NativeRequest, recv func(N
 		_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: res})
 		return err
 	case OpDotsDetail:
+		if b.detailErr != "" {
+			_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: b.detailErr, Message: b.detailErr, RetryAfter: b.retryAfter}})
+			return err
+		}
 		b.details++
 		var keep []pendingDot
 		for _, p := range b.pending {
@@ -264,7 +272,7 @@ func TestDotWebSendsIntoTheThreadAndRepliesWithTheDotsAnswer(t *testing.T) {
 	if res.Status != envelope.StatusAnswered {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
 	}
-	want := "Hello from your dot.\n\nyour dot conversation: " + dotThread
+	want := "Hello from your dot.\n\nyour dot's DM: " + dotThread
 	if res.Reply.Body != want {
 		t.Fatalf("reply\n%s\nwant\n%s", res.Reply.Body, want)
 	}
@@ -367,12 +375,32 @@ func TestDotWebOwnerMessagesMeanwhile(t *testing.T) {
 	rig, b := dotsRig(t)
 	b.replies = []dotReply{{text: "B", at: 1}, {text: "D", at: 2, owner: true}, {text: "E", at: 2}}
 	res := rig.ask(t, "codex", "A")
-	if res.Status != envelope.StatusAnswered || !strings.HasPrefix(res.Reply.Body, "B\n\nyour dot conversation: ") {
+	if res.Status != envelope.StatusAnswered || !strings.HasPrefix(res.Reply.Body, "B\n\nyour dot's DM: ") {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
 	}
 	b.replies = []dotReply{{text: "D", at: 1, owner: true}, {text: "E", at: 2}}
 	res = rig.ask(t, "codex", "A again")
 	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "another message was sent to your dot") || len(b.sent()) != 2 {
 		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+// Replies about the dot name its DM and ChatGPT's rate limit, never "the
+// your dot conversation".
+func TestDotWebWordingNamesTheDM(t *testing.T) {
+	rig, b := dotsRig(t)
+	b.sendErr = "rate_limited"
+	res := rig.ask(t, "codex", "hello")
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "ChatGPT is rate-limiting this account") || strings.Contains(res.Reply.Body, "your dot is rate-limiting") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	rig.agent.Native.Cooldown = &SiteCooldown{}
+	b.sendErr, b.clicked = "send_failed", true
+	res = rig.ask(t, "codex", "hello")
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "check your dot's DM before sending it again") || strings.Contains(res.Reply.Body, "the your dot") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if got := (&UnavailableError{Source: SourceDots, Kind: ErrRateLimited}).Error(); !strings.Contains(got, "ChatGPT is rate-limiting this account") {
+		t.Fatal(got)
 	}
 }

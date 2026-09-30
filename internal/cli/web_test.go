@@ -318,3 +318,14 @@ func TestWebDotsNeedsThread(t *testing.T) {
 		t.Fatalf("definition %s (%v):\n%s", def, err, b)
 	}
 }
+
+// --teach is for the dot's web agent only.
+func TestWebTeachIsDotsOnly(t *testing.T) {
+	t.Setenv("TINCAN_RELAY", "")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	cfg := filepath.Join(t.TempDir(), "chatgpt-web.json")
+	_, err := run(t, Root(), "web", "serve", "--site", "chatgpt", "--teach", "--config", cfg, "--allowlist", allow)
+	if err == nil || !strings.Contains(err.Error(), "--teach applies only to --site dots") {
+		t.Fatalf("--teach on chatgpt: %v", err)
+	}
+}

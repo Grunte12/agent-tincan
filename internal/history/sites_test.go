@@ -108,7 +108,7 @@ func TestCooldownsAreIndependentPerSite(t *testing.T) {
 			conv, newChat = "0d0d0d0d-1111-7222-8333-000000000001", false
 		}
 		_, err := c.Send(context.Background(), limited, "hi", conv, newChat)
-		if !errors.Is(err, ErrRateLimited) || err.Error() != "source unavailable: "+string(limited)+": "+siteLabel(limited)+" is rate-limiting this account right now; try again later" {
+		if !errors.Is(err, ErrRateLimited) || err.Error() != "source unavailable: "+string(limited)+": "+siteLimiter(limited)+" is rate-limiting this account right now; try again later" {
 			t.Fatalf("send to %s during its cooldown: %v", limited, err)
 		}
 	}

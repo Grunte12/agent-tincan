@@ -71,6 +71,7 @@ func serviceConfigPath(agent string) string {
 
 func webServeCmd() *cobra.Command {
 	var site, configPath, allowPath, statePath, name, thread string
+	var teach bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a web agent: answer teammates by asking ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot in your browser",
@@ -80,6 +81,8 @@ func webServeCmd() *cobra.Command {
 			"  2. the body is the message. A first line \"new chat\" or \"conversation: <id>\" picks the conversation;\n" +
 			"     otherwise it continues the one this asker used last (remembered in a 0600 state file).\n" +
 			"     --site dots (your OpenAI dot) needs --thread <id>: every request goes into that DM, sent as is;\n" +
+			"     the dot can ask teammates too: a dot message whose first line is \"@tincan ask <agent>\" is asked\n" +
+			"     (agents listed in ~/.config/tincan/<name>-send.txt; no file means any joined agent) and the answer typed back;\n" +
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
 			"  4. the reply text (capped) comes back with generated images as attachments, and Perplexity's source links listed after it.\n" +
 			"Normally started by the service definition tincan web install writes.",
@@ -92,6 +95,9 @@ func webServeCmd() *cobra.Command {
 			thread, err := webThreadFlag(src, thread)
 			if err != nil {
 				return err
+			}
+			if teach && !history.WebSiteTakesThread(src) {
+				return fmt.Errorf("--teach applies only to --site dots, not %s", src)
 			}
 			if name == "" {
 				name = history.WebAgentName(src)
@@ -165,6 +171,20 @@ func webServeCmd() *cobra.Command {
 				Log:         cmd.ErrOrStderr(),
 			}
 			cmd.PrintErrf("tincan web %s: serving %s on %s (%s)\n", name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
+			if history.WebSiteTakesThread(src) {
+				// The dot asks teammates by writing "@tincan ask <agent>" in
+				// its DM; the watcher asks them and types the answers back.
+				sendPath := history.DefaultDotSendAllowlistPath(name)
+				agent.OutPath = history.DefaultDotOutPath(name)
+				agent.SendAllowlist = history.FileAllowlist(sendPath)
+				agent.SendAllowlistPath = sendPath
+				agent.Teach = teach
+				if sendAllowed, err := history.LoadAllowlist(sendPath); err != nil {
+					cmd.PrintErrf("tincan web %s: send allowlist: %v; the dot's asks are refused until it is fixed\n", name, err)
+				} else {
+					cmd.PrintErrf("tincan web %s: watching the dot's DM for @tincan asks (send %s)\n", name, history.DescribeAllowlist(sendPath, sendAllowed))
+				}
+			}
 			err = agent.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrf("tincan web %s: stopped\n", name)
@@ -179,6 +199,7 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
 	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only (required there): the dot's thread id, the <id> in https://chatgpt.com/dots/<id>")
+	cmd.Flags().BoolVar(&teach, "teach", false, "--site dots only: type the setup message that teaches the dot to ask teammates into its DM again (it is sent once per thread on its own)")
 	return cmd
 }
 

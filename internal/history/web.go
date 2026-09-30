@@ -137,10 +137,35 @@ type WebAgent struct {
 	PresenceInterval time.Duration
 	Log              io.Writer
 
-	// clock paces the reply wait (the real clock when nil).
+	// OutPath, on a one-thread site (dots), turns on the outbound
+	// watcher: the dot's "@tincan ask <agent>" messages become asks from
+	// this agent, and their answers are typed back into the DM. It is the
+	// watcher's 0600 state file (DefaultDotOutPath). Empty turns it off.
+	OutPath string
+	// SendAllowlist returns the agents the dot may ask, consulted for
+	// every outbound ask; an error refuses them all. Nil allows any
+	// joined agent.
+	SendAllowlist func() ([]string, error)
+	// SendAllowlistPath names the send allowlist file in replies.
+	SendAllowlistPath string
+	// Teach types the setup message into the DM once more, even when the
+	// thread was taught before (--teach).
+	Teach bool
+	// WatchInterval is how often the watcher reads the DM when idle
+	// (DefaultDotWatchInterval when zero).
+	WatchInterval time.Duration
+
+	// clock paces the reply wait and the watcher (the real clock when
+	// nil).
 	clock webClock
 
+	// mu is the one send path: it is held for the whole of an inbound
+	// request (send, reply wait and tab close) and for each watcher tick,
+	// so inbound and outbound never type into the site at once and an
+	// outbound reply is never typed while an inbound request waits.
 	mu sync.Mutex
+	// watch is the outbound watcher's state; only the watcher uses it.
+	watch dotWatch
 }
 
 func (w *WebAgent) logf(format string, args ...any) {
@@ -152,7 +177,22 @@ func (w *WebAgent) logf(format string, args ...any) {
 }
 
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
-func (w *WebAgent) Run(ctx context.Context) error { return RunPolling(ctx, w.PollOnce, w.logf) }
+// On a dot with OutPath set, the outbound watcher runs beside it.
+func (w *WebAgent) Run(ctx context.Context) error {
+	if w.watching() {
+		wctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			w.runDotWatcher(wctx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+	}
+	return RunPolling(ctx, w.PollOnce, w.logf)
+}
 
 // PollOnce waits up to Hold for requests and handles each one serially.
 func (w *WebAgent) PollOnce(ctx context.Context) (int, error) {
@@ -502,7 +542,7 @@ func (w *WebAgent) answer(ctx context.Context, req envelope.Request, anchor repl
 	if note != "" {
 		tail += "\n\n" + note
 	}
-	tail += fmt.Sprintf("\n\n%s conversation: %s", label, convID)
+	tail += fmt.Sprintf("\n\n%s: %s", convName(w.Site), convID)
 	body, truncated := capReplyTo(text, maxWebReplyBytes-len(tail))
 	if truncated {
 		// Room for the notice comes out of the text too; its numbers are
@@ -618,21 +658,21 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	label := siteLabel(w.Site)
 	var ue *UnavailableError
 	if _, ok := rateLimited(err); ok {
-		return w.rateLimitReply() + clickedNote(err, label)
+		return w.rateLimitReply() + clickedNote(err, w.Site)
 	}
 	switch {
 	case errors.Is(err, ErrPaused):
 		return "Nothing was sent: " + label + " is paused; unpause it in ChatGPT and ask again."
 	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("Nothing was sent: %s's thread %s was not found; check the --thread the %s agent runs with.", label, convID, w.Name)
-	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrTimeout) && clickedNote(err, label) != "":
+	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrTimeout) && clickedNote(err, w.Site) != "":
 		return fmt.Sprintf("Sorry, the message was sent to %s, but it did not show up in the conversation in time; ask for the reply later instead of sending it again.", label)
 	case errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("No %s conversation with id %s was found. Start a new one with \"new chat\" on the first line.", label, convID)
 	case errors.Is(err, ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fmt.Sprintf("Sorry, %s did not finish answering in time. The message may still have been sent.", label)
 	case errors.As(err, &ue):
-		return "Sorry, " + ue.Error() + "." + clickedNote(err, label)
+		return "Sorry, " + ue.Error() + "." + clickedNote(err, w.Site)
 	}
 	return fmt.Sprintf("Sending to %s failed.", label)
 }
@@ -641,12 +681,12 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 // button was clicked (a redirect to a sign-in page or an anti-bot check
 // mid-send): the message may be in the conversation already, and sending
 // it again could post it twice.
-func clickedNote(err error, label string) string {
+func clickedNote(err error, src Source) string {
 	var ue *UnavailableError
 	if !errors.As(err, &ue) || !ue.Clicked {
 		return ""
 	}
-	return fmt.Sprintf(" The send button had already been clicked, so the message may have been sent; check the %s conversation before sending it again.", label)
+	return fmt.Sprintf(" The send button had already been clicked, so the message may have been sent; check %s before sending it again.", theConv(src))
 }
 
 // site is the agent's table entry, nil for a site outside the table
@@ -671,7 +711,7 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 	if _, ok := rateLimited(err); ok {
 		// The message went through before the site started refusing reads:
 		// sending it again would duplicate it and add to the rate limit.
-		return fmt.Sprintf("Sorry, %s is rate-limiting this account right now. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", label, label, convID)
+		return fmt.Sprintf("Sorry, %s is rate-limiting this account right now. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", siteLimiter(w.Site), label, convID)
 	}
 	switch {
 	case errors.Is(err, errOrphaned) && w.site() != nil && w.site().oneThread:

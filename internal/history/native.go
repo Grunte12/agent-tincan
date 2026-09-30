@@ -458,7 +458,7 @@ func unavailable(s Source, kind error, detail string) error {
 // rateLimitMessage is what a reply says when the site is rate-limiting the
 // owner's account.
 func rateLimitMessage(s Source) string {
-	return siteLabel(s) + " is rate-limiting this account right now; try again later"
+	return siteLimiter(s) + " is rate-limiting this account right now; try again later"
 }
 
 // rateLimited reports whether err is a rate limit, and how long the site
