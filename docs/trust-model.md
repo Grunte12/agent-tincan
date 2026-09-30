@@ -104,6 +104,7 @@ If one agent reads untrusted content (a web page, an email, a document) and gets
 
 - Give high-power agents instructions about which kinds of requests they should confirm with you first.
 - Keep `tincan trace` handy so you can see who asked for what.
+- For an OpenAI dot (`dot-web`), which reads your connected apps, list the teammates it may ask in `~/.config/tincan/dot-web-send.txt`; with no file it may ask any joined agent, like every other teammate.
 - Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
 ## Owner approval gate
