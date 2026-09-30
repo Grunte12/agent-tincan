@@ -128,3 +128,102 @@ func TestGateFromDotHoldsAnywhereInChain(t *testing.T) {
 		t.Fatalf("dot -> muse -> cx = %q %v", req.Status, req.Chain)
 	}
 }
+
+// convened returns the id of a convening ask from the owner's agent to the
+// council, released by the owner when approved, and claimed by the council.
+func convened(t *testing.T, f *fixture, approved bool) string {
+	t.Helper()
+	req := prepare(t, f, "instinct", "council", "", envelope.KindAsk)
+	stored, err := f.st.Enqueue(t.Context(), req, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved {
+		if stored.Status != envelope.StatusHeld {
+			t.Fatalf("convening ask to the council = %q, want held", stored.Status)
+		}
+		if _, err := f.st.Release(t.Context(), stored.ID, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.claim(t, stored.ID, "council")
+	return stored.ID
+}
+
+func councilFixture(t *testing.T, a *Approval) *fixture {
+	t.Helper()
+	f := newFixture(t, Config{Approval: a})
+	f.agent(t, "council", onboard.KindCouncil)
+	f.agent(t, "dot-web", onboard.KindDotWeb)
+	return f
+}
+
+// A council's member asks to the dot continue a council question the owner
+// already approved, so the dot's default hold does not hold them again.
+func TestCouncilAskToDotPassesWhenParentApproved(t *testing.T) {
+	for _, a := range []*Approval{nil, approvalFile(t, "")} {
+		f := councilFixture(t, a)
+		parent := convened(t, f, true)
+		for _, kind := range []envelope.Kind{envelope.KindAsk, envelope.KindNotify} {
+			if req := prepare(t, f, "council", "dot-web", parent, kind); req.Status == envelope.StatusHeld {
+				t.Fatalf("council %s to the dot under an approved council ask was held (approval %v)", kind, a != nil)
+			}
+		}
+		// The claimed parent is found without naming it, too.
+		if req := prepare(t, f, "council", "dot-web", "", envelope.KindAsk); req.Status == envelope.StatusHeld {
+			t.Fatal("council ask to the dot under its claimed, approved request was held")
+		}
+	}
+}
+
+// A parent the owner never approved does not open the dot.
+func TestCouncilAskToDotHeldWhenParentUnapproved(t *testing.T) {
+	// An entry that gates nobody lets the convening ask through unheld.
+	f := councilFixture(t, approvalFile(t, `{"gate":{"council":{"from":[]}}}`))
+	parent := convened(t, f, false)
+	if req := prepare(t, f, "council", "dot-web", parent, envelope.KindAsk); req.Status != envelope.StatusHeld {
+		t.Fatal("council ask to the dot under an unapproved parent was not held")
+	}
+}
+
+// Only a council's asks pass: an agent handling an approved request that
+// did not go to a council is still held, and so is a fresh ask.
+func TestNonCouncilAskToDotStillHeld(t *testing.T) {
+	f := councilFixture(t, nil)
+	f.agent(t, "cx", onboard.KindCodex)
+	// An approved request to a non-council agent (gated by nothing but
+	// released the same way) does not open the dot for its handler.
+	g := councilFixture(t, approvalFile(t, `{"gate":{"cx":{"from":"*"}}}`))
+	g.agent(t, "cx", onboard.KindCodex)
+	req := prepare(t, g, "instinct", "cx", "", envelope.KindAsk)
+	stored, err := g.st.Enqueue(t.Context(), req, time.Hour)
+	if err != nil || stored.Status != envelope.StatusHeld {
+		t.Fatalf("gated ask to cx = %q %v", stored.Status, err)
+	}
+	if _, err := g.st.Release(t.Context(), stored.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	g.claim(t, stored.ID, "cx")
+	if r := prepare(t, g, "cx", "dot-web", stored.ID, envelope.KindAsk); r.Status != envelope.StatusHeld {
+		t.Fatal("ask to the dot under an approved non-council request was not held")
+	}
+	for _, from := range []string{"grokbot", "cx", "council"} {
+		if r := prepare(t, f, from, "dot-web", "", envelope.KindAsk); r.Status != envelope.StatusHeld {
+			t.Errorf("fresh ask from %s to the dot was not held", from)
+		}
+	}
+	// The convening ask to the council itself stays held.
+	if r := prepare(t, f, "instinct", "council", "", envelope.KindAsk); r.Status != envelope.StatusHeld {
+		t.Error("convening ask to the council was not held")
+	}
+}
+
+// An approval.json entry that gates the dot from the council still holds
+// the council's asks, even under an approved council question.
+func TestApprovalGateHoldsCouncilAskToDot(t *testing.T) {
+	f := councilFixture(t, approvalFile(t, `{"gate":{"dot-web":{"from":["council"]}}}`))
+	parent := convened(t, f, true)
+	if req := prepare(t, f, "council", "dot-web", parent, envelope.KindAsk); req.Status != envelope.StatusHeld {
+		t.Fatal("an approval.json gate on the dot from the council did not hold the council's ask")
+	}
+}

@@ -117,7 +117,7 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		p.Refund(*req)
 		return reject(http.StatusServiceUnavailable, err)
 	}
-	p.holdByKind(ctx, req)
+	p.holdByKind(ctx, req, parent, ok)
 	return nil
 }
 
@@ -133,10 +133,21 @@ var holdByDefault = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWe
 // that approval.json does not name, even with no approval.json at all. An
 // explicit entry wins, so {"from": []} holds nothing. A failed kind lookup
 // holds rather than delivers.
-func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request) {
+//
+// A council's asks (answer, review, chairman) continue a council question
+// the owner already approved, so they are not held again by kind: when the
+// parent went to a council-kind agent and was approved, the default hold is
+// skipped. The convening ask to the council has no such parent and stays
+// held.
+func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request, parent envelope.Request, hasParent bool) {
 	entry, ttl, notify := p.cfg.Approval.holdDefaults(req.To)
 	if entry {
 		return
+	}
+	if hasParent && parent.Approved {
+		if kind, err := p.kindOf(ctx, parent.To); err == nil && kind == onboard.KindCouncil {
+			return
+		}
 	}
 	if kind, err := p.kindOf(ctx, req.To); err == nil && !holdByDefault[kind] {
 		return
