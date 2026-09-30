@@ -103,8 +103,11 @@ type dotOutState struct {
 type dotOutThread struct {
 	// Started is when the watcher first read the thread; dot messages
 	// from before it are history, not asks.
-	Started  time.Time                `json:"started"`
-	Taught   bool                     `json:"taught,omitempty"`
+	Started time.Time `json:"started"`
+	Taught  bool      `json:"taught,omitempty"`
+	// Teaching: the setup message's typing started and is not confirmed
+	// yet; found on a later tick, the dot counts as taught.
+	Teaching bool                     `json:"teaching,omitempty"`
 	Messages map[string]*dotOutRecord `json:"messages"`
 }
 
@@ -114,6 +117,10 @@ const (
 	dotBaseline = "baseline"
 	// dotOwn: a message this agent typed.
 	dotOwn = "own"
+	// dotSending: saved before the ask goes to the relay. One still
+	// sending on a later tick may have reached the relay, so it is never
+	// asked again; the dot is told delivery is uncertain.
+	dotSending = "sending"
 	// dotSent: asked; its reply is not typed yet.
 	dotSent = "sent"
 	// dotFailed and dotAnswered: finished. Done marks the reply typed.
@@ -132,6 +139,10 @@ type dotOutRecord struct {
 	At     time.Time `json:"at"`
 	// Done: the reply is typed into the DM (or nothing is to be typed).
 	Done bool `json:"done,omitempty"`
+	// Typing: the reply's typing started and is not confirmed yet. A
+	// record found typing on a later tick may be in the DM already, so it
+	// is never typed again.
+	Typing bool `json:"typing,omitempty"`
 }
 
 func (st *dotOutState) thread(id string) *dotOutThread {
@@ -315,18 +326,36 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		return false, err
 	}
 
-	// Teach the dot once per thread (and once more on --teach).
+	// Teach the dot once per thread (and once more on --teach). Typing is
+	// saved as started first, so a setup message that may be in the DM is
+	// never typed again.
+	if th.Teaching {
+		w.logf("outbound: the setup message may have been typed (not confirmed); not typing it again")
+		th.Taught, th.Teaching, w.watch.taught = true, false, true
+		dirty = true
+	}
 	if !th.Taught || (w.Teach && !w.watch.taught) {
-		if _, err := say(w.dotSetupMessage(ctx)); err != nil {
+		text := w.dotSetupMessage(ctx)
+		th.Teaching = true
+		if err := w.saveOut(st); err != nil {
+			th.Teaching = false
 			return err
 		}
-		th.Taught, w.watch.taught = true, true
+		if _, err := say(text); err != nil {
+			// Nothing was typed: it is typed on a later tick.
+			th.Teaching = false
+			_ = w.saveOut(st)
+			return err
+		}
+		th.Taught, th.Teaching, w.watch.taught = true, false, true
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
 	}
 
-	// New @tincan lines from the dot.
+	// New @tincan lines from the dot. Each ask is saved as sending before
+	// it goes to the relay, so it is asked at most once.
+	sending := map[string]bool{}
 	for _, m := range feed.Messages {
 		if m.Owner || th.Messages[m.ID] != nil {
 			continue
@@ -340,20 +369,44 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 			dirty = true
 			continue
 		}
-		rec := w.startAsk(ctx, ask)
+		rec := w.refuseAsk(ask, now)
 		if rec == nil {
-			continue // the relay is unreachable; asked on a later tick
+			rec = &dotOutRecord{Status: dotSending, Target: ask.target, Line: ask.line, At: now}
+			th.Messages[m.ID] = rec
+			if err := w.saveOut(st); err != nil {
+				delete(th.Messages, m.ID)
+				return err
+			}
+			switch {
+			case !w.startAsk(ctx, ask, rec):
+				// Provably not taken: asked again on a later tick.
+				delete(th.Messages, m.ID)
+			case rec.Status == dotSending:
+				// The outcome is unknown; the dot is told on a later tick.
+				sending[m.ID] = true
+			}
+		} else {
+			th.Messages[m.ID] = rec
 		}
-		th.Messages[m.ID] = rec
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
 	}
 
-	// Replies to type, oldest first.
+	// Replies to type, oldest first. A record left typing may be in the DM
+	// already: it is finished without typing it again.
 	ids := make([]string, 0, len(th.Messages))
 	for id, r := range th.Messages {
-		if !r.Done && (r.Status == dotSent || r.Status == dotFailed) {
+		switch {
+		case r.Done || sending[id]:
+		case r.Typing:
+			w.logf("outbound: the reply for %q may have been typed (not confirmed); not typing it again", r.Line)
+			if r.Status == dotSending {
+				r.Status = dotFailed
+			}
+			r.Typing, r.Done = false, true
+			dirty = true
+		case r.Status == dotSent || r.Status == dotFailed || r.Status == dotSending:
 			ids = append(ids, id)
 		}
 	}
@@ -373,23 +426,31 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		if !final {
 			continue
 		}
-		ok, err := say(text)
-		if err != nil {
+		r.Typing = true
+		if err := w.saveOut(st); err != nil {
+			r.Typing = false
 			return err
 		}
-		if ok {
-			if r.Status == dotSent {
-				r.Status = dotFailed
-				if res.Status == envelope.StatusAnswered {
-					r.Status = dotAnswered
-				}
-			}
-			r.Done = true
-			if err := w.saveOut(st); err != nil {
-				return err
-			}
-			w.settleAsk(ctx, r, res)
+		if _, err := say(text); err != nil {
+			// Nothing was typed: it is typed on a later tick.
+			r.Typing = false
+			_ = w.saveOut(st)
+			return err
 		}
+		switch r.Status {
+		case dotSent:
+			r.Status = dotFailed
+			if res.Status == envelope.StatusAnswered {
+				r.Status = dotAnswered
+			}
+		case dotSending:
+			r.Status = dotFailed
+		}
+		r.Typing, r.Done = false, true
+		if err := w.saveOut(st); err != nil {
+			return err
+		}
+		w.settleAsk(ctx, r, res)
 	}
 	if w.pruneOut(th, feed, now) {
 		dirty = true
@@ -400,39 +461,53 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 	return w.saveOut(st)
 }
 
-// startAsk asks r's target for the dot, after the send allowlist. It
-// returns the record: sent, or failed with the reason (typed back on this
-// tick). It is nil when the relay could not be reached, so the line is
-// asked on a later tick.
-func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk) *dotOutRecord {
-	now := time.Now().UTC()
+// refuseAsk is the failed record for an ask that is not sent (a bad
+// line, the dot itself, an empty request, or a target the send allowlist
+// refuses), typed back on this tick; nil when it may be asked.
+func (w *WebAgent) refuseAsk(ask dotAsk, now time.Time) *dotOutRecord {
 	target := ask.target
-	fail := func(reason string) *dotOutRecord {
-		w.logf("outbound: %q: %s", ask.line, reason)
-		return &dotOutRecord{Status: dotFailed, Target: target, Line: ask.line, Reason: reason, At: now}
-	}
+	reason := ""
 	switch {
 	case ask.bad != "":
-		return fail(ask.bad)
+		reason = ask.bad
 	case target == w.Name:
-		return fail("a dot cannot ask itself")
+		reason = "a dot cannot ask itself"
 	case ask.text == "":
-		return fail("empty request")
+		reason = "empty request"
+	default:
+		reason = w.sendRefused(target)
 	}
-	if reason := w.sendRefused(target); reason != "" {
-		return fail(reason)
+	if reason == "" {
+		return nil
 	}
+	w.logf("outbound: %q: %s", ask.line, reason)
+	return &dotOutRecord{Status: dotFailed, Target: target, Line: ask.line, Reason: reason, At: now}
+}
+
+// startAsk asks ask's target for the dot and updates rec, which is saved
+// as sending: sent with the request id, or failed when the relay refused
+// it. On any other error rec stays sending, since the relay may have
+// taken the ask. It returns false only when the ask provably was not
+// taken (a 429), so the line may be asked on a later tick.
+func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) bool {
+	target := ask.target
 	res, err := w.Relay.Ask(ctx, target, ask.text, "", 0, false)
 	var ae *client.APIError
 	switch {
-	case errors.As(err, &ae) && ae.Code >= 400 && ae.Code < 500 && ae.Code != http.StatusTooManyRequests:
-		return fail("the relay refused it: " + ae.Message)
-	case err != nil:
+	case errors.As(err, &ae) && ae.Code == http.StatusTooManyRequests:
 		w.logf("outbound: asking %s: %v (trying again later)", target, err)
-		return nil
+		return false
+	case errors.As(err, &ae) && ae.Code >= 400 && ae.Code < 500:
+		rec.Status, rec.Reason = dotFailed, "the relay refused it: "+ae.Message
+		w.logf("outbound: %q: %s", ask.line, rec.Reason)
+		return true
+	case err != nil:
+		w.logf("outbound: asking %s: %v (delivery uncertain; not asking again)", target, err)
+		return true
 	}
 	w.logf("outbound: asked %s for the dot (request %s, %s)", target, res.Request.ID, res.Status)
-	return &dotOutRecord{Status: dotSent, Target: target, Request: res.Request.ID, Line: ask.line, At: now}
+	rec.Status, rec.Request = dotSent, res.Request.ID
+	return true
 }
 
 // sendRefused checks target against the send allowlist ("" when it may
@@ -479,10 +554,14 @@ func (l sendAllowlist) refused(target string) string {
 
 // dotReplyFor is the message to type for r, and whether r is finished
 // (false: still waiting on the relay). A sent ask is looked up on the
-// relay.
+// relay; one still sending is told its delivery is uncertain.
 func (w *WebAgent) dotReplyFor(ctx context.Context, r *dotOutRecord) (string, bool, client.Result) {
-	if r.Status == dotFailed {
+	switch r.Status {
+	case dotFailed:
 		return dotFailure(r.Target, r.Line, r.Reason), true, client.Result{Status: envelope.StatusFailed}
+	case dotSending:
+		reason := fmt.Sprintf("delivery uncertain (Tincan could not confirm the ask reached %s); ask again if you still need it", r.Target)
+		return dotFailure(r.Target, r.Line, reason), true, client.Result{Status: envelope.StatusFailed}
 	}
 	res, err := w.Relay.Get(ctx, r.Request, 0)
 	var ae *client.APIError

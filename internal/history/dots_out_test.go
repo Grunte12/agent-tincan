@@ -2,6 +2,9 @@ package history
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -607,6 +610,199 @@ func TestDotOutRunsWithTheAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := r.typed(); got[1] != "[tincan-reply from muse]\n> @tincan ask muse check the calendar\n\nFriday is free." {
+		t.Fatalf("typed %q", got)
+	}
+}
+
+// askFault is dot-web's relay transport with one fault on its next ask
+// (POST /v1/send): "lost" delivers the ask and loses the response, "429"
+// refuses it with a rate limit without delivering it, and "delivered"
+// delivers it and then runs after.
+type askFault struct {
+	mu    sync.Mutex
+	mode  string
+	after func()
+	asks  int
+}
+
+func (f *askFault) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set(client.AgentHeader, "dot-web")
+	if req.Method != http.MethodPost || req.URL.Path != "/v1/send" {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	f.mu.Lock()
+	mode := f.mode
+	f.mode = ""
+	f.asks++
+	f.mu.Unlock()
+	switch mode {
+	case "lost":
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return nil, errors.New("connection reset by peer")
+	case "429":
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Request: req,
+			Body: io.NopCloser(strings.NewReader(`{"error":"slow down"}`))}, nil
+	case "delivered":
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		f.after()
+		return resp, err
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// faultyRelay gives the rig's agent a relay client over an askFault.
+func (r *dotOutRig) faultyRelay() *askFault {
+	f := &askFault{}
+	r.agent.Relay = client.NewRelayHTTP(r.mesh.URL("dot-web"), &http.Client{Transport: f})
+	return f
+}
+
+// The relay takes the ask but its response is lost: the ask is never sent
+// again, and the dot is told once that delivery is uncertain.
+func TestDotOutAskWithLostResponseIsNotResent(t *testing.T) {
+	r := newDotOutRig(t)
+	f := r.faultyRelay()
+	r.taught()
+	f.mode = "lost"
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	r.tick()
+	r.restart()
+	r.agent.Relay = client.NewRelayHTTP(r.mesh.URL("dot-web"), &http.Client{Transport: f})
+	r.tick()
+	r.tick()
+	if reqs := r.museInbox(); len(reqs) != 1 {
+		t.Fatalf("muse got %d asks: %+v", len(reqs), reqs)
+	}
+	if f.asks != 1 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+	want := "[tincan-reply from muse] failed: delivery uncertain (Tincan could not confirm the ask reached muse); ask again if you still need it\n> @tincan ask muse check the calendar"
+	if got := r.typed(); len(got) != 2 || got[1] != want {
+		t.Fatalf("typed %q\nwant %q", got, want)
+	}
+}
+
+// The ask goes through but its record cannot be saved: the next tick does
+// not ask again.
+func TestDotOutAskIsNotResentWhenItsRecordIsNotSaved(t *testing.T) {
+	r := newDotOutRig(t)
+	state := filepath.Join(r.dir, "state")
+	r.agent.OutPath = filepath.Join(state, "dot-web-out.json")
+	f := r.faultyRelay()
+	r.taught()
+	t.Cleanup(func() { _ = os.Chmod(state, 0o700) })
+	f.mode = "delivered"
+	f.after = func() {
+		if err := os.Chmod(state, 0o500); err != nil {
+			t.Error(err)
+		}
+	}
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	if err := os.Chmod(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	r.tick()
+	if f.asks != 1 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+	if reqs := r.museInbox(); len(reqs) != 1 {
+		t.Fatalf("muse got %d asks: %+v", len(reqs), reqs)
+	}
+	if got := r.typed(); len(got) != 2 || !strings.Contains(got[1], "failed: delivery uncertain") {
+		t.Fatalf("typed %q", got)
+	}
+}
+
+// A reply whose typing was started but not confirmed (the process died,
+// or the save after it failed) is not typed again.
+func TestDotOutReplyLeftTypingIsNotRetyped(t *testing.T) {
+	r := newDotOutRig(t)
+	r.taught()
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	reqs := r.museInbox()
+	if len(reqs) != 1 {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	r.museReplies(reqs[0].ID, "Friday is free.", envelope.StatusAnswered)
+	// A process that died mid-typing left the record marked typing.
+	st := r.agent.loadOut()
+	for _, rec := range st.thread(dotThread).Messages {
+		if rec.Status == dotSent {
+			rec.Typing = true
+		}
+	}
+	if err := r.agent.saveOut(st); err != nil {
+		t.Fatal(err)
+	}
+	r.restart()
+	r.tick()
+	r.tick()
+	if got := r.typed(); len(got) != 1 {
+		t.Fatalf("retyped: %q", got)
+	}
+	for id, rec := range r.agent.loadOut().thread(dotThread).Messages {
+		if rec.Status == dotSent && (!rec.Done || rec.Typing) {
+			t.Fatalf("%s left %+v", id, rec)
+		}
+	}
+}
+
+// Typing that fails before the send is clicked typed nothing: the reply
+// stays due and is typed once the DM works again.
+func TestDotOutUnclickedTypingFailureIsRetried(t *testing.T) {
+	r := newDotOutRig(t)
+	r.taught()
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	reqs := r.museInbox()
+	if len(reqs) != 1 {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	r.museReplies(reqs[0].ID, "Friday is free.", envelope.StatusAnswered)
+	r.b.mu.Lock()
+	r.b.sendErr = "paused"
+	r.b.mu.Unlock()
+	r.tick()
+	r.b.mu.Lock()
+	r.b.sendErr = ""
+	r.b.mu.Unlock()
+	r.restart()
+	r.tick()
+	r.tick()
+	// The fake records the failed attempt too: one unclicked, then one typed.
+	if got := r.typed(); len(got) != 3 || got[1] != got[2] || !strings.HasSuffix(got[2], "Friday is free.") {
+		t.Fatalf("typed %q", got)
+	}
+}
+
+// A 429 from the relay means the ask was not taken: the line stays due
+// and is asked once on a later tick.
+func TestDotOutRelayRateLimitKeepsTheLine(t *testing.T) {
+	r := newDotOutRig(t)
+	f := r.faultyRelay()
+	r.taught()
+	f.mode = "429"
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	if reqs := r.museInbox(); len(reqs) != 0 {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	r.tick()
+	r.tick()
+	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != "check the calendar" {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	if f.asks != 2 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+	if got := r.typed(); len(got) != 1 {
 		t.Fatalf("typed %q", got)
 	}
 }
