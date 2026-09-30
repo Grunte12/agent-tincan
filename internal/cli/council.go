@@ -116,8 +116,12 @@ func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJ
 		return err
 	}
 	ctx := cmd.Context()
+	kindAgent := councilKindAgent(ctx, r)
 	if to == "" {
-		to = councilAgent(ctx, r)
+		to = kindAgent
+		if to == "" {
+			to = council.DefaultAgentName
+		}
 	}
 	raw, err := json.Marshal(form)
 	if err != nil {
@@ -160,7 +164,10 @@ func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJ
 	}
 	var saved []string
 	if res.Reply != nil && saveFiles {
-		saved = saveCouncilFiles(ctx, r, cfg, req.ID, res.Reply.Attachments, cmd.ErrOrStderr())
+		// Only the council-kind agent's report is trusted enough to save
+		// as HTML a browser opens; anyone else's stays .bin.
+		fromCouncil := kindAgent != "" && to == kindAgent && (res.Reply.From == "" || res.Reply.From == kindAgent)
+		saved = saveCouncilFiles(ctx, r, cfg, req.ID, res.Reply.Attachments, fromCouncil, cmd.ErrOrStderr())
 	}
 	if asJSON {
 		block, ok := councilResultBlock(res)
@@ -189,19 +196,19 @@ func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJ
 	return nil
 }
 
-// councilAgent is the roster's council-kind agent, or "council" when the
+// councilKindAgent is the roster's council-kind agent, or "" when the
 // roster has none or cannot be read.
-func councilAgent(ctx context.Context, r *client.Relay) string {
+func councilKindAgent(ctx context.Context, r *client.Relay) string {
 	ro, err := r.Roster(ctx)
 	if err != nil {
-		return council.DefaultAgentName
+		return ""
 	}
 	for _, a := range ro.Agents {
 		if a.Kind == onboard.KindCouncil {
 			return a.Name
 		}
 	}
-	return council.DefaultAgentName
+	return ""
 }
 
 // selfApprove approves held request id through the same path as tincan
@@ -225,15 +232,35 @@ func selfApprove(ctx context.Context, id string) string {
 	}
 }
 
+// councilGetTries is how many checks in a row may fail (other than with
+// a 4xx from the relay) before tincan council stops waiting.
+const councilGetTries = 5
+
 // waitCouncil checks request id every councilPollEvery until it is done,
-// printing each new progress note to w as a stage line.
+// printing each new progress note to w as a stage line. A failed check is
+// retried, up to councilGetTries in a row; a 4xx from the relay ends the
+// wait at once.
 func waitCouncil(ctx context.Context, r *client.Relay, id string, w io.Writer) (client.Result, error) {
 	var last envelope.Progress
+	failed := 0
 	for {
 		res, err := r.Get(ctx, id, 0)
 		if err != nil {
-			return res, err
+			var apiErr *client.APIError
+			if ctx.Err() != nil || (errors.As(err, &apiErr) && apiErr.Code >= 400 && apiErr.Code < 500) {
+				return res, err
+			}
+			if failed++; failed >= councilGetTries {
+				return res, fmt.Errorf("stopped waiting for request %s after %d failed checks: %w; check on it later with: tincan get %s", id, failed, err, id)
+			}
+			select {
+			case <-ctx.Done():
+				return res, ctx.Err()
+			case <-time.After(councilPollEvery):
+			}
+			continue
 		}
+		failed = 0
 		if p := res.Progress; p != nil && (p.Note != last.Note || !p.At.Equal(last.At)) {
 			last = *p
 			fmt.Fprintf(w, "Council: %s\n", p.Note)
@@ -251,9 +278,11 @@ func waitCouncil(ctx context.Context, r *client.Relay, id string, w io.Writer) (
 
 // saveCouncilFiles downloads a reply's attachments into this agent's
 // attachments folder under council/<request id> (0700, files 0600), named
-// by attachment id, and returns their paths. A file that cannot be saved
-// is reported on errOut and skipped.
-func saveCouncilFiles(ctx context.Context, r *client.Relay, cfg client.Config, id string, atts []envelope.Attachment, errOut io.Writer) []string {
+// by attachment id, and returns their paths. An HTML file is saved as
+// .html only when fromCouncil (the reply came from the roster's
+// council-kind agent); otherwise it keeps the allowlist's .bin. A file
+// that cannot be saved is reported on errOut and skipped.
+func saveCouncilFiles(ctx context.Context, r *client.Relay, cfg client.Config, id string, atts []envelope.Attachment, fromCouncil bool, errOut io.Writer) []string {
 	if len(atts) == 0 {
 		return nil
 	}
@@ -266,7 +295,7 @@ func saveCouncilFiles(ctx context.Context, r *client.Relay, cfg client.Config, i
 			if p, err = client.SaveAttachmentFile(dir, a.ID, d.MIME, data); err == nil {
 				// The report is HTML, which the attachment allowlist saves
 				// as .bin; give it an extension a browser opens.
-				if client.MediaType(d.MIME) == "text/html" {
+				if fromCouncil && client.MediaType(d.MIME) == "text/html" {
 					html := strings.TrimSuffix(p, ".bin") + ".html"
 					if err = os.Rename(p, html); err == nil {
 						p = html

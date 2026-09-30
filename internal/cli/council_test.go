@@ -8,9 +8,14 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -367,5 +372,136 @@ func TestCouncilLeaderboardCard(t *testing.T) {
 	}
 	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
 		t.Fatalf("card mode %v, want 0600", st.Mode().Perm())
+	}
+}
+
+// flakyRelay is a proxy in front of target that answers the first fail
+// GETs of a request (-1: every one) with status, and forwards everything
+// else. It counts the GETs of a request it sees.
+type flakyRelay struct {
+	mu         sync.Mutex
+	fail, gets int
+}
+
+func (f *flakyRelay) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gets
+}
+
+func newFlakyRelay(t *testing.T, target string, fail, status int) (*flakyRelay, string) {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &flakyRelay{fail: fail}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/requests/") {
+			f.mu.Lock()
+			f.gets++
+			failing := f.fail < 0 || f.gets <= f.fail
+			f.mu.Unlock()
+			if failing {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, `{"error":"injected"}`)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, req)
+	}))
+	t.Cleanup(srv.Close)
+	return f, srv.URL
+}
+
+// throughFlaky points the owner's config at a flaky proxy in front of
+// its relay.
+func throughFlaky(t *testing.T, m *testrelay.Mesh, owner string, fail, status int) *flakyRelay {
+	t.Helper()
+	f, u := newFlakyRelay(t, m.URL(owner), fail, status)
+	b, _ := json.Marshal(client.Config{Relay: u, Agent: owner})
+	if err := os.WriteFile(os.Getenv("TINCAN_CONFIG"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// A couple of failed checks on the request do not end the wait: tincan
+// council keeps checking and prints the verdict.
+func TestCouncilWaitSurvivesTransientErrors(t *testing.T) {
+	m, c := ownerMesh(t, "panel", "owner", true)
+	f := throughFlaky(t, m, "owner", 2, http.StatusBadGateway)
+	fakeCouncil(t, c, []string{"Answers: 5 of 7 in"}, councilReplyBody, envelope.StatusAnswered)
+	out, errOut, err := runSplit(t, councilCmd(), "Which database?")
+	if err != nil {
+		t.Fatalf("council: %v\n%s%s", err, out, errOut)
+	}
+	wantLine(t, out, "Recommendation: use Postgres.")
+	if f.count() <= 2 {
+		t.Fatalf("gets = %d, want the wait to continue past the failures", f.count())
+	}
+}
+
+// Checks that keep failing end the wait with the request id and how to
+// check on it later.
+func TestCouncilWaitGivesUpOnPersistentErrors(t *testing.T) {
+	m, _ := ownerMesh(t, "panel", "owner", true)
+	f := throughFlaky(t, m, "owner", -1, http.StatusBadGateway)
+	out, errOut, err := runSplit(t, councilCmd(), "Which database?")
+	if err == nil {
+		t.Fatalf("council succeeded with every check failing:\n%s%s", out, errOut)
+	}
+	id := requestID(t, out)
+	if !strings.Contains(err.Error(), "tincan get "+id) {
+		t.Fatalf("err = %v, want the request id and a tincan get hint", err)
+	}
+	if f.count() < 2 {
+		t.Fatalf("gets = %d, want retries before giving up", f.count())
+	}
+}
+
+// A 4xx from the relay ends the wait at once.
+func TestCouncilWaitStopsOn4xx(t *testing.T) {
+	m, _ := ownerMesh(t, "panel", "owner", true)
+	f := throughFlaky(t, m, "owner", -1, http.StatusNotFound)
+	_, _, err := runSplit(t, councilCmd(), "Which database?")
+	if !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("err = %v, want the 404", err)
+	}
+	if f.count() != 1 {
+		t.Fatalf("gets = %d, want 1", f.count())
+	}
+}
+
+// requestID is the id on tincan council's "(request <id>)" line.
+func requestID(t *testing.T, out string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(out, "(request ")
+	id, _, ok2 := strings.Cut(rest, ")")
+	if !ok || !ok2 || id == "" {
+		t.Fatalf("no request id in:\n%s", out)
+	}
+	return id
+}
+
+// An HTML attachment from an agent that is not the council-kind agent
+// keeps the safe .bin name.
+func TestCouncilHTMLOnlyFromCouncilKind(t *testing.T) {
+	m, _ := ownerMesh(t, "panel", "owner", true)
+	other := m.JoinOnMachineOf(t, "muse", "helper")
+	report := filepath.Join(t.TempDir(), "report.html")
+	if err := os.WriteFile(report, []byte("<html>x</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeCouncil(t, other, nil, councilReplyBody, envelope.StatusAnswered, report)
+	out, errOut, err := runSplit(t, councilCmd(), "Which database?", "--to", "helper")
+	if err != nil {
+		t.Fatalf("council: %v\n%s%s", err, out, errOut)
+	}
+	savedPath(t, out, ".bin")
+	if strings.Contains(out, ".html\n") {
+		t.Fatalf("saved as .html from a non-council agent:\n%s", out)
 	}
 }
