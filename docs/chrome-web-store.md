@@ -76,7 +76,7 @@ Account terms: OpenAI, Anthropic, xAI, Google and Microsoft prohibit automated a
 
 Single purpose:
 
-> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's conversations on AI chat sites and send messages to them (reading back the answer), using the user's existing logged-in browser session.
+> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's past conversations on the AI chat sites whose history it supports (every supported site except Perplexity) and send messages to the supported sites (reading back the answer), using the user's existing logged-in browser session.
 
 Permission justifications (the dashboard asks for each one):
 
