@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -36,6 +37,11 @@ const maxDotWatchBackoff = 10 * time.Minute
 // dotOutMaxWait is how long an outbound ask is waited on before the dot
 // is told it went unanswered (the relay expires requests after a day).
 const dotOutMaxWait = 25 * time.Hour
+
+// dotOutReconcileFor is how long an ask left sending is looked for on the
+// relay (while the relay cannot be searched) before the dot is told its
+// delivery is uncertain.
+const dotOutReconcileFor = time.Hour
 
 // dotOutRetention is how long a finished record is kept once its message
 // has left the DM's feed.
@@ -114,18 +120,30 @@ type dotOutThread struct {
 	Started time.Time `json:"started"`
 	Taught  bool      `json:"taught,omitempty"`
 	// Teaching: the setup message's typing started and is not confirmed
-	// yet; found on a later tick, the dot counts as taught.
-	Teaching bool `json:"teaching,omitempty"`
+	// yet. Found on a later tick, it is looked for in the DM (see
+	// dotFindTyped) before it is typed again.
+	Teaching       bool       `json:"teaching,omitempty"`
+	TeachingIntent *dotIntent `json:"teaching_intent,omitempty"`
 	// LastSeenID and LastSeenAt are the newest message of the last read.
 	// A later full read that no longer reaches back to it may have skipped
 	// messages.
 	LastSeenID string    `json:"last_seen_id,omitempty"`
 	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
 	// GapNote: the dot is owed dotGapNote. GapNoting: its typing started
-	// and is not confirmed yet; found on a later tick, it counts as typed.
-	GapNote   bool                     `json:"gap_note,omitempty"`
-	GapNoting bool                     `json:"gap_noting,omitempty"`
-	Messages  map[string]*dotOutRecord `json:"messages"`
+	// and is not confirmed yet; found on a later tick, it is looked for in
+	// the DM like the setup message.
+	GapNote         bool                     `json:"gap_note,omitempty"`
+	GapNoting       bool                     `json:"gap_noting,omitempty"`
+	GapNotingIntent *dotIntent               `json:"gap_noting_intent,omitempty"`
+	Messages        map[string]*dotOutRecord `json:"messages"`
+}
+
+// dotIntent is a message about to be typed into the DM: its text and when
+// its typing started. A later tick that finds the typing unconfirmed looks
+// for it in the DM to tell whether it was typed.
+type dotIntent struct {
+	Text string    `json:"text"`
+	At   time.Time `json:"at"`
 }
 
 // noteGap records the read: it owes the dot dotGapNote when the thread
@@ -156,8 +174,9 @@ const (
 	// dotOwn: a message this agent typed.
 	dotOwn = "own"
 	// dotSending: saved before the ask goes to the relay. One still
-	// sending on a later tick may have reached the relay, so it is never
-	// asked again; the dot is told delivery is uncertain.
+	// sending on a later tick may or may not have reached the relay, so it
+	// is looked for there (reconcileAsk): adopted when found, asked when
+	// not, and reported as uncertain only when the relay cannot tell.
 	dotSending = "sending"
 	// dotSent: asked; its reply is not typed yet.
 	dotSent = "sent"
@@ -177,10 +196,14 @@ type dotOutRecord struct {
 	At     time.Time `json:"at"`
 	// Done: the reply is typed into the DM (or nothing is to be typed).
 	Done bool `json:"done,omitempty"`
-	// Typing: the reply's typing started and is not confirmed yet. A
-	// record found typing on a later tick may be in the DM already, so it
-	// is never typed again.
-	Typing bool `json:"typing,omitempty"`
+	// Typing: the reply's typing started and is not confirmed yet; Intent
+	// is what was being typed. A record found typing on a later tick is
+	// looked for in the DM before it is typed again.
+	Typing bool       `json:"typing,omitempty"`
+	Intent *dotIntent `json:"intent,omitempty"`
+	// Ask is the request text of an ask still sending, kept so a later tick
+	// can look for it on the relay and ask it when the relay never got it.
+	Ask string `json:"ask,omitempty"`
 }
 
 func (st *dotOutState) thread(id string) *dotOutThread {
@@ -366,27 +389,29 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 	}
 
 	// Teach the dot once per thread (and once more on --teach). Typing is
-	// saved as started first, so a setup message that may be in the DM is
-	// never typed again.
+	// saved as started first; a setup message left started is looked for in
+	// the DM, and typed again only when the DM shows it was not.
 	if th.Teaching {
-		w.logf("outbound: the setup message may have been typed (not confirmed); not typing it again")
-		th.Taught, th.Teaching, w.watch.taught = true, false, true
+		if w.dotTypedEarlier(th, feed, th.TeachingIntent, "the setup message") {
+			th.Taught, w.watch.taught = true, true
+		}
+		th.Teaching, th.TeachingIntent = false, nil
 		dirty = true
 	}
 	if !th.Taught || (w.Teach && !w.watch.taught) {
 		text := w.dotSetupMessage(ctx)
-		th.Teaching = true
+		th.Teaching, th.TeachingIntent = true, &dotIntent{Text: text, At: time.Now().UTC()}
 		if err := w.saveOut(st); err != nil {
-			th.Teaching = false
+			th.Teaching, th.TeachingIntent = false, nil
 			return err
 		}
 		if _, err := say(text); err != nil {
 			// Nothing was typed: it is typed on a later tick.
-			th.Teaching = false
+			th.Teaching, th.TeachingIntent = false, nil
 			_ = w.saveOut(st)
 			return err
 		}
-		th.Taught, th.Teaching, w.watch.taught = true, false, true
+		th.Taught, th.Teaching, th.TeachingIntent, w.watch.taught = true, false, nil, true
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
@@ -394,33 +419,36 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 
 	// Tell the dot once when the read skipped messages (an @tincan line
 	// may be among them). Typing is saved as started first, like the setup
-	// message, so the note is typed at most once.
+	// message, and one left started is looked for in the DM the same way.
 	if th.GapNoting {
-		w.logf("outbound: the note about skipped messages may have been typed (not confirmed); not typing it again")
-		th.GapNote, th.GapNoting = false, false
+		if w.dotTypedEarlier(th, feed, th.GapNotingIntent, "the note about skipped messages") {
+			th.GapNote = false
+		}
+		th.GapNoting, th.GapNotingIntent = false, nil
 		dirty = true
 	}
 	if th.GapNote && typed < maxDotTypesPerTick {
 		w.logf("outbound: more messages arrived than one read of the DM takes; telling the dot an ask may have been missed")
-		th.GapNoting = true
+		th.GapNoting, th.GapNotingIntent = true, &dotIntent{Text: dotGapNote, At: time.Now().UTC()}
 		if err := w.saveOut(st); err != nil {
-			th.GapNoting = false
+			th.GapNoting, th.GapNotingIntent = false, nil
 			return err
 		}
 		if _, err := say(dotGapNote); err != nil {
 			// Nothing was typed: it is typed on a later tick.
-			th.GapNoting = false
+			th.GapNoting, th.GapNotingIntent = false, nil
 			_ = w.saveOut(st)
 			return err
 		}
-		th.GapNote, th.GapNoting = false, false
+		th.GapNote, th.GapNoting, th.GapNotingIntent = false, false, nil
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
 	}
 
 	// New @tincan lines from the dot. Each ask is saved as sending before
-	// it goes to the relay, so it is asked at most once.
+	// it goes to the relay; one left sending is reconciled with the relay
+	// on a later tick, so it is asked exactly once.
 	sending := map[string]bool{}
 	for _, m := range feed.Messages {
 		if m.Owner || th.Messages[m.ID] != nil {
@@ -437,7 +465,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		}
 		rec := w.refuseAsk(ask, now)
 		if rec == nil {
-			rec = &dotOutRecord{Status: dotSending, Target: ask.target, Line: ask.line, At: now}
+			rec = &dotOutRecord{Status: dotSending, Target: ask.target, Line: ask.line, Ask: ask.text, At: now}
 			th.Messages[m.ID] = rec
 			if err := w.saveOut(st); err != nil {
 				delete(th.Messages, m.ID)
@@ -448,7 +476,8 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 				// Provably not taken: asked again on a later tick.
 				delete(th.Messages, m.ID)
 			case rec.Status == dotSending:
-				// The outcome is unknown; the dot is told on a later tick.
+				// The outcome is unknown; a later tick looks for it on the
+				// relay.
 				sending[m.ID] = true
 			}
 		} else {
@@ -459,20 +488,41 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		}
 	}
 
-	// Replies to type, oldest first. A record left typing may be in the DM
-	// already: it is finished without typing it again.
+	// Asks left sending by an earlier tick or process: look for each on
+	// the relay before anything is typed for it.
+	for id, r := range th.Messages {
+		if r.Done || r.Typing || sending[id] || r.Status != dotSending {
+			continue
+		}
+		if w.reconcileAsk(ctx, th, r, now) {
+			if err := w.saveOut(st); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Replies to type, oldest first. A record left typing is looked for in
+	// the DM first: found or not knowable, it is finished without typing it
+	// again; shown not typed, it is typed now.
 	ids := make([]string, 0, len(th.Messages))
 	for id, r := range th.Messages {
-		switch {
-		case r.Done || sending[id]:
-		case r.Typing:
-			w.logf("outbound: the reply for %q may have been typed (not confirmed); not typing it again", r.Line)
+		if r.Done || sending[id] {
+			continue
+		}
+		if r.Typing {
 			if r.Status == dotSending {
-				r.Status = dotFailed
+				// Left by an older build that typed the uncertain note.
+				w.uncertainAsk(r)
 			}
-			r.Typing, r.Done = false, true
+			typedIt := w.dotTypedEarlier(th, feed, r.Intent, fmt.Sprintf("the reply for %q", r.Line))
+			r.Typing, r.Intent = false, nil
 			dirty = true
-		case r.Status == dotSent || r.Status == dotFailed || r.Status == dotSending:
+			if typedIt {
+				r.Done = true
+				continue
+			}
+		}
+		if r.Status == dotSent || r.Status == dotFailed {
 			ids = append(ids, id)
 		}
 	}
@@ -492,27 +542,25 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		if !final {
 			continue
 		}
-		r.Typing = true
+		r.Typing, r.Intent = true, &dotIntent{Text: text, At: time.Now().UTC()}
 		if err := w.saveOut(st); err != nil {
-			r.Typing = false
+			r.Typing, r.Intent = false, nil
 			return err
 		}
 		if _, err := say(text); err != nil {
-			// Nothing was typed: it is typed on a later tick.
-			r.Typing = false
+			// Nothing was typed: it is typed on a later tick (and if this
+			// save fails, the later tick finds it missing from the DM).
+			r.Typing, r.Intent = false, nil
 			_ = w.saveOut(st)
 			return err
 		}
-		switch r.Status {
-		case dotSent:
+		if r.Status == dotSent {
 			r.Status = dotFailed
 			if res.Status == envelope.StatusAnswered {
 				r.Status = dotAnswered
 			}
-		case dotSending:
-			r.Status = dotFailed
 		}
-		r.Typing, r.Done = false, true
+		r.Typing, r.Intent, r.Done = false, nil, true
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
@@ -553,8 +601,9 @@ func (w *WebAgent) refuseAsk(ask dotAsk, now time.Time) *dotOutRecord {
 // startAsk asks ask's target for the dot and updates rec, which is saved
 // as sending: sent with the request id, or failed when the relay refused
 // it. On any other error rec stays sending, since the relay may have
-// taken the ask. It returns false only when the ask provably was not
-// taken (a 429), so the line may be asked on a later tick.
+// taken the ask; a later tick looks for it there (reconcileAsk). It
+// returns false only when the ask provably was not taken (a 429), so it
+// may be asked on a later tick.
 func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) bool {
 	target := ask.target
 	res, err := w.Relay.Ask(ctx, target, ask.text, "", 0, false)
@@ -564,16 +613,147 @@ func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) 
 		w.logf("outbound: asking %s: %v (trying again later)", target, err)
 		return false
 	case errors.As(err, &ae) && ae.Code >= 400 && ae.Code < 500:
-		rec.Status, rec.Reason = dotFailed, "the relay refused it: "+ae.Message
+		rec.Status, rec.Reason, rec.Ask = dotFailed, "the relay refused it: "+ae.Message, ""
 		w.logf("outbound: %q: %s", ask.line, rec.Reason)
 		return true
 	case err != nil:
-		w.logf("outbound: asking %s: %v (delivery uncertain; not asking again)", target, err)
+		w.logf("outbound: asking %s: %v (delivery unknown; looking for it on the relay next tick)", target, err)
 		return true
 	}
 	w.logf("outbound: asked %s for the dot (request %s, %s)", target, res.Request.ID, res.Status)
-	rec.Status, rec.Request = dotSent, res.Request.ID
+	rec.Status, rec.Request, rec.Ask = dotSent, res.Request.ID, ""
 	return true
+}
+
+// reconcileAsk settles r, an ask left sending by an earlier tick, against
+// the relay: found there (sent by this agent to r.Target with r.Ask as its
+// body, created after r was saved), r becomes sent with that request;
+// provably absent, it is asked now. While the relay cannot be searched r
+// is left sending, until dotOutReconcileFor after r was saved, when the dot
+// is told delivery is uncertain. It reports whether r changed.
+func (w *WebAgent) reconcileAsk(ctx context.Context, th *dotOutThread, r *dotOutRecord, now time.Time) bool {
+	if r.Ask == "" {
+		// Left by an older build, which kept no request text to look for.
+		w.uncertainAsk(r)
+		return true
+	}
+	id, err := w.findAsk(ctx, th, r)
+	switch {
+	case err != nil && now.Sub(r.At) > dotOutReconcileFor:
+		w.logf("outbound: looking for the ask %q on the relay: %v (unconfirmed for %s; telling the dot delivery is uncertain)", r.Line, err, dotOutReconcileFor)
+		w.uncertainAsk(r)
+		return true
+	case err != nil:
+		w.logf("outbound: looking for the ask %q on the relay: %v (trying again later)", r.Line, err)
+		return false
+	case id != "":
+		w.logf("outbound: the ask %q reached %s (request %s)", r.Line, r.Target, id)
+		r.Status, r.Request, r.Ask = dotSent, id, ""
+		return true
+	}
+	w.logf("outbound: the ask %q never reached the relay; asking now", r.Line)
+	w.startAsk(ctx, dotAsk{target: r.Target, text: r.Ask, line: r.Line}, r)
+	return true
+}
+
+// uncertainAsk finishes r as failed with delivery uncertain; the dot is
+// told so when its reply is typed.
+func (w *WebAgent) uncertainAsk(r *dotOutRecord) {
+	r.Status, r.Ask = dotFailed, ""
+	r.Reason = fmt.Sprintf("delivery uncertain (Tincan could not confirm the ask reached %s); ask again if you still need it", r.Target)
+}
+
+// findAsk looks on the relay for the request r asked: one this agent sent
+// to r.Target, created no earlier than r was saved (less webClockSkew),
+// whose body is r.Ask, and not already held by another record. It returns
+// "" when the relay has no such request, and an error when the relay could
+// not be searched or a candidate could not be read.
+func (w *WebAgent) findAsk(ctx context.Context, th *dotOutThread, r *dotOutRecord) (string, error) {
+	query := dotSearchQuery(r.Ask)
+	if query == "" {
+		return "", errors.New("the request has no words to search for")
+	}
+	hits, err := w.Relay.Search(ctx, query, 50)
+	if err != nil {
+		return "", err
+	}
+	held := map[string]bool{}
+	for _, o := range th.Messages {
+		if o.Request != "" {
+			held[o.Request] = true
+		}
+	}
+	since := r.At.Add(-webClockSkew)
+	for _, h := range hits {
+		if h.From != w.Name || h.To != r.Target || h.CreatedAt.Before(since) || held[h.RequestID] {
+			continue
+		}
+		res, err := w.Relay.Get(ctx, h.RequestID, 0)
+		switch {
+		case client.IsStatus(err, http.StatusNotFound):
+			continue
+		case err != nil:
+			return "", err
+		}
+		if res.Request.From == w.Name && res.Request.To == r.Target && strings.TrimSpace(res.Request.Body) == strings.TrimSpace(r.Ask) {
+			return h.RequestID, nil
+		}
+	}
+	return "", nil
+}
+
+// dotSearchQuery is the relay search for an ask's text: its first words,
+// as the relay's search splits them (every word must match).
+func dotSearchQuery(text string) string {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r)
+	})
+	return strings.Join(words[:min(len(words), 12)], " ")
+}
+
+// dotTypedEarlier reports whether a message whose typing an earlier tick
+// started (in) is in the DM, and so must not be typed again. It looks in
+// feed for an owner message not recorded yet, dated no earlier than the
+// typing started (less webClockSkew), whose text holds in's text (ignoring
+// whitespace and markdown); one found is recorded as this agent's own. Not
+// found while the feed reaches back past the typing (the whole DM, or its
+// oldest message is older), it was not typed: false. When the feed does
+// not reach back that far, or in is missing, it cannot be told, and it is
+// counted as typed so it is typed at most once.
+func (w *WebAgent) dotTypedEarlier(th *dotOutThread, feed DotFeed, in *dotIntent, what string) bool {
+	if in == nil || in.At.IsZero() || dotNorm(in.Text) == "" {
+		w.logf("outbound: %s may have been typed (not confirmed); not typing it again", what)
+		return true
+	}
+	since := in.At.Add(-webClockSkew)
+	want := dotNorm(in.Text)
+	for _, m := range feed.Messages {
+		if !m.Owner || th.Messages[m.ID] != nil || (!m.At.IsZero() && m.At.Before(since)) {
+			continue
+		}
+		if strings.Contains(dotNorm(m.Text), want) {
+			th.Messages[m.ID] = &dotOutRecord{Status: dotOwn, At: time.Now().UTC(), Done: true}
+			return true
+		}
+	}
+	msgs := feed.Messages
+	if len(msgs) < dotFeedWindow || (!msgs[0].At.IsZero() && msgs[0].At.Before(since)) {
+		w.logf("outbound: %s was not typed (not in the DM); typing it", what)
+		return false
+	}
+	w.logf("outbound: %s may have been typed (the DM read does not reach back to it); not typing it again", what)
+	return true
+}
+
+// dotNorm is text without whitespace or markdown marks, as sameMessage
+// compares sent messages.
+func dotNorm(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || strings.ContainsRune("#*`>_-", r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // sendRefused checks target against the send allowlist ("" when it may
@@ -620,14 +800,10 @@ func (l sendAllowlist) refused(target string) string {
 
 // dotReplyFor is the message to type for r, and whether r is finished
 // (false: still waiting on the relay). A sent ask is looked up on the
-// relay; one still sending is told its delivery is uncertain.
+// relay.
 func (w *WebAgent) dotReplyFor(ctx context.Context, r *dotOutRecord) (string, bool, client.Result) {
-	switch r.Status {
-	case dotFailed:
+	if r.Status == dotFailed {
 		return dotFailure(r.Target, r.Line, r.Reason), true, client.Result{Status: envelope.StatusFailed}
-	case dotSending:
-		reason := fmt.Sprintf("delivery uncertain (Tincan could not confirm the ask reached %s); ask again if you still need it", r.Target)
-		return dotFailure(r.Target, r.Line, reason), true, client.Result{Status: envelope.StatusFailed}
 	}
 	res, err := w.Relay.Get(ctx, r.Request, 0)
 	var ae *client.APIError

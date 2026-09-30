@@ -616,18 +616,32 @@ func TestDotOutRunsWithTheAgent(t *testing.T) {
 }
 
 // askFault is dot-web's relay transport with one fault on its next ask
-// (POST /v1/send): "lost" delivers the ask and loses the response, "429"
-// refuses it with a rate limit without delivering it, and "delivered"
-// delivers it and then runs after.
+// (POST /v1/send): "lost" delivers the ask and loses the response,
+// "dropped" fails before the ask reaches the relay, "429" refuses it with
+// a rate limit without delivering it, and "delivered" delivers it and then
+// runs after. searchDown fails every search (GET /v1/search) with a 502.
 type askFault struct {
-	mu    sync.Mutex
-	mode  string
-	after func()
-	asks  int
+	mu         sync.Mutex
+	mode       string
+	after      func()
+	asks       int
+	searches   int
+	searchDown bool
 }
 
 func (f *askFault) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Set(client.AgentHeader, "dot-web")
+	if req.Method == http.MethodGet && req.URL.Path == "/v1/search" {
+		f.mu.Lock()
+		f.searches++
+		down := f.searchDown
+		f.mu.Unlock()
+		if down {
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}, Request: req,
+				Body: io.NopCloser(strings.NewReader(`{"error":"bad gateway"}`))}, nil
+		}
+		return http.DefaultTransport.RoundTrip(req)
+	}
 	if req.Method != http.MethodPost || req.URL.Path != "/v1/send" {
 		return http.DefaultTransport.RoundTrip(req)
 	}
@@ -643,6 +657,8 @@ func (f *askFault) RoundTrip(req *http.Request) (*http.Response, error) {
 			_ = resp.Body.Close()
 		}
 		return nil, errors.New("connection reset by peer")
+	case "dropped":
+		return nil, errors.New("connection refused")
 	case "429":
 		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Request: req,
 			Body: io.NopCloser(strings.NewReader(`{"error":"slow down"}`))}, nil
@@ -657,13 +673,57 @@ func (f *askFault) RoundTrip(req *http.Request) (*http.Response, error) {
 // faultyRelay gives the rig's agent a relay client over an askFault.
 func (r *dotOutRig) faultyRelay() *askFault {
 	f := &askFault{}
-	r.agent.Relay = client.NewRelayHTTP(r.mesh.URL("dot-web"), &http.Client{Transport: f})
+	r.useFault(f)
 	return f
 }
 
-// The relay takes the ask but its response is lost: the ask is never sent
-// again, and the dot is told once that delivery is uncertain.
-func TestDotOutAskWithLostResponseIsNotResent(t *testing.T) {
+func (r *dotOutRig) useFault(f *askFault) {
+	r.agent.Relay = client.NewRelayHTTP(r.mesh.URL("dot-web"), &http.Client{Transport: f})
+}
+
+// edit changes the saved outbound state, as a process that died would
+// have left it.
+func (r *dotOutRig) edit(fn func(th *dotOutThread)) {
+	r.t.Helper()
+	st := r.agent.loadOut()
+	fn(st.thread(dotThread))
+	if err := r.agent.saveOut(st); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// record is the thread's one record with status (nil when none).
+func (r *dotOutRig) record(status string) *dotOutRecord {
+	r.t.Helper()
+	var found *dotOutRecord
+	for _, rec := range r.agent.loadOut().thread(dotThread).Messages {
+		if rec.Status == status {
+			if found != nil {
+				r.t.Fatalf("two %s records", status)
+			}
+			found = rec
+		}
+	}
+	return found
+}
+
+// count is how many typed messages are text.
+func (r *dotOutRig) count(text string) int {
+	n := 0
+	for _, m := range r.typed() {
+		if m == text {
+			n++
+		}
+	}
+	return n
+}
+
+const calendarAnswer = "[tincan-reply from muse]\n> @tincan ask muse check the calendar\n\nFriday is free."
+
+// The relay takes the ask but its response is lost: a later tick finds the
+// ask on the relay and waits on it, so it is never sent again and its
+// answer is typed back once.
+func TestDotOutAskWithLostResponseIsAdopted(t *testing.T) {
 	r := newDotOutRig(t)
 	f := r.faultyRelay()
 	r.taught()
@@ -672,23 +732,28 @@ func TestDotOutAskWithLostResponseIsNotResent(t *testing.T) {
 	r.tick()
 	r.tick()
 	r.restart()
-	r.agent.Relay = client.NewRelayHTTP(r.mesh.URL("dot-web"), &http.Client{Transport: f})
+	r.useFault(f)
 	r.tick()
-	r.tick()
-	if reqs := r.museInbox(); len(reqs) != 1 {
+	reqs := r.museInbox()
+	if len(reqs) != 1 {
 		t.Fatalf("muse got %d asks: %+v", len(reqs), reqs)
 	}
+	if rec := r.record(dotSent); rec == nil || rec.Request != reqs[0].ID || rec.Ask != "" {
+		t.Fatalf("record %+v, want sent as %s", rec, reqs[0].ID)
+	}
+	r.museReplies(reqs[0].ID, "Friday is free.", envelope.StatusAnswered)
+	r.tick()
+	r.tick()
 	if f.asks != 1 {
 		t.Fatalf("%d asks sent", f.asks)
 	}
-	want := "[tincan-reply from muse] failed: delivery uncertain (Tincan could not confirm the ask reached muse); ask again if you still need it\n> @tincan ask muse check the calendar"
-	if got := r.typed(); len(got) != 2 || got[1] != want {
-		t.Fatalf("typed %q\nwant %q", got, want)
+	if got := r.typed(); len(got) != 2 || got[1] != calendarAnswer {
+		t.Fatalf("typed %q", got)
 	}
 }
 
-// The ask goes through but its record cannot be saved: the next tick does
-// not ask again.
+// The ask goes through but its record cannot be saved: the next tick finds
+// the ask on the relay and does not ask again.
 func TestDotOutAskIsNotResentWhenItsRecordIsNotSaved(t *testing.T) {
 	r := newDotOutRig(t)
 	state := filepath.Join(r.dir, "state")
@@ -712,18 +777,124 @@ func TestDotOutAskIsNotResentWhenItsRecordIsNotSaved(t *testing.T) {
 	if f.asks != 1 {
 		t.Fatalf("%d asks sent", f.asks)
 	}
-	if reqs := r.museInbox(); len(reqs) != 1 {
+	reqs := r.museInbox()
+	if len(reqs) != 1 {
 		t.Fatalf("muse got %d asks: %+v", len(reqs), reqs)
 	}
-	if got := r.typed(); len(got) != 2 || !strings.Contains(got[1], "failed: delivery uncertain") {
+	if rec := r.record(dotSent); rec == nil || rec.Request != reqs[0].ID {
+		t.Fatalf("record %+v, want sent as %s", rec, reqs[0].ID)
+	}
+	if got := r.typed(); len(got) != 1 {
 		t.Fatalf("typed %q", got)
 	}
 }
 
-// A reply whose typing was started but not confirmed (the process died,
-// or the save after it failed) is not typed again.
-func TestDotOutReplyLeftTypingIsNotRetyped(t *testing.T) {
+// An ask left sending that never reached the relay (the process died
+// before asking, or the request failed before the relay got it) is asked
+// once on a later tick, and the dot is not told delivery is uncertain.
+func TestDotOutAskThatNeverReachedTheRelayIsAskedOnce(t *testing.T) {
+	check := func(t *testing.T, r *dotOutRig, f *askFault, wantAsks int) {
+		t.Helper()
+		reqs := r.museInbox()
+		if len(reqs) != 1 || reqs[0].Body != "check the calendar\nand the weekend" {
+			t.Fatalf("muse got %+v", reqs)
+		}
+		r.tick()
+		r.restart()
+		r.useFault(f)
+		r.tick()
+		if again := r.museInbox(); len(again) != 0 {
+			t.Fatalf("asked again: %+v", again)
+		}
+		if f.asks != wantAsks {
+			t.Fatalf("%d asks sent", f.asks)
+		}
+		if rec := r.record(dotSent); rec == nil || rec.Request != reqs[0].ID || rec.Ask != "" {
+			t.Fatalf("record %+v", rec)
+		}
+		if got := r.typed(); len(got) != 1 {
+			t.Fatalf("typed %q", got)
+		}
+	}
+	t.Run("died before asking", func(t *testing.T) {
+		r := newDotOutRig(t)
+		f := r.faultyRelay()
+		r.taught()
+		id := r.dotSays("@tincan ask muse check the calendar\nand the weekend")
+		r.edit(func(th *dotOutThread) {
+			th.Messages[id] = &dotOutRecord{Status: dotSending, Target: "muse", Line: "@tincan ask muse check the calendar",
+				Ask: "check the calendar\nand the weekend", At: time.Now().UTC()}
+		})
+		r.restart()
+		r.useFault(f)
+		r.tick()
+		check(t, r, f, 1)
+	})
+	t.Run("request failed before the relay", func(t *testing.T) {
+		r := newDotOutRig(t)
+		f := r.faultyRelay()
+		r.taught()
+		f.mode = "dropped"
+		r.dotSays("@tincan ask muse check the calendar\nand the weekend")
+		r.tick()
+		if reqs := r.museInbox(); len(reqs) != 0 {
+			t.Fatalf("muse got %+v", reqs)
+		}
+		if rec := r.record(dotSending); rec == nil {
+			t.Fatalf("no sending record")
+		}
+		r.tick()
+		check(t, r, f, 2)
+	})
+}
+
+// While the relay cannot be searched, an ask left sending is neither asked
+// again nor reported; once it has been unconfirmed for longer than
+// dotOutReconcileFor the dot is told delivery is uncertain, once.
+func TestDotOutAskIsKeptWhileTheRelayCannotBeSearched(t *testing.T) {
 	r := newDotOutRig(t)
+	f := r.faultyRelay()
+	r.taught()
+	f.mode = "dropped"
+	f.searchDown = true
+	r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	r.tick()
+	r.restart()
+	r.useFault(f)
+	r.tick()
+	if f.asks != 1 || f.searches == 0 {
+		t.Fatalf("%d asks, %d searches", f.asks, f.searches)
+	}
+	if reqs := r.museInbox(); len(reqs) != 0 {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	if got := r.typed(); len(got) != 1 {
+		t.Fatalf("typed %q", got)
+	}
+	if rec := r.record(dotSending); rec == nil || rec.Ask != "check the calendar" {
+		t.Fatalf("record %+v", rec)
+	}
+	r.edit(func(th *dotOutThread) {
+		for _, rec := range th.Messages {
+			rec.At = rec.At.Add(-2 * dotOutReconcileFor)
+		}
+	})
+	r.tick()
+	r.tick()
+	want := "[tincan-reply from muse] failed: delivery uncertain (Tincan could not confirm the ask reached muse); ask again if you still need it\n> @tincan ask muse check the calendar"
+	if got := r.typed(); len(got) != 2 || got[1] != want {
+		t.Fatalf("typed %q\nwant %q", got, want)
+	}
+	if f.asks != 1 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+}
+
+// answeredAndLeftTyping asks muse, has it answer, and leaves the reply
+// marked typing at at, as a process that died mid-typing would.
+func answeredAndLeftTyping(t *testing.T, r *dotOutRig, at time.Time) {
+	t.Helper()
 	r.taught()
 	r.dotSays("@tincan ask muse check the calendar")
 	r.tick()
@@ -732,27 +903,128 @@ func TestDotOutReplyLeftTypingIsNotRetyped(t *testing.T) {
 		t.Fatalf("muse got %+v", reqs)
 	}
 	r.museReplies(reqs[0].ID, "Friday is free.", envelope.StatusAnswered)
-	// A process that died mid-typing left the record marked typing.
-	st := r.agent.loadOut()
-	for _, rec := range st.thread(dotThread).Messages {
-		if rec.Status == dotSent {
-			rec.Typing = true
+	r.edit(func(th *dotOutThread) {
+		for _, rec := range th.Messages {
+			if rec.Status == dotSent {
+				rec.Typing, rec.Intent = true, &dotIntent{Text: calendarAnswer, At: at}
+			}
 		}
-	}
-	if err := r.agent.saveOut(st); err != nil {
-		t.Fatal(err)
-	}
+	})
 	r.restart()
-	r.tick()
-	r.tick()
-	if got := r.typed(); len(got) != 1 {
-		t.Fatalf("retyped: %q", got)
-	}
-	for id, rec := range r.agent.loadOut().thread(dotThread).Messages {
-		if rec.Status == dotSent && (!rec.Done || rec.Typing) {
-			t.Fatalf("%s left %+v", id, rec)
+}
+
+// A reply whose typing was started but not confirmed is looked for in the
+// DM: found, it is not typed again; not there while the feed reaches back
+// past the typing, it is typed once; when the feed does not reach back that
+// far it cannot be told, and it is not typed again.
+func TestDotOutReplyLeftTyping(t *testing.T) {
+	done := func(t *testing.T, r *dotOutRig) {
+		t.Helper()
+		for id, rec := range r.agent.loadOut().thread(dotThread).Messages {
+			if rec.Status == dotOwn {
+				continue
+			}
+			if !rec.Done || rec.Typing || rec.Intent != nil {
+				t.Fatalf("%s left %+v", id, rec)
+			}
 		}
 	}
+	t.Run("in the DM", func(t *testing.T) {
+		r := newDotOutRig(t)
+		answeredAndLeftTyping(t, r, time.Now().UTC())
+		id := r.says(dotOwner, calendarAnswer)
+		r.tick()
+		r.tick()
+		if got := r.typed(); len(got) != 1 {
+			t.Fatalf("retyped: %q", got)
+		}
+		done(t, r)
+		if rec := r.agent.loadOut().thread(dotThread).Messages[id]; rec == nil || rec.Status != dotOwn {
+			t.Fatalf("the typed reply is not recorded as own: %+v", rec)
+		}
+	})
+	t.Run("not in the DM", func(t *testing.T) {
+		r := newDotOutRig(t)
+		answeredAndLeftTyping(t, r, time.Now().UTC())
+		r.tick()
+		r.restart()
+		r.tick()
+		if got := r.typed(); len(got) != 2 || !strings.HasSuffix(got[1], calendarAnswer) {
+			t.Fatalf("typed %q", got)
+		}
+		done(t, r)
+	})
+	t.Run("not in a full DM that reaches back", func(t *testing.T) {
+		r := newDotOutRig(t)
+		answeredAndLeftTyping(t, r, time.Now().UTC().Add(10*time.Minute))
+		r.flood(dotFeedWindow)
+		r.tick()
+		r.tick()
+		n := 0
+		for _, m := range r.typed() {
+			if strings.HasSuffix(m, calendarAnswer) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("typed the reply %d times: %q", n, r.typed())
+		}
+		done(t, r)
+	})
+	t.Run("feed does not reach back", func(t *testing.T) {
+		r := newDotOutRig(t)
+		answeredAndLeftTyping(t, r, time.Now().UTC().Add(-10*time.Minute))
+		r.flood(dotFeedWindow)
+		r.tick()
+		r.tick()
+		for _, m := range r.typed() {
+			if strings.HasSuffix(m, calendarAnswer) {
+				t.Fatalf("retyped: %q", r.typed())
+			}
+		}
+		done(t, r)
+	})
+}
+
+// The setup message left teaching is looked for in the DM like a reply:
+// found, the dot counts as taught; not there, it is typed once.
+func TestDotOutSetupLeftTeaching(t *testing.T) {
+	leave := func(t *testing.T, r *dotOutRig) string {
+		t.Helper()
+		text := r.agent.dotSetupMessage(t.Context())
+		r.edit(func(th *dotOutThread) {
+			th.Started = time.Now().UTC()
+			th.Teaching, th.TeachingIntent = true, &dotIntent{Text: text, At: time.Now().UTC()}
+		})
+		r.restart()
+		return text
+	}
+	t.Run("in the DM", func(t *testing.T) {
+		r := newDotOutRig(t)
+		text := leave(t, r)
+		r.says(dotOwner, text)
+		r.tick()
+		r.tick()
+		if got := r.typed(); len(got) != 0 {
+			t.Fatalf("retyped: %q", got)
+		}
+		if th := r.agent.loadOut().thread(dotThread); !th.Taught || th.Teaching || th.TeachingIntent != nil {
+			t.Fatalf("thread %+v", th)
+		}
+	})
+	t.Run("not in the DM", func(t *testing.T) {
+		r := newDotOutRig(t)
+		text := leave(t, r)
+		r.tick()
+		r.restart()
+		r.tick()
+		if got := r.typed(); len(got) != 1 || got[0] != text {
+			t.Fatalf("typed %q", got)
+		}
+		if th := r.agent.loadOut().thread(dotThread); !th.Taught || th.Teaching || th.TeachingIntent != nil {
+			t.Fatalf("thread %+v", th)
+		}
+	})
 }
 
 // Typing that fails before the send is clicked typed nothing: the reply
