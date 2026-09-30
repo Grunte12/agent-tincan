@@ -295,9 +295,10 @@ func dotsRig(t *testing.T) (*webRig, *dotsBrowser) {
 	return rig, b
 }
 
-// A request goes into the dot's thread as it is (a "new chat" first line
-// included), binds to the message id the send returns, waits for the
-// dot's reply to hold still, replies with it and closes the tab.
+// A request goes into the dot's thread (a leading "new chat" line
+// dropped, all else as is), binds to the message id the send returns,
+// waits for the dot's reply to hold still, replies with it and closes the
+// tab.
 func TestDotWebSendsIntoTheThreadAndRepliesWithTheDotsAnswer(t *testing.T) {
 	rig, b := dotsRig(t)
 	b.replies = []dotReply{{text: "Hello from your dot.", at: 1}}
@@ -309,7 +310,7 @@ func TestDotWebSendsIntoTheThreadAndRepliesWithTheDotsAnswer(t *testing.T) {
 	if res.Reply.Body != want {
 		t.Fatalf("reply\n%s\nwant\n%s", res.Reply.Body, want)
 	}
-	if got := b.sent(); len(got) != 1 || got[0] != (OpArgs{Message: "new chat\nhello dot", ConversationID: dotThread}) {
+	if got := b.sent(); len(got) != 1 || got[0] != (OpArgs{Message: "hello dot", ConversationID: dotThread}) {
 		t.Fatalf("sends %+v", got)
 	}
 	if len(b.closes) != 1 || b.closes[0] != dotThread {
@@ -323,6 +324,41 @@ func TestDotWebSendsIntoTheThreadAndRepliesWithTheDotsAnswer(t *testing.T) {
 	}
 	if got := b.sent(); len(got) != 2 || got[1] != (OpArgs{Message: "conversation: abc\nsecond", ConversationID: dotThread}) {
 		t.Fatalf("sends %+v", got)
+	}
+}
+
+// A leading bare "new chat" line (any case, with or without a colon) is
+// dropped before the send; a "conversation:" line and a sentence that
+// only mentions a new chat are sent as is. A body that is only "new chat"
+// is an empty request: nothing is sent.
+func TestDotWebDropsALeadingNewChatLine(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{"new chat\nWhat is X?", "What is X?"},
+		{"New Chat:\n\nhi", "hi"},
+		{"  NEW CHAT  \nhi there", "hi there"},
+		{"conversation: abc\nhi", "conversation: abc\nhi"},
+		{"please start a new chat about X", "please start a new chat about X"},
+		{"new chat about X\nhi", "new chat about X\nhi"},
+	} {
+		rig, b := dotsRig(t)
+		b.replies = []dotReply{{text: "ok", at: 1}}
+		res := rig.ask(t, "codex", tc.body)
+		if res.Status != envelope.StatusAnswered {
+			t.Fatalf("%q: %s %q", tc.body, res.Status, res.Reply.Body)
+		}
+		if got := b.sent(); len(got) != 1 || got[0] != (OpArgs{Message: tc.want, ConversationID: dotThread}) {
+			t.Fatalf("%q: sends %+v, want %q", tc.body, got, tc.want)
+		}
+	}
+	for _, body := range []string{"new chat", "New chat:\n  \n", "   "} {
+		rig, b := dotsRig(t)
+		res := rig.ask(t, "codex", body)
+		if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "there is no message to send") {
+			t.Fatalf("%q: %s %q", body, res.Status, res.Reply.Body)
+		}
+		if len(b.sent()) != 0 {
+			t.Fatalf("%q: sends %+v", body, b.sent())
+		}
 	}
 }
 

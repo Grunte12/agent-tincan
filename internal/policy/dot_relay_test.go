@@ -88,3 +88,43 @@ func TestDotHoldAndApproveThroughRelay(t *testing.T) {
 		t.Fatalf("reply to the dot's own ask: %+v %v", res, err)
 	}
 }
+
+// End to end: the owner approves a convening ask to the council, and the
+// council's member ask to dot-web under it is queued and wakes the dot,
+// with no second approval.
+func TestCouncilAskToDotQueuedThroughRelay(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	w := &wakes{}
+	m.Server.SetEvents(w)
+	admin := m.Client(t, "admin")
+	for name, kind := range map[string]string{"dot-web": onboard.KindDotWeb, "council": onboard.KindCouncil} {
+		if code, err := admin.InviteKind(t.Context(), name, kind); err != nil || code == "" {
+			t.Fatalf("invite --kind %s: %q %v", kind, code, err)
+		}
+	}
+	m.JoinOnMachineOf(t, "instinct", "dot-web")
+	council := m.JoinOnMachineOf(t, "muse", "council")
+	for name, kind := range map[string]string{"dot-web": onboard.KindDotWeb, "council": onboard.KindCouncil} {
+		if err := admin.SetKind(t.Context(), name, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	convening, err := m.Client(t, "grokbot").Send(t.Context(), "council", "which plan is best?", envelope.KindAsk, "", false)
+	if err != nil || convening.Status != envelope.StatusHeld {
+		t.Fatalf("convening ask = %q %v", convening.Status, err)
+	}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+convening.ID+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := council.Claim(t.Context(), convening.ID); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := council.Send(t.Context(), "dot-web", "which plan is best?", envelope.KindAsk, convening.ID, false)
+	if err != nil || answer.Status == envelope.StatusHeld {
+		t.Fatalf("council answer ask to the dot = %q %v", answer.Status, err)
+	}
+	if w.count("dot-web") != 1 || m.Server.QueuedCount("dot-web") != 1 {
+		t.Fatalf("council ask did not queue and wake the dot: wakes %d queued %d", w.count("dot-web"), m.Server.QueuedCount("dot-web"))
+	}
+}
