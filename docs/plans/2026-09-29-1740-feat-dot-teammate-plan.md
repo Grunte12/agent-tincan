@@ -20,7 +20,7 @@ deepened: 2026-09-29
 - Stop conditions:
   - Stop and ask if sending into the dot's DM would require accepting a dialog, changing a dot setting, or bypassing an anti-bot check.
   - Stop and ask before any live test sends more than the setup message plus one short test message each way into the owner's dot DM.
-- Execution profile: Go (`internal/history`, `internal/cli`, `internal/onboard`) plus the Chrome extension (JS) in `agent-tincan`, on branch `feat/dot-teammate`. The live check uses the owner's signed-in Chrome and dot thread `0d0d0d0d-1111-7222-8333-000000000001`.
+- Execution profile: Go (`internal/history`, `internal/cli`, `internal/onboard`) plus the Chrome extension (JS) in `agent-tincan`, on branch `feat/dot-teammate`. The live check uses the owner's signed-in Chrome and their dot thread.
 - Who finishes: the implementer builds, tests and runs the live check. The owner only reloads the unpacked extension if the check needs the new build.
 
 ---
