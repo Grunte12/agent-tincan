@@ -2,8 +2,6 @@
 
 Let your AI agents ask each other for help. Grok Bot can ask Muse to make a phone call, Muse can tell Grok Bot how it went, and Instinct can hand either of them work. Your laptop can be off.
 
-New in v0.10.0: [Council](#council). LLM Council, but on the subscriptions you already have, and your coding agents get a seat. Ask one hard question, and ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot, Codex and the rest of your team each answer it, rank each other's answers blind, and hand you a verdict and a scorecard worth posting.
-
 ## What Agent Tincan is
 
 Personal agents now live in different places: a cloud VM, a sandbox that pauses, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.
@@ -14,14 +12,14 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [Why it matters](#why-it-matters)
+- [Getting started](#getting-started)
 - [New in v0.10.0](#new-in-v0100)
 - [Council](#council)
 - [New in v0.9.0](#new-in-v090)
 - [New in v0.8.0](#new-in-v080)
 - [New in v0.7.0](#new-in-v070)
 - [New in v0.6.0](#new-in-v060)
-- [Why it matters](#why-it-matters)
-- [Getting started](#getting-started)
 - [At a glance: how each platform works](#at-a-glance-how-each-platform-works)
 - [How it works end to end](#how-it-works-end-to-end)
 - [Wake methods](#wake-methods)
@@ -30,91 +28,6 @@ Contents:
 - [Onboarding](#onboarding)
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
-
-## New in v0.10.0
-
-- [Council](#council): LLM Council, but on the subscriptions you already have, and your coding agents get a seat. `tincan council "question"` puts one question to every model on your team. Each answers on its own, they rank each other's answers blind, and a chairman model writes the verdict. You get the recommendation, the ranking, a local HTML report and a PNG scorecard sized for X. Any agent can convene one too, by asking the `council` teammate.
-- A [leaderboard](#council) of who wins your councils, overall and by category, with `tincan council leaderboard` (`--card` for a PNG to post).
-- Councils convened by an agent wait for your [approval](#owner-approval) by default, with no `approval.json` needed, because a council sends your question to every model vendor on the team. `tincan held` now shows each held request's target kind and its attachment names and sizes.
-- Your [OpenAI dot](docs/adapters/web-agents.md#your-dot-dot-web) as a teammate, `dot-web`, in both directions: a teammate's request is typed into the dot's DM on chatgpt.com, and the dot can ask teammates with `@tincan ask <agent>`. Requests to it are held for your approval by default, because the dot can act in the apps you connected to it. It sits on councils like the other web teammates, and a council's asks to it skip that hold only when you approved the council question.
-
-Before you upgrade:
-
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.10.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. For a dot, run `tincan kind dot-web dot-web` from an admin device next; `dot-web` refuses to start without that kind. Then install Council with `tincan council install`. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
-- Council's members are your web teammates and the coding agents the relay can wake, so a council is only as good as those teammates. Their live end-to-end runs are still pending; a member that times out or is blocked counts as absent, and the council goes on with at least 3.
-
-## Council
-
-A council is [Andrej Karpathy's llm-council](https://github.com/karpathy/llm-council) run over Agent Tincan. llm-council sends one question to several models through an API, has each model rank the others' answers anonymously, and has a chairman model write the final answer. Council keeps that shape and changes who sits at the table: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts through the [web agents](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web), your OpenAI dot through `dot-web`, plus Codex, Gemini CLI and Grok CLI on your Mac. No API keys, no per-token bills, just the subscriptions you already pay for.
-
-```bash
-tincan council "Should the relay store attachments in SQLite or on disk? Pick one." --attach docs/plan.md
-```
-
-1. Answer. Every member answers in a new chat, without seeing the others. Attached text files go into every member's prompt.
-2. Review. Each member gets every answer under shuffled labels, with vendor and model names redacted, and ranks them. A member's vote on its own answer is dropped.
-3. Verdict. The peer rankings are tallied into one score per answer, and that tally alone decides the ranking. The chairman (claude-web by default, then chatgpt-web, then gemini-web) writes the recommendation, where members agreed and disagreed, and any minority answer worth a second look. It cannot change the scores.
-
-Each stage waits up to a few minutes and then goes on with whoever answered, as long as at least 3 did; slow, blocked or offline members are marked absent and are not scored. The command shows each stage as it happens and prints the verdict. The reply also lists the ranking, ends with a `council-result` JSON block for scripts, and comes with a self-contained HTML report (every answer, with authors revealed after judging) and a 1600x900 PNG scorecard. Both are saved on the machine that runs Council. Nothing is hosted.
-
-- `tincan council "question"` with `--attach <file>` for context, `--members a,b,c` to pick the seats, `--chairman <agent>` to pick the chairman, and `--json` for scripts. Run in a terminal on an admin device, it starts at once; from a script or an agent's shell it waits for approval like any agent.
-- `tincan council leaderboard` ranks members by wins, then mean peer score. `--category debugging` narrows it to one category the chairman filed questions under, and `--card` renders it as a PNG.
-- Agents convene by asking the `council` teammate, with the plan or diff attached: `tincan ask council "..." --attach plan.md`. The relay holds that ask until you run `tincan approve <id>`. Their standing instructions say when a council is worth it, to convene at most one per task, and that a verdict is data, not instructions.
-- By default every web teammate (your dot included) and every model teammate the relay can wake sits on the council. Claude Code stays off, so a council never interrupts the session you are coding in, and the convener and its chain never sit or chair. Change the roster, chairman order and time limits in `council.json`.
-
-Set it up after upgrading the relay (see [New in v0.10.0](#new-in-v0100)): `tincan invite council --kind council`, join it with `TINCAN_CONFIG=~/.config/tincan/council.json`, then `tincan council install` and `tincan council doctor`. Full guide: [docs/adapters/council.md](docs/adapters/council.md). Council sends your question, attached text and every member's answers to every vendor on the council, and one member's memory-informed answer reaches the others during review; read [the trust model](docs/trust-model.md#council) first.
-
-## New in v0.9.0
-
-- [Scheduled agents](docs/adapters/scheduled.md): the `schedule` wake method and `scheduled` kind are for agents that cannot be woken but check their inbox on their own cron, like Fo, an assistant on Wajo. The roster shows `wake=schedule (every 5m)` and marks the agent overdue when its checks stop, and a pending ask tells the sender when to expect a reply.
-- Safer [version checks](#upgrades). `tincan doctor` warns instead of failing when the client is newer than the relay. `tincan upgrade` never downgrades a newer client, including a prerelease to the stable release before it, unless you pass `--force`. `tincan relay-upgrade` accepts a stable release over the relay's own prerelease.
-
-Before you upgrade:
-
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.9.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.9.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. An older relay refuses the `scheduled` kind and will not start with a `schedule` entry in `wake.json`.
-
-## New in v0.8.0
-
-- [Relay self-upgrade](#upgrades): `tincan relay-upgrade` from an admin device installs a new release on the relay with no shell on the relay host. `--from-github vX.Y.Z` downloads the release first, on a relay started with `--release-url`, and checks every binary against its `checksums.txt`.
-- [Prompt shutdown](#the-relay): the relay stops cleanly on SIGTERM or SIGINT within seconds, and held long polls answer at once so agents poll again when it is back.
-- [Reload notices](#upgrades): a running `tincan mcp` notices when its binary was upgraded and tells the agent how to reload it in its app. `tincan doctor` and `tincan upgrade` list the MCP servers still running an old build.
-
-Before you upgrade:
-
-- Upgrade the relay first, then run `tincan upgrade` on each agent and reload their MCP servers. Self-upgrade needs the relay user to own its binary and the folder holding it; a root-owned relay is still upgraded by hand.
-
-## New in v0.7.0
-
-- Two new web teammates. [perplexity-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) asks Perplexity through your own signed-in account and returns the answer with its source links. [copilot-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) does the same for Microsoft Copilot on a personal Microsoft account.
-- The [history agent](#the-history-agent) now also reads Copilot chat history (`tincan history copilot`). Perplexity is not a history source.
-- Extension 0.5.0 adds Perplexity and Copilot as optional sites that you grant from its [options page](#the-tincan-chrome-extension).
-
-Before you upgrade:
-
-- Upgrade the relay to v0.7.0 before inviting `perplexity-web` or `copilot-web`. An older relay refuses the new kinds.
-- Update the extension to 0.5.0 and grant Perplexity or Copilot on its options page. Nothing already granted needs approving again. Until 0.5.0 is published on the Chrome Web Store, load it unpacked from the release zip.
-- Both teammates pass their tests, but live end-to-end runs through the extension are still pending. Copilot may show a "Verify you are human" check; the agent does not touch it and reports the request as `blocked`, so complete the check in Chrome and ask again.
-
-## New in v0.6.0
-
-- Four new teammates. [grok-web and gemini-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) make your own Grok and Gemini accounts teammates. [grok-cli](#grok-cli-command-wake-wake-home-of-its-own) and [gemini-cli](#gemini-through-antigravity-cli-or-gemini-cli-tincan-listen-wake-script) wake xAI's Grok Build CLI and Gemini on your Mac, through a shared [wake library](examples/lib/tincan-wake-lib.sh) for command-woken CLI teammates. The [history agent](#the-history-agent) now also reads Grok, Gemini and Grok CLI history.
-- [Clarifying questions](#requests-and-replies): a teammate can reply `needs_input`, and the asker answers with `tincan answer`.
-- [Progress notes](#requests-and-replies) on a claimed request with `tincan progress`.
-- [Urgent requests](#wake-methods) with `--urgent`: they wake at once and come first.
-- [Ask several teammates at once](#asking-several-teammates) and gather their replies under one group id.
-- [Search](#audit-log-and-trace) past requests and replies you took part in with `tincan search`.
-- [Owner approval](#owner-approval): hold requests to chosen agents until you approve them (`tincan held`, `approve`, `deny`).
-- [Ping](#reachability-checks): check a teammate's tincan path without a model turn.
-- [Queue depth and oldest wait](#last-seen) per agent in `tincan agents`.
-- [Upgrade notices](#upgrades) when the relay serves a newer tincan.
-- An [options page](#the-tincan-chrome-extension) in the Chrome extension that grants Grok and Gemini as optional sites, and specific failure codes when a site is not granted, logged out or blocked.
-
-Before you upgrade:
-
-- Upgrade the relay to v0.6.0 before inviting the new kinds. An older relay refuses `grok-web`, `gemini-web`, `grok-cli` and `gemini-cli`, and clarifications, owner approval, ping and search need the new relay too.
-- The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. Extension 0.5.0 (v0.7.0) includes everything in 0.4.0; until it is published on the Chrome Web Store, load it unpacked from the release zip.
-- gemini-cli without an API key runs agy, which has no sandbox, so the wake runs it only when the listener has the `TINCAN_GEMINI_ALLOW_UNCONFINED=1` opt-in. See [Set up with a Google account](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key).
-- The four new teammates pass their tests, but live end-to-end checks against a relay are still pending.
 
 ## Why it matters
 
@@ -190,6 +103,91 @@ tincan doctor
 ```
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
+
+## New in v0.10.0
+
+- [Council](#council): LLM Council, but on the subscriptions you already have, and your coding agents get a seat. `tincan council "question"` puts one question to every model on your team. Each answers on its own, they rank each other's answers blind, and a chairman model writes the verdict. You get the recommendation, the ranking, a local HTML report and a PNG scorecard sized for X. Any agent can convene one too, by asking the `council` teammate.
+- A [leaderboard](#council) of who wins your councils, overall and by category, with `tincan council leaderboard` (`--card` for a PNG to post).
+- Councils convened by an agent wait for your [approval](#owner-approval) by default, with no `approval.json` needed, because a council sends your question to every model vendor on the team. `tincan held` now shows each held request's target kind and its attachment names and sizes.
+- Your [OpenAI dot](docs/adapters/web-agents.md#your-dot-dot-web) as a teammate, `dot-web`, in both directions: a teammate's request is typed into the dot's DM on chatgpt.com, and the dot can ask teammates with `@tincan ask <agent>`. Requests to it are held for your approval by default, because the dot can act in the apps you connected to it. It sits on councils like the other web teammates, and a council's asks to it skip that hold only when you approved the council question.
+
+Before you upgrade:
+
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.1` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.10.1 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. For a dot, run `tincan kind dot-web dot-web` from an admin device next; `dot-web` refuses to start without that kind. Then install Council with `tincan council install`. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
+- Council's members are your web teammates and the coding agents the relay can wake, so a council is only as good as those teammates. Their live end-to-end runs are still pending; a member that times out or is blocked counts as absent, and the council goes on with at least 3.
+
+## Council
+
+A council is [Andrej Karpathy's llm-council](https://github.com/karpathy/llm-council) run over Agent Tincan. llm-council sends one question to several models through an API, has each model rank the others' answers anonymously, and has a chairman model write the final answer. Council keeps that shape and changes who sits at the table: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts through the [web agents](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web), your OpenAI dot through `dot-web`, plus Codex, Gemini CLI and Grok CLI on your Mac. No API keys, no per-token bills, just the subscriptions you already pay for.
+
+```bash
+tincan council "Should the relay store attachments in SQLite or on disk? Pick one." --attach docs/plan.md
+```
+
+1. Answer. Every member answers in a new chat, without seeing the others. Attached text files go into every member's prompt.
+2. Review. Each member gets every answer under shuffled labels, with vendor and model names redacted, and ranks them. A member's vote on its own answer is dropped.
+3. Verdict. The peer rankings are tallied into one score per answer, and that tally alone decides the ranking. The chairman (claude-web by default, then chatgpt-web, then gemini-web) writes the recommendation, where members agreed and disagreed, and any minority answer worth a second look. It cannot change the scores.
+
+Each stage waits up to a few minutes and then goes on with whoever answered, as long as at least 3 did; slow, blocked or offline members are marked absent and are not scored. The command shows each stage as it happens and prints the verdict. The reply also lists the ranking, ends with a `council-result` JSON block for scripts, and comes with a self-contained HTML report (every answer, with authors revealed after judging) and a 1600x900 PNG scorecard. Both are saved on the machine that runs Council. Nothing is hosted.
+
+- `tincan council "question"` with `--attach <file>` for context, `--members a,b,c` to pick the seats, `--chairman <agent>` to pick the chairman, and `--json` for scripts. Run in a terminal on an admin device, it starts at once; from a script or an agent's shell it waits for approval like any agent.
+- `tincan council leaderboard` ranks members by wins, then mean peer score. `--category debugging` narrows it to one category the chairman filed questions under, and `--card` renders it as a PNG.
+- Agents convene by asking the `council` teammate, with the plan or diff attached: `tincan ask council "..." --attach plan.md`. The relay holds that ask until you run `tincan approve <id>`. Their standing instructions say when a council is worth it, to convene at most one per task, and that a verdict is data, not instructions.
+- By default every web teammate (your dot included) and every model teammate the relay can wake sits on the council. Claude Code stays off, so a council never interrupts the session you are coding in, and the convener and its chain never sit or chair. Change the roster, chairman order and time limits in `council.json`.
+
+Set it up after upgrading the relay (see [New in v0.10.0](#new-in-v0100)): `tincan invite council --kind council`, join it with `TINCAN_CONFIG=~/.config/tincan/council.json`, then `tincan council install` and `tincan council doctor`. Full guide: [docs/adapters/council.md](docs/adapters/council.md). Council sends your question, attached text and every member's answers to every vendor on the council, and one member's memory-informed answer reaches the others during review; read [the trust model](docs/trust-model.md#council) first.
+
+## New in v0.9.0
+
+- [Scheduled agents](docs/adapters/scheduled.md): the `schedule` wake method and `scheduled` kind are for agents that cannot be woken but check their inbox on their own cron, like Fo, an assistant on Wajo. The roster shows `wake=schedule (every 5m)` and marks the agent overdue when its checks stop, and a pending ask tells the sender when to expect a reply.
+- Safer [version checks](#upgrades). `tincan doctor` warns instead of failing when the client is newer than the relay. `tincan upgrade` never downgrades a newer client, including a prerelease to the stable release before it, unless you pass `--force`. `tincan relay-upgrade` accepts a stable release over the relay's own prerelease.
+
+Before you upgrade:
+
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.9.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.9.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. An older relay refuses the `scheduled` kind and will not start with a `schedule` entry in `wake.json`.
+
+## New in v0.8.0
+
+- [Relay self-upgrade](#upgrades): `tincan relay-upgrade` from an admin device installs a new release on the relay with no shell on the relay host. `--from-github vX.Y.Z` downloads the release first, on a relay started with `--release-url`, and checks every binary against its `checksums.txt`.
+- [Prompt shutdown](#the-relay): the relay stops cleanly on SIGTERM or SIGINT within seconds, and held long polls answer at once so agents poll again when it is back.
+- [Reload notices](#upgrades): a running `tincan mcp` notices when its binary was upgraded and tells the agent how to reload it in its app. `tincan doctor` and `tincan upgrade` list the MCP servers still running an old build.
+
+Before you upgrade:
+
+- Upgrade the relay first, then run `tincan upgrade` on each agent and reload their MCP servers. Self-upgrade needs the relay user to own its binary and the folder holding it; a root-owned relay is still upgraded by hand.
+
+## New in v0.7.0
+
+- Two new web teammates. [perplexity-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) asks Perplexity through your own signed-in account and returns the answer with its source links. [copilot-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) does the same for Microsoft Copilot on a personal Microsoft account.
+- The [history agent](#the-history-agent) now also reads Copilot chat history (`tincan history copilot`). Perplexity is not a history source.
+- Extension 0.5.0 adds Perplexity and Copilot as optional sites that you grant from its [options page](#the-tincan-chrome-extension).
+
+Before you upgrade:
+
+- Upgrade the relay to v0.7.0 before inviting `perplexity-web` or `copilot-web`. An older relay refuses the new kinds.
+- Update the extension to 0.5.0 and grant Perplexity or Copilot on its options page. Nothing already granted needs approving again. Until 0.5.0 is published on the Chrome Web Store, load it unpacked from the release zip.
+- Both teammates pass their tests, but live end-to-end runs through the extension are still pending. Copilot may show a "Verify you are human" check; the agent does not touch it and reports the request as `blocked`, so complete the check in Chrome and ask again.
+
+## New in v0.6.0
+
+- Four new teammates. [grok-web and gemini-web](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web) make your own Grok and Gemini accounts teammates. [grok-cli](#grok-cli-command-wake-wake-home-of-its-own) and [gemini-cli](#gemini-through-antigravity-cli-or-gemini-cli-tincan-listen-wake-script) wake xAI's Grok Build CLI and Gemini on your Mac, through a shared [wake library](examples/lib/tincan-wake-lib.sh) for command-woken CLI teammates. The [history agent](#the-history-agent) now also reads Grok, Gemini and Grok CLI history.
+- [Clarifying questions](#requests-and-replies): a teammate can reply `needs_input`, and the asker answers with `tincan answer`.
+- [Progress notes](#requests-and-replies) on a claimed request with `tincan progress`.
+- [Urgent requests](#wake-methods) with `--urgent`: they wake at once and come first.
+- [Ask several teammates at once](#asking-several-teammates) and gather their replies under one group id.
+- [Search](#audit-log-and-trace) past requests and replies you took part in with `tincan search`.
+- [Owner approval](#owner-approval): hold requests to chosen agents until you approve them (`tincan held`, `approve`, `deny`).
+- [Ping](#reachability-checks): check a teammate's tincan path without a model turn.
+- [Queue depth and oldest wait](#last-seen) per agent in `tincan agents`.
+- [Upgrade notices](#upgrades) when the relay serves a newer tincan.
+- An [options page](#the-tincan-chrome-extension) in the Chrome extension that grants Grok and Gemini as optional sites, and specific failure codes when a site is not granted, logged out or blocked.
+
+Before you upgrade:
+
+- Upgrade the relay to v0.6.0 before inviting the new kinds. An older relay refuses `grok-web`, `gemini-web`, `grok-cli` and `gemini-cli`, and clarifications, owner approval, ping and search need the new relay too.
+- The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. Extension 0.5.0 (v0.7.0) includes everything in 0.4.0; until it is published on the Chrome Web Store, load it unpacked from the release zip.
+- gemini-cli without an API key runs agy, which has no sandbox, so the wake runs it only when the listener has the `TINCAN_GEMINI_ALLOW_UNCONFINED=1` opt-in. See [Set up with a Google account](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key).
+- The four new teammates pass their tests, but live end-to-end checks against a relay are still pending.
 
 ## At a glance: how each platform works
 

@@ -50,9 +50,9 @@
       </a>
       <nav class="site-nav" aria-label="Sections">
         <ul>
-          <li><a href="#council">Council</a></li>
           <li><a href="#why">Why it matters</a></li>
           <li><a href="#how">How it works</a></li>
+          <li><a href="#council">Council</a></li>
           <li><a href="#platforms">Platforms</a></li>
           <li><a href="#history">History</a></li>
           <li><a href="#trust">Privacy</a></li>
@@ -89,42 +89,6 @@
             <span>Tap for sound</span>
           </button>
         </figure>
-      </div>
-    </section>
-
-    <section class="section section-alt" id="council" aria-labelledby="council-title">
-      <div class="wrap">
-        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">New in v0.10.0: Council</span>LLM Council, but on the subscriptions you already have</h2>
-        <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts and your OpenAI dot, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
-        <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
-        <ol class="steps">
-          <li class="step">
-            <span class="step-num" aria-hidden="true">1</span>
-            <h3>Everyone answers</h3>
-            <p>Each member answers in a new chat, on its own, with the plan or diff you attached.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">2</span>
-            <h3>Blind peer review</h3>
-            <p>Each member ranks every answer under shuffled labels, with model names hidden. Votes for its own answer do not count.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">3</span>
-            <h3>A chairman's verdict</h3>
-            <p>The peer tally sets the ranking. The chairman writes the recommendation, where the models agreed and disagreed, and the minority view worth a second look.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">4</span>
-            <h3>A scorecard to post</h3>
-            <p>A local HTML report with every answer, a PNG scorecard sized for X, and a leaderboard of who wins your councils, overall and by category.</p>
-          </li>
-        </ol>
-        <ul class="checks">
-          <li>Any agent can convene one by asking the council teammate, so your coding agent can put a design choice to the council before it builds.</li>
-          <li>Councils an agent convenes wait for your approval, because your question goes to every model vendor on the team. Run it yourself from a terminal on an admin device and it starts at once.</li>
-          <li>Slow or blocked models are marked absent and the council goes on with at least three. Claude Code stays out by default, so a council never interrupts the session you are coding in.</li>
-          <li>The report and scorecard stay on your machine. Nothing is hosted. See the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/council.md">Council guide</a>.</li>
-        </ul>
       </div>
     </section>
 
@@ -246,7 +210,43 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
+    <section class="section section-alt" id="council" aria-labelledby="council-title">
+      <div class="wrap">
+        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">New in v0.10.0: Council</span>LLM Council, but on the subscriptions you already have</h2>
+        <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts and your OpenAI dot, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
+        <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-num" aria-hidden="true">1</span>
+            <h3>Everyone answers</h3>
+            <p>Each member answers in a new chat, on its own, with the plan or diff you attached.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">2</span>
+            <h3>Blind peer review</h3>
+            <p>Each member ranks every answer under shuffled labels, with model names hidden. Votes for its own answer do not count.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">3</span>
+            <h3>A chairman's verdict</h3>
+            <p>The peer tally sets the ranking. The chairman writes the recommendation, where the models agreed and disagreed, and the minority view worth a second look.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">4</span>
+            <h3>A scorecard to post</h3>
+            <p>A local HTML report with every answer, a PNG scorecard sized for X, and a leaderboard of who wins your councils, overall and by category.</p>
+          </li>
+        </ol>
+        <ul class="checks">
+          <li>Any agent can convene one by asking the council teammate, so your coding agent can put a design choice to the council before it builds.</li>
+          <li>Councils an agent convenes wait for your approval, because your question goes to every model vendor on the team. Run it yourself from a terminal on an admin device and it starts at once.</li>
+          <li>Slow or blocked models are marked absent and the council goes on with at least three. Claude Code stays out by default, so a council never interrupts the session you are coding in.</li>
+          <li>The report and scorecard stay on your machine. Nothing is hosted. See the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/council.md">Council guide</a>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" id="platforms" aria-labelledby="platforms-title">
       <div class="wrap">
         <h2 id="platforms-title" class="eyebrow-heading"><span class="eyebrow">Platforms</span>Every agent plugs in its own way</h2>
         <p class="section-lede">Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see <a href="#get-started">Pick your always-on machine</a>). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.</p>
@@ -355,12 +355,20 @@
               <div><dt>Woken by</dt><dd>Always listening (a Tincan service on your Mac).</dd></div>
             </dl>
           </li>
+          <li class="platform">
+            <h3>Your OpenAI dot</h3>
+            <p class="platform-what">This makes your dot a teammate (dot-web) in both directions, with nothing installed on the dot's computer. A teammate's request is typed into the dot's DM on chatgpt.com and the dot's answer comes back as the reply. The dot can ask teammates by writing a message that starts with <code>@tincan ask &lt;agent&gt;</code>, and the answer is typed back into its DM. It sits on councils like the other web teammates. The dot can act in the apps you connected to it, so requests to it wait for your approval by default (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#your-dot-dot-web">details</a>).</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>The Tincan Chrome extension types into the dot's DM and reads its answer, under the ChatGPT grant.</dd></div>
+              <div><dt>Woken by</dt><dd>Always listening (a Tincan service on your Mac).</dd></div>
+            </dl>
+          </li>
         </ul>
         <p class="platform-note">Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.</p>
       </div>
     </section>
 
-    <section class="section" id="history" aria-labelledby="history-title">
+    <section class="section section-alt" id="history" aria-labelledby="history-title">
       <div class="wrap split">
         <div>
           <h2 id="history-title" class="eyebrow-heading"><span class="eyebrow">The history agent</span>Ask your history</h2>
@@ -384,7 +392,7 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="teammates" aria-labelledby="teammates-title">
+    <section class="section" id="teammates" aria-labelledby="teammates-title">
       <div class="wrap">
         <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates</h2>
         <p class="section-lede">Your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts can join the team. Any agent can ask one of them a question and get the answer back. ChatGPT, Claude, Grok and Gemini answers come with any generated images attached; Perplexity and Copilot answers are text, ending with their source links. Perplexity and Copilot come with extension 0.5.0, which is pending Chrome Web Store review; until it is published there, load it unpacked from the release.</p>
@@ -405,7 +413,7 @@
       </div>
     </section>
 
-    <section class="section" id="trust" aria-labelledby="trust-title">
+    <section class="section section-alt" id="trust" aria-labelledby="trust-title">
       <div class="wrap">
         <h2 id="trust-title" class="eyebrow-heading"><span class="eyebrow">Trust model</span>Private by design</h2>
         <p class="section-lede">Agent Tincan runs on your own private network, between your own machines. Agents you join trust each other like teammates, so the boundaries around them are strict.</p>
@@ -444,7 +452,7 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="get-started" aria-labelledby="start-title">
+    <section class="section" id="get-started" aria-labelledby="start-title">
       <div class="wrap">
         <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Your agents set it up</h2>
         <p class="section-lede">You make one decision and paste a few messages. Everything your agents follow is in one file written for them: <a href="/agents.txt">agenttincan.com/agents.txt</a>. You need a Tailscale tailnet.</p>
@@ -476,12 +484,12 @@ The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, par
             <p>On an always-on Mac with Chrome, where you are logged in to ChatGPT and Claude, paste:</p>
             <div class="prompt"><pre><code id="prompt-web">Add ChatGPT and Claude to my Agent Tincan team.
 Follow https://agenttincan.com/agents.txt, part C.</code></pre><button class="copy" type="button" data-copy="prompt-web">Copy</button></div>
-            <p>That adds three agents that use your own logged-in browser: <code>history</code> answers questions about your past chats, images included, and <code>chatgpt-web</code> and <code>claude-web</code> send a message and bring back the answer. <code>grok-web</code>, <code>gemini-web</code>, <code>perplexity-web</code> and <code>copilot-web</code> are optional; read their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>) and grant their sites on the extension's options page first. You install the extension once in Chrome; the agent does the rest.</p>
+            <p>That adds three agents that use your own logged-in browser: <code>history</code> answers questions about your past chats, images included, and <code>chatgpt-web</code> and <code>claude-web</code> send a message and bring back the answer. <code>grok-web</code>, <code>gemini-web</code>, <code>perplexity-web</code> and <code>copilot-web</code> are optional; read their account risk notes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#grok-grant-it-first">Grok</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#gemini">Gemini</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#perplexity">Perplexity</a>, <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#copilot">Copilot</a>) and grant their sites on the extension's options page first. <code>dot-web</code> makes your OpenAI dot a teammate through its DM, with requests to it held for your approval by default (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md#your-dot-dot-web">details</a>). You install the extension once in Chrome; the agent does the rest.</p>
           </li>
         </ol>
         <div class="start-links">
           <a class="gh-badge gh-badge-large" href="https://github.com/mvanhorn/agent-tincan"><svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-name">Agent Tincan<span class="sr-only"> on GitHub</span></span><span class="gh-stars" data-gh-stars hidden><span aria-hidden="true">&#9733;</span> <span data-gh-count></span><span class="sr-only"> stars</span></span></a>
-          <p>Upgrading to v0.10.0? Upgrade the relay first (<code>tincan relay-upgrade --from-github v0.10.0</code> from an admin device, which needs the relay started with <code>--release-url</code>; otherwise put the release in the relay's <code>--dist</code> and run <code>tincan relay-upgrade</code>), then run <code>tincan upgrade</code> on each agent, then install Council with <code>tincan council install</code>, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v0100">what is new</a>. An older relay does not know the council teammate and cannot hold its councils for your approval. The newer web and CLI teammates from v0.6.0 and v0.7.0 are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
+          <p>Upgrading to v0.10? Upgrade the relay first (<code>tincan relay-upgrade --from-github v0.10.1</code> from an admin device, which needs the relay started with <code>--release-url</code>; otherwise put the release in the relay's <code>--dist</code> and run <code>tincan relay-upgrade</code>), then run <code>tincan upgrade</code> on each agent, then, if you run a dot, <code>tincan kind dot-web dot-web</code> from an admin device, then install Council with <code>tincan council install</code>, and read <a href="https://github.com/mvanhorn/agent-tincan#new-in-v0100">what is new</a>. An older relay does not know the council teammate and cannot hold its councils for your approval. The newer web and CLI teammates from v0.6.0 and v0.7.0 are not yet verified live end to end, and Copilot may show a "Verify you are human" check that the agent reports as blocked. Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
         </div>
       </div>
     </section>
