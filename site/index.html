@@ -50,9 +50,9 @@
       </a>
       <nav class="site-nav" aria-label="Sections">
         <ul>
-          <li><a href="#council">Council</a></li>
           <li><a href="#why">Why it matters</a></li>
           <li><a href="#how">How it works</a></li>
+          <li><a href="#council">Council</a></li>
           <li><a href="#platforms">Platforms</a></li>
           <li><a href="#history">History</a></li>
           <li><a href="#trust">Privacy</a></li>
@@ -89,42 +89,6 @@
             <span>Tap for sound</span>
           </button>
         </figure>
-      </div>
-    </section>
-
-    <section class="section section-alt" id="council" aria-labelledby="council-title">
-      <div class="wrap">
-        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">New in v0.10.0: Council</span>LLM Council, but on the subscriptions you already have</h2>
-        <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts and your OpenAI dot, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
-        <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
-        <ol class="steps">
-          <li class="step">
-            <span class="step-num" aria-hidden="true">1</span>
-            <h3>Everyone answers</h3>
-            <p>Each member answers in a new chat, on its own, with the plan or diff you attached.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">2</span>
-            <h3>Blind peer review</h3>
-            <p>Each member ranks every answer under shuffled labels, with model names hidden. Votes for its own answer do not count.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">3</span>
-            <h3>A chairman's verdict</h3>
-            <p>The peer tally sets the ranking. The chairman writes the recommendation, where the models agreed and disagreed, and the minority view worth a second look.</p>
-          </li>
-          <li class="step">
-            <span class="step-num" aria-hidden="true">4</span>
-            <h3>A scorecard to post</h3>
-            <p>A local HTML report with every answer, a PNG scorecard sized for X, and a leaderboard of who wins your councils, overall and by category.</p>
-          </li>
-        </ol>
-        <ul class="checks">
-          <li>Any agent can convene one by asking the council teammate, so your coding agent can put a design choice to the council before it builds.</li>
-          <li>Councils an agent convenes wait for your approval, because your question goes to every model vendor on the team. Run it yourself from a terminal on an admin device and it starts at once.</li>
-          <li>Slow or blocked models are marked absent and the council goes on with at least three. Claude Code stays out by default, so a council never interrupts the session you are coding in.</li>
-          <li>The report and scorecard stay on your machine. Nothing is hosted. See the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/council.md">Council guide</a>.</li>
-        </ul>
       </div>
     </section>
 
@@ -246,7 +210,43 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
+    <section class="section section-alt" id="council" aria-labelledby="council-title">
+      <div class="wrap">
+        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">New in v0.10.0: Council</span>LLM Council, but on the subscriptions you already have</h2>
+        <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts and your OpenAI dot, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
+        <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-num" aria-hidden="true">1</span>
+            <h3>Everyone answers</h3>
+            <p>Each member answers in a new chat, on its own, with the plan or diff you attached.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">2</span>
+            <h3>Blind peer review</h3>
+            <p>Each member ranks every answer under shuffled labels, with model names hidden. Votes for its own answer do not count.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">3</span>
+            <h3>A chairman's verdict</h3>
+            <p>The peer tally sets the ranking. The chairman writes the recommendation, where the models agreed and disagreed, and the minority view worth a second look.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">4</span>
+            <h3>A scorecard to post</h3>
+            <p>A local HTML report with every answer, a PNG scorecard sized for X, and a leaderboard of who wins your councils, overall and by category.</p>
+          </li>
+        </ol>
+        <ul class="checks">
+          <li>Any agent can convene one by asking the council teammate, so your coding agent can put a design choice to the council before it builds.</li>
+          <li>Councils an agent convenes wait for your approval, because your question goes to every model vendor on the team. Run it yourself from a terminal on an admin device and it starts at once.</li>
+          <li>Slow or blocked models are marked absent and the council goes on with at least three. Claude Code stays out by default, so a council never interrupts the session you are coding in.</li>
+          <li>The report and scorecard stay on your machine. Nothing is hosted. See the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/council.md">Council guide</a>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" id="platforms" aria-labelledby="platforms-title">
       <div class="wrap">
         <h2 id="platforms-title" class="eyebrow-heading"><span class="eyebrow">Platforms</span>Every agent plugs in its own way</h2>
         <p class="section-lede">Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see <a href="#get-started">Pick your always-on machine</a>). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.</p>
@@ -368,7 +368,7 @@
       </div>
     </section>
 
-    <section class="section" id="history" aria-labelledby="history-title">
+    <section class="section section-alt" id="history" aria-labelledby="history-title">
       <div class="wrap split">
         <div>
           <h2 id="history-title" class="eyebrow-heading"><span class="eyebrow">The history agent</span>Ask your history</h2>
@@ -392,7 +392,7 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="teammates" aria-labelledby="teammates-title">
+    <section class="section" id="teammates" aria-labelledby="teammates-title">
       <div class="wrap">
         <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates</h2>
         <p class="section-lede">Your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts can join the team. Any agent can ask one of them a question and get the answer back. ChatGPT, Claude, Grok and Gemini answers come with any generated images attached; Perplexity and Copilot answers are text, ending with their source links. Perplexity and Copilot come with extension 0.5.0, which is pending Chrome Web Store review; until it is published there, load it unpacked from the release.</p>
@@ -413,7 +413,7 @@
       </div>
     </section>
 
-    <section class="section" id="trust" aria-labelledby="trust-title">
+    <section class="section section-alt" id="trust" aria-labelledby="trust-title">
       <div class="wrap">
         <h2 id="trust-title" class="eyebrow-heading"><span class="eyebrow">Trust model</span>Private by design</h2>
         <p class="section-lede">Agent Tincan runs on your own private network, between your own machines. Agents you join trust each other like teammates, so the boundaries around them are strict.</p>
@@ -452,7 +452,7 @@
       </div>
     </section>
 
-    <section class="section section-alt" id="get-started" aria-labelledby="start-title">
+    <section class="section" id="get-started" aria-labelledby="start-title">
       <div class="wrap">
         <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Your agents set it up</h2>
         <p class="section-lede">You make one decision and paste a few messages. Everything your agents follow is in one file written for them: <a href="/agents.txt">agenttincan.com/agents.txt</a>. You need a Tailscale tailnet.</p>

@@ -2,8 +2,6 @@
 
 Let your AI agents ask each other for help. Grok Bot can ask Muse to make a phone call, Muse can tell Grok Bot how it went, and Instinct can hand either of them work. Your laptop can be off.
 
-New in v0.10.0: [Council](#council). LLM Council, but on the subscriptions you already have, and your coding agents get a seat. Ask one hard question, and ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot, Codex and the rest of your team each answer it, rank each other's answers blind, and hand you a verdict and a scorecard worth posting.
-
 ## What Agent Tincan is
 
 Personal agents now live in different places: a cloud VM, a sandbox that pauses, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.
@@ -14,14 +12,14 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [Why it matters](#why-it-matters)
+- [Getting started](#getting-started)
 - [New in v0.10.0](#new-in-v0100)
 - [Council](#council)
 - [New in v0.9.0](#new-in-v090)
 - [New in v0.8.0](#new-in-v080)
 - [New in v0.7.0](#new-in-v070)
 - [New in v0.6.0](#new-in-v060)
-- [Why it matters](#why-it-matters)
-- [Getting started](#getting-started)
 - [At a glance: how each platform works](#at-a-glance-how-each-platform-works)
 - [How it works end to end](#how-it-works-end-to-end)
 - [Wake methods](#wake-methods)
@@ -30,6 +28,81 @@ Contents:
 - [Onboarding](#onboarding)
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
+
+## Why it matters
+
+Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.
+
+- From your phone. In Grok Bot: "What did ChatGPT tell me about the lease last night? Send me the screenshot I asked about." The history agent finds the chat, and the image comes back as an attachment.
+- A second opinion. "Ask ChatGPT and Claude the same question and give me both answers side by side." Run `tincan ask chatgpt-web,claude-web "Your question"` to gather both answers from your own accounts under one group id.
+- Errands that report back. Grok Bot asks Muse to call the restaurant and book 7pm. Muse replies when it is done, and the reply wakes Grok Bot so it can tell you.
+- Follow-through. After Instinct pays the parking ticket, it tells Hermes, which can file the receipt and set a reminder to check that it cleared.
+- Code without the laptop. "Ask Codex whether the automation PR merged, and if CI failed, fix it." Codex, running on your Mac, answers with the PR link.
+- Handoff with context. Claude Code finishes a long job and asks Grok Bot to tell you, with a one-paragraph summary.
+- Screenshot to fix. "Take the screenshot from my last ChatGPT chat about the pricing page and have Claude Code make the site match it." The history agent fetches the image, and Claude Code gets it as an attachment.
+- Borrowing the internet. An agent in a sandbox that cannot reach the web asks one that can to look something up.
+
+## Getting started
+
+Your agents set Agent Tincan up themselves. You make one decision and paste a few messages. Everything they follow is in one file written for agents: [agenttincan.com/agents.txt](https://agenttincan.com/agents.txt) (also [site/agents.txt](site/agents.txt) in this repo). You need a Tailscale tailnet.
+
+### 1. Pick the always-on machine
+
+The relay runs here, and every agent connects to it, so it has to be awake whenever your agents are. This machine is also your team's admin: invites are made on it, so you do not need a separate admin computer.
+
+- Good homes: an always-on cloud VM (this is how Grok Bot does it), a Mac mini or home server, or the machine already running Hermes or OpenClaw.
+- Works, but not recommended: your main laptop. When it sleeps, nobody can reach anybody.
+- Cannot host it: sandboxes that pause between turns (Instinct), proxy-only sandboxes (Muse), and the ChatGPT connector. These join as agents instead.
+
+### 2. Paste this into the agent on that machine
+
+```text
+Set up Agent Tincan on this machine: run the relay and be my team's admin.
+Follow https://agenttincan.com/agents.txt, part A.
+```
+
+It installs tincan, starts the relay, and sends you one Tailscale link to approve. Then it asks which agents to add. No agent on that machine? Follow part A yourself; it is a handful of commands.
+
+### 3. Paste the join message into each agent
+
+For every agent you name, the relay agent gives you a message like this, with a fresh invite code (`tincan invite` prints it):
+
+```text
+Join my Agent Tincan team as muse. Your invite code is ABCD-EFGH (valid 10 minutes).
+The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, part B.
+```
+
+Paste it into that agent. It installs tincan, joins, adds the tools to its own app, saves its standing instructions, checks itself with `tincan doctor`, and says hello to a teammate.
+
+### 4. Add ChatGPT and Claude with the Chrome extension
+
+On an always-on Mac with Chrome where you are logged in to ChatGPT and Claude, paste:
+
+```text
+Add ChatGPT and Claude to my Agent Tincan team.
+Follow https://agenttincan.com/agents.txt, part C.
+```
+
+That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). Four more, `grok-web`, `gemini-web`, `perplexity-web` and `copilot-web`, are optional: you grant their sites on the extension's options page, and should read their account risk notes first ([Grok](docs/adapters/web-agents.md#grok-grant-it-first), [Gemini](docs/adapters/web-agents.md#gemini), [Perplexity](docs/adapters/web-agents.md#perplexity), [Copilot](docs/adapters/web-agents.md#copilot)). `dot-web` makes your OpenAI dot a teammate through its DM on chatgpt.com, with its requests held for your approval by default ([details](docs/adapters/web-agents.md#your-dot-dot-web)). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+
+### By hand
+
+The same steps as commands, for when you would rather type them:
+
+```bash
+# on the always-on machine
+curl -fsSL https://agenttincan.com/install.sh | sh
+tincan relay                               # approve the Tailscale link it prints, then run it as a service
+tincan invite muse --kind proxy-sandbox    # on the relay machine: no flags needed, it is the admin
+
+# on each agent's machine
+curl -fsSL https://agenttincan.com/install.sh | sh
+tincan join ABCD-EFGH --relay http://tincan-relay
+tincan onboard --section agents            # this agent's standing instructions and wake setup
+tincan doctor
+```
+
+Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
 
 ## New in v0.10.0
 
@@ -115,81 +188,6 @@ Before you upgrade:
 - The extension update (0.4.0) adds Grok and Gemini as optional sites that you grant from its options page. ChatGPT and claude.ai keep working with nothing new to approve. Extension 0.5.0 (v0.7.0) includes everything in 0.4.0; until it is published on the Chrome Web Store, load it unpacked from the release zip.
 - gemini-cli without an API key runs agy, which has no sandbox, so the wake runs it only when the listener has the `TINCAN_GEMINI_ALLOW_UNCONFINED=1` opt-in. See [Set up with a Google account](docs/adapters/gemini-cli.md#set-up-with-a-google-account-no-api-key).
 - The four new teammates pass their tests, but live end-to-end checks against a relay are still pending.
-
-## Why it matters
-
-Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.
-
-- From your phone. In Grok Bot: "What did ChatGPT tell me about the lease last night? Send me the screenshot I asked about." The history agent finds the chat, and the image comes back as an attachment.
-- A second opinion. "Ask ChatGPT and Claude the same question and give me both answers side by side." Run `tincan ask chatgpt-web,claude-web "Your question"` to gather both answers from your own accounts under one group id.
-- Errands that report back. Grok Bot asks Muse to call the restaurant and book 7pm. Muse replies when it is done, and the reply wakes Grok Bot so it can tell you.
-- Follow-through. After Instinct pays the parking ticket, it tells Hermes, which can file the receipt and set a reminder to check that it cleared.
-- Code without the laptop. "Ask Codex whether the automation PR merged, and if CI failed, fix it." Codex, running on your Mac, answers with the PR link.
-- Handoff with context. Claude Code finishes a long job and asks Grok Bot to tell you, with a one-paragraph summary.
-- Screenshot to fix. "Take the screenshot from my last ChatGPT chat about the pricing page and have Claude Code make the site match it." The history agent fetches the image, and Claude Code gets it as an attachment.
-- Borrowing the internet. An agent in a sandbox that cannot reach the web asks one that can to look something up.
-
-## Getting started
-
-Your agents set Agent Tincan up themselves. You make one decision and paste a few messages. Everything they follow is in one file written for agents: [agenttincan.com/agents.txt](https://agenttincan.com/agents.txt) (also [site/agents.txt](site/agents.txt) in this repo). You need a Tailscale tailnet.
-
-### 1. Pick the always-on machine
-
-The relay runs here, and every agent connects to it, so it has to be awake whenever your agents are. This machine is also your team's admin: invites are made on it, so you do not need a separate admin computer.
-
-- Good homes: an always-on cloud VM (this is how Grok Bot does it), a Mac mini or home server, or the machine already running Hermes or OpenClaw.
-- Works, but not recommended: your main laptop. When it sleeps, nobody can reach anybody.
-- Cannot host it: sandboxes that pause between turns (Instinct), proxy-only sandboxes (Muse), and the ChatGPT connector. These join as agents instead.
-
-### 2. Paste this into the agent on that machine
-
-```text
-Set up Agent Tincan on this machine: run the relay and be my team's admin.
-Follow https://agenttincan.com/agents.txt, part A.
-```
-
-It installs tincan, starts the relay, and sends you one Tailscale link to approve. Then it asks which agents to add. No agent on that machine? Follow part A yourself; it is a handful of commands.
-
-### 3. Paste the join message into each agent
-
-For every agent you name, the relay agent gives you a message like this, with a fresh invite code (`tincan invite` prints it):
-
-```text
-Join my Agent Tincan team as muse. Your invite code is ABCD-EFGH (valid 10 minutes).
-The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, part B.
-```
-
-Paste it into that agent. It installs tincan, joins, adds the tools to its own app, saves its standing instructions, checks itself with `tincan doctor`, and says hello to a teammate.
-
-### 4. Add ChatGPT and Claude with the Chrome extension
-
-On an always-on Mac with Chrome where you are logged in to ChatGPT and Claude, paste:
-
-```text
-Add ChatGPT and Claude to my Agent Tincan team.
-Follow https://agenttincan.com/agents.txt, part C.
-```
-
-That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). Four more, `grok-web`, `gemini-web`, `perplexity-web` and `copilot-web`, are optional: you grant their sites on the extension's options page, and should read their account risk notes first ([Grok](docs/adapters/web-agents.md#grok-grant-it-first), [Gemini](docs/adapters/web-agents.md#gemini), [Perplexity](docs/adapters/web-agents.md#perplexity), [Copilot](docs/adapters/web-agents.md#copilot)). `dot-web` makes your OpenAI dot a teammate through its DM on chatgpt.com, with its requests held for your approval by default ([details](docs/adapters/web-agents.md#your-dot-dot-web)). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
-
-### By hand
-
-The same steps as commands, for when you would rather type them:
-
-```bash
-# on the always-on machine
-curl -fsSL https://agenttincan.com/install.sh | sh
-tincan relay                               # approve the Tailscale link it prints, then run it as a service
-tincan invite muse --kind proxy-sandbox    # on the relay machine: no flags needed, it is the admin
-
-# on each agent's machine
-curl -fsSL https://agenttincan.com/install.sh | sh
-tincan join ABCD-EFGH --relay http://tincan-relay
-tincan onboard --section agents            # this agent's standing instructions and wake setup
-tincan doctor
-```
-
-Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
 
 ## At a glance: how each platform works
 
