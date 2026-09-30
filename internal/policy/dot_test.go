@@ -227,3 +227,14 @@ func TestApprovalGateHoldsCouncilAskToDot(t *testing.T) {
 		t.Fatal("an approval.json gate on the dot from the council did not hold the council's ask")
 	}
 }
+
+// Only the dot's hold is lifted: an approved council asking another
+// council-kind agent is still held for that council's own approval.
+func TestApprovedCouncilAskToAnotherCouncilHeld(t *testing.T) {
+	f := councilFixture(t, nil)
+	f.agent(t, "council2", onboard.KindCouncil)
+	parent := convened(t, f, true)
+	if req := prepare(t, f, "council", "council2", parent, envelope.KindAsk); req.Status != envelope.StatusHeld {
+		t.Fatal("an approved council's ask to another council was not held")
+	}
+}

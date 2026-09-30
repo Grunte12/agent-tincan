@@ -37,6 +37,15 @@ type dotOutRig struct {
 	seq   int
 }
 
+// joinCouncil adds a council-kind agent to the roster.
+func (r *dotOutRig) joinCouncil(name string) {
+	r.t.Helper()
+	r.mesh.JoinOnMachineOf(r.t, "instinct", name)
+	if ok, err := r.mesh.Store.SetAgentKind(r.t.Context(), name, councilKind); err != nil || !ok {
+		r.t.Fatalf("set kind: %v %v", ok, err)
+	}
+}
+
 func newDotOutRig(t *testing.T) *dotOutRig {
 	t.Helper()
 	m := testrelay.New(t, relay.Config{})
@@ -273,6 +282,7 @@ func TestDotOutBaselineIgnoresEarlierLines(t *testing.T) {
 // The setup message goes once per thread; --teach sends it once more.
 func TestDotOutTeachesOnce(t *testing.T) {
 	r := newDotOutRig(t)
+	r.joinCouncil("council")
 	r.tick()
 	got := r.typed()
 	if len(got) != 1 {
@@ -1254,4 +1264,35 @@ func TestDotOutGapNoteOnTiedTimestamp(t *testing.T) {
 	if !th.GapNote {
 		t.Fatal("no gap noted for a full read tied with the last-seen timestamp")
 	}
+}
+
+// The setup message offers the council only when a council agent is on
+// the roster and the send allowlist lets the dot ask it.
+func TestDotOutSetupOffersCouncilOnlyWhenAllowed(t *testing.T) {
+	t.Run("no council on the roster", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.tick()
+		if got := r.typed(); len(got) != 1 || strings.Contains(got[0], "council") || strings.Contains(got[0], "\n\n\n") {
+			t.Fatalf("typed %q", got)
+		}
+	})
+	t.Run("council not in the send allowlist", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.joinCouncil("council")
+		if err := os.WriteFile(r.agent.SendAllowlistPath, []byte("muse\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.tick()
+		if got := r.typed(); len(got) != 1 || strings.Contains(got[0], "council") {
+			t.Fatalf("typed %q", got)
+		}
+	})
+	t.Run("council under another name", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.joinCouncil("board")
+		r.tick()
+		if got := r.typed(); len(got) != 1 || !strings.Contains(got[0], "teammate named board") || !strings.Contains(got[0], "[tincan-reply from board]") {
+			t.Fatalf("typed %q", got)
+		}
+	})
 }

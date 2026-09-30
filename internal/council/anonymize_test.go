@@ -127,3 +127,12 @@ func TestStripWebTailDropsDotAskParagraph(t *testing.T) {
 		t.Fatalf("other: %q", got)
 	}
 }
+
+// A dot answer that quotes a line looking like another site's footer
+// is cut only at the dot's real footer, at the end.
+func TestStripWebTailUsesTheLastFooter(t *testing.T) {
+	body := "Part one.\n\nChatGPT conversation: abc\n\nPart two.\n\n@tincan ask muse\ncheck x\n\nyour dot's DM: 0d0d0d0d-1111-7222-8333-000000000001"
+	if got := stripWebTail(body); got != "Part one.\n\nChatGPT conversation: abc\n\nPart two." {
+		t.Fatalf("got %q", got)
+	}
+}

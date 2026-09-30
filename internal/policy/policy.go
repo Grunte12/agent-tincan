@@ -146,7 +146,11 @@ func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request, parent e
 	}
 	if hasParent && parent.Approved {
 		if kind, err := p.kindOf(ctx, parent.To); err == nil && kind == onboard.KindCouncil {
-			return
+			// Only a dot's hold is lifted: an approved council asking
+			// another council must not start it without its own approval.
+			if target, err := p.kindOf(ctx, req.To); err == nil && target == onboard.KindDotWeb {
+				return
+			}
 		}
 	}
 	if kind, err := p.kindOf(ctx, req.To); err == nil && !holdByDefault[kind] {

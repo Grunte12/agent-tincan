@@ -31,11 +31,12 @@ var (
 // stripWebTail returns a web agent's reply without its tail. A reply
 // without the footer is returned as is.
 func stripWebTail(body string) string {
-	loc := webFooter.FindStringIndex(body)
+	// The real footer is the last one: an answer may quote a line that
+	// looks like either kind earlier on.
+	loc := lastFooter(webFooter, body)
 	dot := false
-	if loc == nil {
-		loc = dmFooter.FindStringIndex(body)
-		dot = loc != nil
+	if dm := lastFooter(dmFooter, body); dm != nil && (loc == nil || dm[0] > loc[0]) {
+		loc, dot = dm, true
 	}
 	if loc == nil {
 		return body
@@ -57,6 +58,21 @@ func stripWebTail(body string) string {
 // dotAskLine is a dot's outbound ask paragraph (see internal/history
 // dots_out.go parseDotAsk).
 var dotAskLine = regexp.MustCompile(`(?i)^[*_\x60\s]*@tincan\s+ask\b`)
+
+// lastFooter is the latest start at which re matches through the end of
+// body (re is anchored at $ and swallows the lines after its start).
+func lastFooter(re *regexp.Regexp, body string) []int {
+	var last []int
+	for from := 0; from < len(body); {
+		loc := re.FindStringIndex(body[from:])
+		if loc == nil {
+			break
+		}
+		last = []int{from + loc[0], len(body)}
+		from += loc[0] + 1
+	}
+	return last
+}
 
 func isWebNote(p string) bool {
 	for _, re := range webNotes {
