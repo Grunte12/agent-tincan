@@ -273,3 +273,124 @@ func TestWebServeWithoutExtensionStartsAndDoesNotLoop(t *testing.T) {
 		t.Fatal("web serve did not stop")
 	}
 }
+
+// The dots site needs its thread: web serve and web install refuse it
+// without a valid --thread, and install keeps the thread in the service;
+// no other site takes --thread.
+func TestWebDotsNeedsThread(t *testing.T) {
+	t.Setenv("TINCAN_RELAY", "")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	cfg := filepath.Join(t.TempDir(), "dot-web.json")
+	for _, args := range [][]string{
+		{"web", "serve", "--site", "dots", "--config", cfg, "--allowlist", allow},
+		{"web", "serve", "--site", "dots", "--thread", "not/a/thread", "--config", cfg, "--allowlist", allow},
+		{"web", "serve", "--site", "chatgpt", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--config", cfg, "--allowlist", allow},
+	} {
+		_, err := run(t, Root(), args...)
+		if err == nil || !strings.Contains(err.Error(), "--thread") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	if _, err := run(t, Root(), "web", "install", "--site", "dots", "--binary", "/opt/tincan/tincan"); err == nil || !strings.Contains(err.Error(), "--thread") {
+		t.Fatalf("install without --thread: %v", err)
+	}
+	if _, err := run(t, Root(), "web", "install", "--site", "grok", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan"); err == nil {
+		t.Fatal("install --site grok --thread accepted")
+	}
+	out, err := run(t, Root(), "web", "install", "--site", "dots", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	def := filepath.Join(home, ".config", "systemd", "user", "tincan-dot-web.service")
+	want := "--thread 0d0d0d0d-1111-7222-8333-000000000001"
+	if runtime.GOOS == "darwin" {
+		def = filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.web.dots.plist")
+		want = "<string>--thread</string>\n    <string>0d0d0d0d-1111-7222-8333-000000000001</string>"
+	}
+	b, err := os.ReadFile(def)
+	if err != nil || !strings.Contains(string(b), want) || !strings.Contains(string(b), "dot-web.json") {
+		t.Fatalf("definition %s (%v):\n%s", def, err, b)
+	}
+}
+
+// --teach is for the dot's web agent only.
+func TestWebTeachIsDotsOnly(t *testing.T) {
+	t.Setenv("TINCAN_RELAY", "")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	cfg := filepath.Join(t.TempDir(), "chatgpt-web.json")
+	_, err := run(t, Root(), "web", "serve", "--site", "chatgpt", "--teach", "--config", cfg, "--allowlist", allow)
+	if err == nil || !strings.Contains(err.Error(), "--teach applies only to --site dots") {
+		t.Fatalf("--teach on chatgpt: %v", err)
+	}
+}
+
+// The relay holds requests to the dot for the owner's approval only when it
+// knows the agent's kind is dot-web; web serve --site dots refuses to start
+// as an agent of any other kind (an invite without --kind leaves it empty),
+// and gets past the check for kind dot-web.
+func TestWebServeDotsNeedsDotWebKind(t *testing.T) {
+	shortNativeDir(t)
+	t.Setenv("HOME", t.TempDir())
+	for _, kind := range []string{"", "codex", "dot-web"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/whoami":
+				_ = json.NewEncoder(w).Encode(map[string]string{"name": "dot-web", "kind": kind})
+			case "/v1/poll":
+				<-r.Context().Done()
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := Root()
+		var out syncBuffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"web", "serve", "--site", "dots", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--config", serveConfig(t, srv.URL, "dot-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+		done := make(chan error, 1)
+		go func() { done <- cmd.ExecuteContext(ctx) }()
+		if kind != "dot-web" {
+			select {
+			case err := <-done:
+				shown := kind
+				if shown == "" {
+					shown = "none"
+				}
+				if err == nil || !strings.Contains(err.Error(), `kind on the relay is "`+shown+`"`) || !strings.Contains(err.Error(), "tincan kind dot-web dot-web") {
+					t.Fatalf("kind %q: %v\n%s", kind, err, out.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("kind %q: web serve started\n%s", kind, out.String())
+			}
+		} else {
+			deadline := time.Now().Add(5 * time.Second)
+			for !strings.Contains(out.String(), "serving dots") && time.Now().Before(deadline) {
+				select {
+				case err := <-done:
+					t.Fatalf("kind dot-web: web serve exited: %v\n%s", err, out.String())
+				default:
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if !strings.Contains(out.String(), "serving dots") {
+				t.Fatalf("kind dot-web: web serve did not start:\n%s", out.String())
+			}
+		}
+		cancel()
+		if kind == "dot-web" {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("web serve did not stop")
+			}
+		}
+		srv.Close()
+	}
+}

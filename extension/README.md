@@ -2,7 +2,7 @@
 
 Manifest V3 extension that lets the `history` agent read ChatGPT, claude.ai,
 Grok, Gemini and Copilot conversations, and the `chatgpt-web`, `claude-web`,
-`grok-web`, `gemini-web`, `perplexity-web` and `copilot-web` agents send to them (and to Perplexity), through the user's own logged-in Chrome. Its service worker runs a fixed set of
+`grok-web`, `gemini-web`, `perplexity-web` and `copilot-web` agents send to them (and to Perplexity), and the `dot-web` agent use the owner's OpenAI dot DM, through the user's own logged-in Chrome. Its service worker runs a fixed set of
 operations (`ops.js`) for the native host `com.agenttincan.history`
 (`tincan history native-host`) and returns JSON, with images as base64 in
 chunks of at most 384 KiB. It accepts nothing else and never runs code from a
@@ -155,6 +155,19 @@ is never touched. Tab reads run one at a time with the site's sends, at most
 75 seconds each and at least 3 seconds apart. `copilotJSON` is the one place
 copilot.com's JSON is fetched, if it ever has to move into an
 extension-opened tab's isolated world.
+
+## OpenAI dots (chatgpt.com/dots)
+
+The `dots.*` operations front the `dot-web` agent. They run under the
+existing ChatGPT grant (`SITE_ALIASES` maps `dots` to `chatgpt`), so there is
+no new site to grant and the hello does not list `dots` separately. Reads use
+the same bearer `chatgptAuth` reads, which never leaves the worker.
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `dots.detail` | `id` (the dot's thread id) | `GET /backend-api/tbo/by-thread/<thread>` for the room and `is_paused`, `GET /backend-api/messaging/rooms/<room>` for its creator (the owner), and `GET .../rooms/<room>/messages?limit=32` for the latest messages (the API refuses more than 32). Returns `{thread, room, owner, paused, items: [{id, at, from, text, attachments}]}`, oldest first. An unexpected shape is `endpoint_changed`. |
+| `dots.send` | `message`, `conversation_id` (the thread id; required, no new chat) | Refuses a paused dot with `paused` before any tab opens. Otherwise opens `https://chatgpt.com/dots/<thread>` in a background tab, types into the ProseMirror composer (`div[role="textbox"][aria-label="Message"]`) and clicks `button[aria-label="Send"]`. A composer that already holds text is left alone (`send_failed`). The address never changes, so the send is confirmed by polling the feed for a new owner message with the same text, and returns its id. |
+| `dots.close` | `conversation_id` | Closes the tab a dots send left open. |
 
 ## Failure codes
 

@@ -188,6 +188,12 @@ const (
 	OpCopilotDetail Op = "copilot.detail"
 	OpCopilotSend   Op = "copilot.send"
 	OpCopilotClose  Op = "copilot.close"
+	// OpenAI dots (a dot's DM on chatgpt.com, under ChatGPT's grant) front
+	// a web agent only: no list or file operation, and a send always
+	// names the dot's thread.
+	OpDotsDetail Op = "dots.detail"
+	OpDotsSend   Op = "dots.send"
+	OpDotsClose  Op = "dots.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -244,6 +250,8 @@ func ValidateOp(op Op, a OpArgs) error {
 			return fmt.Errorf("%s: invalid conversation id", op)
 		case a.ConversationID != "" && a.NewChat:
 			return fmt.Errorf("%s: new chat and a conversation id together", op)
+		case site.oneThread && (a.ConversationID == "" || a.NewChat):
+			return fmt.Errorf("%s: needs the thread as its conversation id", op)
 		}
 		return nil
 	case opClose:
@@ -367,6 +375,8 @@ var (
 	// challenge, a Google /sorry/ page, an anti-bot refusal) instead of
 	// its API.
 	ErrBlocked = errors.New("blocked by an anti-bot check")
+	// ErrPaused: the owner's dot is paused, so nothing was sent to it.
+	ErrPaused = errors.New("paused")
 )
 
 // OptionsPageHint says where the extension's site grants are made.
@@ -424,6 +434,8 @@ func (e *UnavailableError) Error() string {
 		reason = "the Tincan Chrome extension has no access to " + site + "; grant it on the extension's options page (" + OptionsPageHint + ")"
 	case ErrBlocked:
 		reason = site + " showed an anti-bot check; open " + site + " in Chrome, complete the check, then try again"
+	case ErrPaused:
+		reason = siteLabel(e.Source) + " is paused; unpause it in ChatGPT and ask again"
 	case ErrRateLimited:
 		// The detail (a URL path, a cooldown note) adds nothing for the
 		// reader.
@@ -431,7 +443,7 @@ func (e *UnavailableError) Error() string {
 	default:
 		reason = site + " request failed"
 	}
-	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout && e.Kind != ErrPermissionMissing {
+	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout && e.Kind != ErrPermissionMissing && e.Kind != ErrPaused {
 		reason += " (" + e.Detail + ")"
 	}
 	return "source unavailable: " + string(e.Source) + ": " + reason
@@ -446,7 +458,7 @@ func unavailable(s Source, kind error, detail string) error {
 // rateLimitMessage is what a reply says when the site is rate-limiting the
 // owner's account.
 func rateLimitMessage(s Source) string {
-	return siteLabel(s) + " is rate-limiting this account right now; try again later"
+	return siteLimiter(s) + " is rate-limiting this account right now; try again later"
 }
 
 // rateLimited reports whether err is a rate limit, and how long the site
@@ -568,6 +580,8 @@ func nativeErrorKind(s Source, ne *NativeError) error {
 		return unavailable(s, ErrEndpointChanged, detail)
 	case "blocked":
 		return unavailable(s, ErrBlocked, detail)
+	case "paused":
+		return unavailable(s, ErrPaused, detail)
 	case "permission_missing":
 		return unavailable(s, ErrPermissionMissing, detail)
 	case "bad_request":
@@ -660,9 +674,13 @@ type ExtensionStatus struct {
 	Granted []string `json:"granted"`
 }
 
-// granted reports whether src's site is in s.Granted.
+// granted reports whether src's site is in s.Granted: the site whose
+// grant it runs under (grantAs), else its own.
 func (s ExtensionStatus) granted(src Source) bool {
 	site := siteFor(src)
+	if site != nil && site.grantAs != "" {
+		site = siteFor(site.grantAs)
+	}
 	return site != nil && slices.Contains(s.Granted, site.opPrefix)
 }
 
@@ -846,6 +864,10 @@ type SendResult struct {
 	// SubmittedAt is when the extension clicked send, in Unix
 	// milliseconds (zero if the extension did not say).
 	SubmittedAt int64 `json:"submitted_at"`
+	// MessageID is the id of the sent message in the conversation, when
+	// the extension confirmed it there (dots.send does); the reply wait
+	// binds to it.
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // Submitted returns SubmittedAt as a time, zero when unknown.

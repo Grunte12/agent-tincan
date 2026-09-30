@@ -49,6 +49,15 @@ const (
 	DefaultCopilotStableFor   = 20 * time.Second
 )
 
+// DefaultDotStablePolls and DefaultDotStableFor: a dot's DM marks no
+// answer finished, and a dot can answer in several messages a while
+// apart, so its reply counts as finished once the same run of dot
+// messages is read on 3 consecutive polls spanning at least 45 seconds.
+const (
+	DefaultDotStablePolls = 3
+	DefaultDotStableFor   = 45 * time.Second
+)
+
 // A 429 while waiting for a reply waits the site's Retry-After, or backs
 // off from RateLimitBackoffStart, doubling up to RateLimitBackoffMax.
 const (
@@ -234,7 +243,7 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			w.logf("conversation %s: detail: %v (rate limited; next read in %s)", convID, err, after)
 			delay = after
 		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected),
-			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked):
+			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked), errors.Is(err, ErrPaused):
 			return nil, a.bound, err
 		default:
 			failures++

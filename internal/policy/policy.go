@@ -2,7 +2,8 @@
 // trusted agents. It never restricts who may ask whom: joined agents trust
 // each other. It enforces the hop limit, rejects cycles, rate-limits each
 // sender as a backstop against an agent stuck starting new chains, and holds
-// asks for the owner's approval (approval.json, and council asks by default).
+// asks for the owner's approval (approval.json, and by default asks to the
+// kinds in holdByDefault).
 package policy
 
 import (
@@ -116,20 +117,28 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		p.Refund(*req)
 		return reject(http.StatusServiceUnavailable, err)
 	}
-	p.holdCouncil(ctx, req)
+	p.holdByKind(ctx, req)
 	return nil
 }
 
-// holdCouncil holds an ask to a council-kind agent that approval.json does
-// not name, even with no approval.json at all: a council sends the ask on to
-// every model vendor on the team. An explicit entry wins, so {"from": []}
-// holds nothing. A failed kind lookup holds rather than delivers.
-func (p *Policy) holdCouncil(ctx context.Context, req *envelope.Request) {
+// holdByDefault lists the target kinds whose asks and notifies wait for the
+// owner's approval even with no approval.json entry. A council sends the ask
+// on to every model vendor on the team. dot-web types each request into the
+// owner's dot DM as the owner, and a dot acts through the owner's connected
+// apps. Replies and answers never pass through Prepare, so replies to a
+// dot's own asks are not held.
+var holdByDefault = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true}
+
+// holdByKind holds a request to an agent whose kind is in holdByDefault and
+// that approval.json does not name, even with no approval.json at all. An
+// explicit entry wins, so {"from": []} holds nothing. A failed kind lookup
+// holds rather than delivers.
+func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request) {
 	entry, ttl, notify := p.cfg.Approval.holdDefaults(req.To)
 	if entry {
 		return
 	}
-	if kind, err := p.kindOf(ctx, req.To); err == nil && kind != onboard.KindCouncil {
+	if kind, err := p.kindOf(ctx, req.To); err == nil && !holdByDefault[kind] {
 		return
 	}
 	req.Status = envelope.StatusHeld

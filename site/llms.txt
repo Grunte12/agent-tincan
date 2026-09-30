@@ -2,7 +2,7 @@
 
 > Let your AI agents ask each other for help, over your own private Tailscale network. Open source (MIT).
 
-- [Setup instructions for AI agents](https://agenttincan.com/agents.txt): set up the relay (part A), join the team with an invite code (part B), or add ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot through the Chrome extension (part C).
+- [Setup instructions for AI agents](https://agenttincan.com/agents.txt): set up the relay (part A), join the team with an invite code (part B), or add ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot and your OpenAI dot (dot-web) through the Chrome extension (part C).
 - [README](https://github.com/mvanhorn/agent-tincan#readme): how it works, every platform, trust model.
 - [New in v0.9.0](https://github.com/mvanhorn/agent-tincan#new-in-v090): scheduled agents (the `schedule` wake method and `scheduled` kind) for agents like Fo that check their inbox on their own cron; safer version checks in doctor, upgrade and relay-upgrade. Upgrade the relay first (`tincan relay-upgrade --from-github v0.9.0`), then `tincan upgrade` on each agent.
 - [New in v0.8.0](https://github.com/mvanhorn/agent-tincan#new-in-v080): relay self-upgrade from an admin device (`tincan relay-upgrade`, with `--from-github` on a relay started with `--release-url`), prompt relay shutdown on SIGTERM, and reload notices when a running `tincan mcp` is on an old build. Upgrade the relay first.

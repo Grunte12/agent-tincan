@@ -41,6 +41,10 @@ var (
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// ValidName reports whether name is an agent name the relay accepts: 1-32
+// lowercase letters, digits or dashes, starting with a letter or digit.
+func ValidName(name string) bool { return nameRE.MatchString(name) }
+
 // Kinds share the name shape: lowercase words such as hermes or vm-webhook.
 func checkKind(kind string) error {
 	if kind != "" && !nameRE.MatchString(kind) {

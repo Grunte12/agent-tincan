@@ -106,6 +106,10 @@ type ServiceOptions struct {
 	ClaudeDir string
 	// UID fills the printed launchctl command (default: os.Getuid()).
 	UID int
+	// Thread is a web agent's fixed thread (--thread), for a site whose
+	// agent serves one (dots); InstallWebService requires it there and
+	// refuses it elsewhere.
+	Thread string
 }
 
 // ServiceResult says what InstallService wrote and the command that
@@ -337,7 +341,7 @@ const webLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>web</string>
     <string>serve</string>
     <string>--site</string>
-    <string>__SITE__</string>
+    <string>__SITE__</string>__THREADARGS__
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -368,7 +372,7 @@ Description=Agent Tincan web agent (__AGENT__)
 After=network-online.target
 
 [Service]
-ExecStart="__TINCAN_BINARY__" web serve --site __SITE__
+ExecStart="__TINCAN_BINARY__" web serve --site __SITE____THREADARGS__
 Environment=TINCAN_CONFIG=%h/.config/tincan/__AGENT__.json
 Environment="PATH=__PATH__"
 Restart=always
@@ -392,13 +396,32 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
+	// A fixed thread goes into the definition as --thread <id>; the id
+	// is checked to hex and hyphens, and filled (escaped) like any value.
+	launchd, systemd := webLaunchdTemplate, webSystemdTemplate
+	launchdThread, systemdThread := "", ""
+	thread := ""
+	switch {
+	case WebSiteTakesThread(site):
+		id, ok := ParseWebThread(site, o.Thread)
+		if !ok {
+			return ServiceResult{}, fmt.Errorf("--site %s needs --thread <id>, the id in https://chatgpt.com/dots/<id> (got %q)", site, o.Thread)
+		}
+		thread = id
+		launchdThread = "\n    <string>--thread</string>\n    <string>__THREAD__</string>"
+		systemdThread = " --thread __THREAD__"
+	case o.Thread != "":
+		return ServiceResult{}, fmt.Errorf("--thread applies only to --site dots, not %s", site)
+	}
+	launchd = strings.Replace(launchd, "__THREADARGS__", launchdThread, 1)
+	systemd = strings.Replace(systemd, "__THREADARGS__", systemdThread, 1)
 	agent := WebAgentName(site)
 	return InstallServiceDef(o, ServiceDef{
 		Label:       WebServiceLabel(site),
 		Unit:        "tincan-" + agent + ".service",
-		Launchd:     webLaunchdTemplate,
-		Systemd:     webSystemdTemplate,
-		Vars:        []string{"__SITE__", string(site), "__AGENT__", agent},
+		Launchd:     launchd,
+		Systemd:     systemd,
+		Vars:        []string{"__SITE__", string(site), "__AGENT__", agent, "__THREAD__", thread},
 		Unsupported: "no web agent service definition for " + goos + "; run tincan web serve under your own service manager",
 	})
 }

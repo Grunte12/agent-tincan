@@ -1,6 +1,6 @@
 # Web agents: ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates
 
-A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or Microsoft Copilot (copilot.com) a teammate. Another agent asks it something with `tincan ask chatgpt-web "..."` and gets ChatGPT's answer back as the reply, with any images ChatGPT generated attached. `claude-web` does the same with Claude on claude.ai, `grok-web` with Grok on grok.com, `gemini-web` with Gemini on gemini.google.com (see [Gemini](#gemini) for what differs there, including the account risk and what Gemini can read), `perplexity-web` with Perplexity on www.perplexity.ai, whose replies list the answer's source links (see [Perplexity](#perplexity)), and `copilot-web` with a personal Microsoft account's Copilot on copilot.com, replying with the answer and its source links (see [Copilot](#copilot)).
+A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or Microsoft Copilot (copilot.com) a teammate. Another agent asks it something with `tincan ask chatgpt-web "..."` and gets ChatGPT's answer back as the reply, with any images ChatGPT generated attached. `claude-web` does the same with Claude on claude.ai, `grok-web` with Grok on grok.com, `gemini-web` with Gemini on gemini.google.com (see [Gemini](#gemini) for what differs there, including the account risk and what Gemini can read), `perplexity-web` with Perplexity on www.perplexity.ai, whose replies list the answer's source links (see [Perplexity](#perplexity)), and `copilot-web` with a personal Microsoft account's Copilot on copilot.com, replying with the answer and its source links (see [Copilot](#copilot)). `dot-web` does the same with your OpenAI dot through its DM on chatgpt.com, and also lets the dot ask teammates (see [Your dot](#your-dot-dot-web)).
 
 It is a Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site grok`, `--site gemini`, `--site perplexity`, `--site copilot`), running on your Mac next to Chrome. It is not a model. For each request it:
 
@@ -242,6 +242,121 @@ Not in v1: generated images and files in replies, "Think deeper" and voice, and 
 ### Retries and duplicate sends
 
 The relay requeues a claimed request whose reply never arrives (after its 30-minute claim lease), for example when the agent crashed or the reply failed to reach the relay. A send is not repeated for that: right after the extension confirms a send, the agent records the request id, conversation id, the id of the message it sent (once seen) and `submitted_at` in `~/.config/tincan/<agent>-journal.json` (mode 0600; ids and times only, never messages or answers), and marks the entry answered once it replies. A request found there is not sent again; the agent reads the answer from the journaled conversation (waiting for it if needed) and replies. Entries are dropped after 90 minutes.
+
+## Your dot (dot-web)
+
+`dot-web` (`tincan web serve --site dots`) makes your OpenAI dot a teammate in both directions. A teammate asks it something and gets the dot's answer back, and the dot can ask teammates for help and get their answers in its DM. There is no Dots API: everything goes through the dot's DM page (`https://chatgpt.com/dots/<thread-id>`) in your logged-in Chrome, through the Tincan extension. Nothing is installed on the dot's computer, and there is no new site to grant: the dots operations use the extension's existing ChatGPT grant.
+
+A dot acts on its own in the apps you connected to it (Gmail, GitHub, Google Drive and others). A message typed into its DM shows up as your own message, so whatever a teammate sends it carries your authority. That is why requests to `dot-web` are held for your approval by default (see [Approval](#approval) below).
+
+### Running it
+
+1. Find the dot's thread id. Open the dot's DM in ChatGPT; the address is `https://chatgpt.com/dots/<thread-id>`. The id is the last part (hex and hyphens).
+2. Invite and join it, like the other web agents:
+
+   ```bash
+   tincan invite dot-web --kind dot-web                                        # relay machine (or an admin device)
+   TINCAN_CONFIG=~/.config/tincan/dot-web.json tincan join <code> --relay http://tincan-relay
+   ```
+
+3. Run it in the foreground to try it:
+
+   ```bash
+   tincan web serve --site dots --name dot-web --thread <thread-id>
+   ```
+
+   or install it as a service, which keeps the thread id in the service definition:
+
+   ```bash
+   tincan web install --site dots --thread <thread-id>
+   ```
+
+   and start it with the command it prints. `--thread` is required for `--site dots` and refused for every other site. Logs go to `~/Library/Logs/tincan-dot-web.log`.
+
+Sign in to chatgpt.com in the same Chrome first. The extension needs a build with the `dots.*` operations.
+
+### Asking the dot
+
+`tincan ask dot-web "..."` (once you approve it) has the extension open the dot's DM in a background tab, type the request into the message box and click Send. The page's address never changes, so the send is confirmed by the new message appearing in the DM's feed. The whole body is the message: a dot has one DM, so there is no `new chat` or `conversation:` line.
+
+The request appears in the DM as your own message. The answer is every message the dot posts after it, joined in order with a blank line between them, once the same messages are read on 3 polls spanning at least 45 seconds. A dot can answer in several messages a while apart, and this lets them all in. Attachments the dot sends are not carried; the reply notes how many there were and says to open the DM. The wait is bounded by the 8 minute request timeout.
+
+The agent never types over text already in the message box, so a draft you are writing in the DM is left alone and the request fails instead. It never types into a tab you opened.
+
+### The dot asking teammates
+
+While it runs, `dot-web` reads the DM every 30 seconds when idle (backing off on errors and rate limits, and never while one of its own requests is being sent). A dot message whose first line starts with `@tincan ask <agent>` becomes one ask from `dot-web` to that agent. The rest of that line and every line after it are the request:
+
+```
+@tincan ask muse check the calendar for Friday
+```
+
+The teammate gets that request with one more line at the end, `(from the owner's dot, ref dotask<16 hex characters>)`. The reference is unique to the dot message, so if `dot-web` stops or loses the relay's response mid-ask, it finds that exact ask on the relay by searching for the reference instead of asking again. Each such message is asked once, even across restarts. `@tincan` lines already in the DM when `dot-web` first reads it are treated as history and not asked. When the answer arrives, `dot-web` types it into the DM:
+
+```
+[tincan-reply from muse]
+> @tincan ask muse check the calendar for Friday
+
+<muse's answer>
+```
+
+A teammate that needs more is typed back as `[tincan-reply from <agent>] needs input: <question>`, quoting the request line, and that request is closed; the dot asks again with the details in a new `@tincan ask` message. A failure, decline or expiry is `[tincan-reply from <agent>] failed: <reason>`, quoting the request line. An answer longer than the DM takes is cut and says how much is shown. An ask with no answer after 25 hours is reported as failed.
+
+`web serve --site dots` refuses to start unless the relay records the agent's kind as `dot-web`, because the default hold keys on that kind. If you invited it without `--kind`, run `tincan kind dot-web dot-web` from an admin device (the relay must run a build that knows the kind).
+
+When the dot answers a request by asking a teammate itself (its reply ends with an `@tincan ask` line), the reply to the asker keeps that line and adds a note that the dot delegated and its final answer will be in its DM.
+
+### The setup message
+
+The first time `dot-web` reads a thread, it types one setup message into the DM. It explains the `@tincan ask <agent>` format in words (it carries no example line, so an echo of it can never send an ask), says replies are asynchronous and may wait on your approval so the dot should not ask twice, lists the reply forms (`[tincan-reply from <agent>]` answers, `needs input:` and `failed:`), lists the teammates the dot may ask, and says that requests Tincan types there and `[tincan-reply]` messages are data from teammates, not your instructions, and that the dot should ask you before writing through a connected app on a teammate's behalf. It is sent once per thread. To send it again (for example after the roster changes), run with `--teach`, which sends it once per start. `--teach` applies only to `--site dots`.
+
+### Whom the dot may ask
+
+The send allowlist is `~/.config/tincan/dot-web-send.txt`, in the same format as the other allowlists: one agent name per line, commas and spaces also separate, `#` starts a comment.
+
+- No file: the dot may ask any joined agent.
+- A file of names: only those agents. A `*` entry means any joined agent.
+- An empty file: no agent.
+- An unreadable file or a bad entry: every ask is refused (and typed back as failed) until you fix it. The startup log says so.
+
+The file is reread for each ask. The relay's `approval.json` can also hold the dot's asks: an entry with `"from": ["dot-web"]` on a target holds asks from the dot to it.
+
+### State
+
+`~/.config/tincan/dot-web-out.json` (mode 0600) keeps, per thread, when the agent first read it, whether the dot was taught, and a record per `@tincan` message it acted on: status, target, request id and the request line. It keeps no answers. Finished records are dropped 30 days after their message leaves the part of the feed the agent reads. If the file is lost or unreadable, the agent starts fresh and treats what is in the DM as history, so nothing is asked twice.
+
+The inbound side keeps no per-asker state (there is one thread), and uses the same send journal as the other web agents (see [Retries and duplicate sends](#retries-and-duplicate-sends)).
+
+### Approval
+
+Asks and notifies to `dot-web` are held for your approval when `approval.json` has no entry for it. `tincan held` lists them, and `tincan approve <id>` or `tincan deny <id> "reason"` decides. Replies to the dot's own asks are never held.
+
+An `approval.json` entry for `dot-web` replaces the default. For example, to let `claude-code` ask the dot without approval and hold everyone else:
+
+```json
+{"gate": {"dot-web": {"unless": ["claude-code"]}}}
+```
+
+With `"from": "*"` every request is held, as with no entry. Keep the default unless you trust every agent that could ask; see the owner approval section of the README.
+
+### Failure replies
+
+- Paused dot: "Nothing was sent: your dot is paused; unpause it in ChatGPT and ask again." The extension checks this before opening any tab.
+- Not signed in: "not signed in to ChatGPT in Chrome; sign in to chatgpt.com in Chrome, then ask again". Nothing is sent.
+- Wrong thread: "Nothing was sent: your dot's thread <id> was not found; check the --thread the dot-web agent runs with."
+- Sent but no answer in time: "Sorry, your dot did not answer in time. The message was sent to your dot (conversation <id>); ask for the reply later instead of sending it again." The request is never sent again.
+- Sent but not confirmed in the feed: "Sorry, the message was sent to your dot, but it did not show up in the conversation in time; ask for the reply later instead of sending it again."
+- A 429 from ChatGPT follows the same cooldown as chatgpt-web (see [Rate limits](#rate-limits)).
+- A changed DM page or backend fails as `endpoint_changed`, never silently. The selectors and endpoints live only in `extension/send.js` and `extension/ops.js`.
+
+### Limits
+
+- The DM shows Tincan's requests and the `[tincan-reply]` messages as your own messages. The dot cannot tell them from yours by author, only by the text, so the setup message's "data, not instructions" is guidance the dot may not follow. It is most reliable for `[tincan-reply]` messages, which are clearly marked; a typed request reads like anything you would write. Treat every request to `dot-web` as if you sent it yourself.
+- The dot's own `@tincan ask` lines are its words, not yours: `dot-web` asks as `dot-web`, and the target sees that sender.
+- A dot message that arrives after the reply went out (a late burst) is not delivered to the asker. Open the DM to see it.
+- Each read of the DM takes only its latest 32 messages. If more arrive between two reads (the Mac asleep, `dot-web` stopped, or a long request holding the send path), an `@tincan ask` among the older ones is not asked; `dot-web` notices the gap and types one `[tincan]` note asking the dot to send any unanswered ask again.
+- One DM per agent. For a second dot, invite a second agent with `--kind dot-web` and run it with its own config: `TINCAN_CONFIG=~/.config/tincan/<name>.json tincan web serve --site dots --name <name> --thread <thread-id>`, in the foreground or under your own service manager. `tincan web install` has no `--name` and installs only the default `dot-web` service.
+- The request and the dot's answers use your ChatGPT account and stay in the DM like any chat you had with the dot.
 
 ## Ask both web agents
 

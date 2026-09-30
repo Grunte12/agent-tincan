@@ -18,6 +18,12 @@ type webSite struct {
 	source Source
 	// label names the site in replies and logs ("ChatGPT").
 	label string
+	// dm, when set, names the site's one conversation in replies ("your
+	// dot's DM"); otherwise it is "<label> conversation".
+	dm string
+	// limiter, when set, is who rate-limits the account in replies (a
+	// dot's DM is ChatGPT's); otherwise the label.
+	limiter string
 	// host is the site's host, in error text and conversation URLs.
 	host string
 	// agent is the default name of the site's web agent.
@@ -78,6 +84,40 @@ type webSite struct {
 	// sources: the site's answers carry web source links, which the web
 	// agent's reply lists after the answer text (see sourcesFooter).
 	sources bool
+	// grantAs, when set, is the site whose extension grant this one runs
+	// under (dots under chatgpt): the extension's hello does not list it.
+	grantAs Source
+	// oneThread: the site's web agent serves one fixed conversation (a
+	// dot's DM), given with --thread. Every request goes there, the
+	// threading first line is sent as text, and each send names it.
+	oneThread bool
+}
+
+// convName names src's conversation in a reply footer ("ChatGPT
+// conversation", "your dot's DM").
+func convName(src Source) string {
+	if s := siteFor(src); s != nil && s.dm != "" {
+		return s.dm
+	}
+	return siteLabel(src) + " conversation"
+}
+
+// theConv is convName in running text ("the ChatGPT conversation",
+// "your dot's DM").
+func theConv(src Source) string {
+	if s := siteFor(src); s != nil && s.dm != "" {
+		return s.dm
+	}
+	return "the " + convName(src)
+}
+
+// siteLimiter names who rate-limits the account on src ("ChatGPT" for a
+// dot).
+func siteLimiter(src Source) string {
+	if s := siteFor(src); s != nil && s.limiter != "" {
+		return s.limiter
+	}
+	return siteLabel(src)
 }
 
 // canonical returns id in the site's canonical form.
@@ -208,6 +248,28 @@ var webSites = []*webSite{
 		listInTab:       true,
 		notLoggedIn:     copilotNotLoggedIn,
 		sources:         true,
+	},
+	{
+		source:   SourceDots,
+		label:    "your dot",
+		dm:       "your dot's DM",
+		limiter:  "ChatGPT",
+		host:     "chatgpt.com",
+		agent:    "dot-web",
+		opPrefix: "dots",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewDots(c)
+			r.Now = now
+			return r
+		},
+		nodes:       dotsNodes,
+		stable:      &stableRule{polls: DefaultDotStablePolls, span: DefaultDotStableFor},
+		convPath:    dotsConvPath,
+		canonID:     dotsCanonicalID,
+		notLoggedIn: dotsNotLoggedIn,
+		webOnly:     true,
+		grantAs:     SourceChatGPT,
+		oneThread:   true,
 	},
 }
 
