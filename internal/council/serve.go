@@ -535,12 +535,16 @@ func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) 
 	}
 	if err != nil {
 		s.logf("request %s: store: %v", req.ID, err)
+		// A verdict goes out only once its record is saved, so the store never
+		// contradicts an answered request. If only the scores failed, the
+		// convener still gets the verdict and just the leaderboard row is lost.
+		// If storage is down, the council stays unfinished and runs again on
+		// redelivery or at the next start.
+		if perr := s.store.PutCouncil(fctx, rec); perr != nil {
+			s.logf("request %s: store: %v; council left unfinished, it runs again on redelivery or at the next start", req.ID, perr)
+			return
+		}
 		if f.Outcome.State == CouncilCompleted {
-			// The convener gets the verdict rather than waiting out the
-			// claim lease for a rerun; only the leaderboard scores are lost.
-			if perr := s.store.PutCouncil(fctx, rec); perr != nil {
-				s.logf("request %s: store: %v", req.ID, perr)
-			}
 			s.logf("request %s: leaderboard scores for this council were not recorded", req.ID)
 		}
 	}

@@ -249,6 +249,20 @@ func failScoreInserts(t *testing.T, s *Store) func() {
 	}
 }
 
+// failCouncilWrites makes every write of a finished council fail, as if
+// storage were down, while queued and running updates still land.
+func failCouncilWrites(t *testing.T, s *Store) {
+	t.Helper()
+	for _, stmt := range []string{
+		`CREATE TRIGGER fail_final_update BEFORE UPDATE ON councils WHEN NEW.state NOT IN ('queued', 'running') BEGIN SELECT RAISE(ABORT, 'council write failed'); END`,
+		`CREATE TRIGGER fail_final_insert BEFORE INSERT ON councils WHEN NEW.state NOT IN ('queued', 'running') BEGIN SELECT RAISE(ABORT, 'council write failed'); END`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // A completed council's record and its scores land together or not at
 // all, and finishing it again records its scores once.
 func TestStoreFinishCouncilAtomic(t *testing.T) {

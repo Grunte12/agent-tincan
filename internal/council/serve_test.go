@@ -574,3 +574,26 @@ func TestServicePersistentScoreWriteFailureStillReplies(t *testing.T) {
 		t.Fatalf("leaderboard = %+v, %v; want empty", rows, err)
 	}
 }
+
+// When storage is down entirely, not even the council's record can be
+// saved: no verdict goes out, so the local record can never contradict an
+// answered request, and the council stays unfinished for a later rerun.
+func TestServiceStorageDownSendsNoVerdict(t *testing.T) {
+	restore := finishRetryWaits
+	finishRetryWaits = []time.Duration{50 * time.Millisecond}
+	t.Cleanup(func() { finishRetryWaits = restore })
+	r := newServiceRig(t, relay.Config{}, time.Minute)
+	r.ungate()
+	sent := r.send("Which queue should we use?")
+	r.svc.Handle(t.Context(), sent)
+	req, ok := r.svc.next(t.Context())
+	if !ok || req.ID != sent.ID {
+		t.Fatalf("next = %+v %v, want the queued council", req, ok)
+	}
+	failCouncilWrites(t, r.store)
+	r.svc.run(t.Context(), req)
+	r.svc.done(req.ID)
+	if st := r.status(sent.ID).Status; st != envelope.StatusClaimed {
+		t.Fatalf("request status %s, want still claimed (no verdict sent)", st)
+	}
+}
