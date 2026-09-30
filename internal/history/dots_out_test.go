@@ -1168,3 +1168,18 @@ func TestDotOutNoGapNote(t *testing.T) {
 		}
 	})
 }
+
+// A full read whose oldest message shares the last-seen message's
+// timestamp, without that message, still counts as a gap.
+func TestDotOutGapNoteOnTiedTimestamp(t *testing.T) {
+	at := time.Date(2026, 9, 29, 20, 0, 0, 0, time.UTC)
+	th := &dotOutThread{LastSeenID: "seen", LastSeenAt: at}
+	var feed DotFeed
+	for i := range dotFeedWindow {
+		feed.Messages = append(feed.Messages, DotMessage{ID: fmt.Sprintf("m%02d", i), At: at, Text: "hi"})
+	}
+	th.noteGap(feed)
+	if !th.GapNote {
+		t.Fatal("no gap noted for a full read tied with the last-seen timestamp")
+	}
+}

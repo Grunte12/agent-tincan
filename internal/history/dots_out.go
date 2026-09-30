@@ -159,7 +159,7 @@ func (th *dotOutThread) noteGap(feed DotFeed) bool {
 		return false
 	}
 	if th.LastSeenID != "" && !th.LastSeenAt.IsZero() && len(msgs) >= dotFeedWindow &&
-		!msgs[0].At.IsZero() && msgs[0].At.After(th.LastSeenAt) &&
+		!msgs[0].At.IsZero() && !msgs[0].At.Before(th.LastSeenAt) &&
 		!slices.ContainsFunc(msgs, func(m DotMessage) bool { return m.ID == th.LastSeenID }) {
 		th.GapNote = true
 	}

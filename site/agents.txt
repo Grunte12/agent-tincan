@@ -100,7 +100,9 @@ A5. Join this machine's own agent (you), if you are one of the team:
     copilot-web, dot-web, scheduled, generic.
     (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
-    tincan onboard --kind <name>=<kind>.)
+    tincan onboard --kind <name>=<kind>. dot-web is the exception: web serve
+    --site dots refuses to start unless the relay records the dot-web kind,
+    so upgrade the relay first.)
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
     muse, instinct, codex, claude-code, hermes). For each one:
