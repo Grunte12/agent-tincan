@@ -259,3 +259,41 @@ func TestExcludedAgentNeverChairs(t *testing.T) {
 		t.Fatalf("named chairmen %v, want %v", e.Chairmen, want)
 	}
 }
+
+// R1, KTD2: a dot-web agent (default wake) is a web kind, so it sits on a
+// default council and a form may name it chairman; an owner exclusion in
+// council.json removes it from both.
+func TestDotWebSitsAndChairs(t *testing.T) {
+	dot := onboard.Member{Name: "dot-web", Kind: "dot-web"}
+	if p := onboard.ProfileOf(dot); !p.Web {
+		t.Fatalf("ProfileOf(dot-web) = %+v, want Web", p)
+	}
+	roster := append(slices.Clone(team), dot)
+	cfg := DefaultConfig()
+	e := Resolve(roster, owner, cfg, question(t, "Should we shard the store?", cfg))
+	if e.Decline != "" || !slices.Contains(e.Members, "dot-web") {
+		t.Fatalf("default council: decline %q, members %v", e.Decline, e.Members)
+	}
+	if r := reasons(e)["dot-web"]; r != "" {
+		t.Fatalf("dot-web excluded: %s", r)
+	}
+	e = Resolve(roster, owner, cfg, question(t, `council: {"question":"q","chairman":"dot-web"}`, cfg))
+	if e.Decline != "" || len(e.Chairmen) == 0 || e.Chairmen[0] != "dot-web" {
+		t.Fatalf("dot-web chairman: decline %q, chairmen %v", e.Decline, e.Chairmen)
+	}
+	// Named by kind in council.json, it is a chairman candidate too.
+	kind := DefaultConfig()
+	kind.Chairmen = []string{"dot-web"}
+	if e := Resolve(roster, owner, kind, question(t, "q", kind)); !slices.Equal(e.Chairmen, []string{"dot-web"}) {
+		t.Fatalf("chairmen by kind %v, want [dot-web]", e.Chairmen)
+	}
+
+	cfg.Exclude = []string{"dot-web"}
+	e = Resolve(roster, owner, cfg, question(t, `council: {"question":"q","chairman":"dot-web"}`, cfg))
+	if slices.Contains(e.Members, "dot-web") || slices.Contains(e.Chairmen, "dot-web") {
+		t.Fatalf("owner-excluded dot-web seated: members %v chairmen %v", e.Members, e.Chairmen)
+	}
+	if r := reasons(e)["dot-web"]; r != ReasonByOwner {
+		t.Fatalf("dot-web reason %q, want %q", r, ReasonByOwner)
+	}
+}
