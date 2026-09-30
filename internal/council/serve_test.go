@@ -516,3 +516,51 @@ func TestServiceDropsCouncilCancelledWhileQueued(t *testing.T) {
 		}
 	}
 }
+
+// When a completed council's scores cannot be written, the council is not
+// stored as completed without them and no reply goes out: it stays
+// unfinished, and running it again records it and its scores once.
+func TestServiceScoreWriteFailureLeavesCouncilUnfinished(t *testing.T) {
+	r := newServiceRig(t, relay.Config{}, time.Minute)
+	r.ungate()
+	allow := failScoreInserts(t, r.store)
+	sent := r.send("Which queue should we use?")
+	r.svc.Handle(t.Context(), sent)
+	req, ok := r.svc.next(t.Context())
+	if !ok || req.ID != sent.ID {
+		t.Fatalf("next = %+v %v, want the queued council", req, ok)
+	}
+	r.svc.run(t.Context(), req)
+	r.svc.done(req.ID)
+
+	rec, err := r.store.Council(t.Context(), sent.ID)
+	if err != nil || rec.State != CouncilRunning {
+		t.Fatalf("stored council = %+v, %v; want still running", rec, err)
+	}
+	if st := r.status(sent.ID).Status; st != envelope.StatusClaimed {
+		t.Fatalf("request status %s, want still claimed (no reply sent)", st)
+	}
+	if rows, err := r.store.Leaderboard(t.Context(), ""); err != nil || len(rows) != 0 {
+		t.Fatalf("leaderboard = %+v, %v; want empty", rows, err)
+	}
+
+	allow()
+	r.svc.run(t.Context(), req)
+	r.svc.done(req.ID)
+	if res := r.await(sent.ID, 30*time.Second); res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s:\n%s", res.Status, res.Reply.Body)
+	}
+	rec, err = r.store.Council(t.Context(), sent.ID)
+	if err != nil || rec.State != CouncilCompleted {
+		t.Fatalf("stored council = %+v, %v; want completed", rec, err)
+	}
+	rows, err := r.store.Leaderboard(t.Context(), "debugging")
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("leaderboard = %+v, %v", rows, err)
+	}
+	for _, row := range rows {
+		if row.Councils != 1 {
+			t.Errorf("%s counted in %d councils, want 1", row.Member, row.Councils)
+		}
+	}
+}

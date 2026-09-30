@@ -178,7 +178,8 @@ func roundDuration(d time.Duration) string { return d.Round(time.Second).String(
 
 // SaveArtifacts writes f's HTML report and PNG scorecard into dir and
 // returns their paths. dir is created 0700 and the files 0600, since they
-// carry model answers and the convener's question.
+// carry model answers and the convener's question. If the report is saved
+// but the scorecard is not, the report path is still returned with the error.
 func SaveArtifacts(dir string, f Finished) (reportPath, cardPath string, err error) {
 	base := artifactBase(f.At, f.RequestID)
 	var report, card bytes.Buffer
@@ -194,7 +195,7 @@ func SaveArtifacts(dir string, f Finished) (reportPath, cardPath string, err err
 		return "", "", err
 	}
 	if err := writePrivate(cardPath, card.Bytes()); err != nil {
-		return "", "", err
+		return reportPath, "", err
 	}
 	return reportPath, cardPath, nil
 }

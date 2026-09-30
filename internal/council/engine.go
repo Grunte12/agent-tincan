@@ -433,10 +433,12 @@ func (e *Engine) labels(n int) []string {
 }
 
 // stage sends plans as children of parent in batches of maxBatch, each
-// under its own group id, then waits up to limit for the replies. Asks
-// still waiting to be claimed at the limit are cancelled. It returns each
+// under its own group id, then waits for the replies until limit after the
+// first send: time spent sending counts against the limit. Asks still
+// waiting to be claimed at the limit are cancelled. It returns each
 // member's last known result and how context reached each member.
 func (e *Engine) stage(ctx context.Context, parent string, plans []plan, limit time.Duration) (map[string]client.Result, []ContextNote, error) {
+	deadline := e.Now().Add(limit)
 	res := map[string]client.Result{}
 	var notes []ContextNote
 	send := func(outs []client.Outgoing) []error {
@@ -474,7 +476,7 @@ func (e *Engine) stage(ctx context.Context, parent string, plans []plan, limit t
 	if len(retry) > 0 {
 		send(retry)
 	}
-	if err := e.gather(ctx, res, limit); err != nil {
+	if err := e.gather(ctx, res, deadline); err != nil {
 		return nil, nil, err
 	}
 	return res, notes, nil
@@ -485,10 +487,14 @@ func failedSend(to string, err error) client.Result {
 		Reply: &envelope.Reply{From: to, Status: envelope.StatusFailed, Body: err.Error()}}
 }
 
-// gather polls the unfinished asks in res until each is done or limit
-// passes, then cancels the ones not yet claimed.
-func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit time.Duration) error {
-	deadline := e.Now().Add(limit)
+// cancelGrace bounds the cancels an interrupted stage still sends.
+const cancelGrace = 5 * time.Second
+
+// gather polls the unfinished asks in res until each is done or deadline
+// passes, then cancels the ones not yet claimed. When ctx ends first, it
+// still cancels them, on a short context of its own, so a restarted
+// council does not leave them open beside its new asks.
+func (e *Engine) gather(ctx context.Context, res map[string]client.Result, deadline time.Time) error {
 	var mu sync.Mutex
 	// poll waits up to wait on each open ask: member -> request id. It
 	// reports whether every Get came back at once without finishing its
@@ -514,9 +520,15 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 		wg.Wait()
 		return stalled
 	}
+	interrupted := func() error {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelGrace)
+		defer cancel()
+		e.closeOpen(cctx, res, false)
+		return ctx.Err()
+	}
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx.Err() != nil {
+			return interrupted()
 		}
 		open := map[string]string{} // member -> request id
 		for m, r := range res {
@@ -539,7 +551,7 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 			// against the relay.
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return interrupted()
 			case <-e.After(min(left, time.Second)):
 			}
 			continue
@@ -547,10 +559,17 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 		poll(open, 0)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return interrupted()
 		case <-e.After(min(left, pollStep)):
 		}
 	}
+	e.closeOpen(ctx, res, true)
+	return ctx.Err()
+}
+
+// closeOpen cancels the asks in res not yet claimed. With look, it takes a
+// last look at the ones it could not cancel, which may still have a reply.
+func (e *Engine) closeOpen(ctx context.Context, res map[string]client.Result, look bool) {
 	for m, r := range res {
 		if r.Request.ID == "" || r.Done() {
 			continue
@@ -563,11 +582,13 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 		}
 		// Claimed, waiting on input, or it moved on before the cancel: a
 		// last look may still find the reply.
+		if !look {
+			continue
+		}
 		if next, err := e.Relay.Get(ctx, r.Request.ID, 0); err == nil && next.Done() {
 			res[m] = next
 		}
 	}
-	return ctx.Err()
 }
 
 // absence is why a member whose last known result is r gave no answer in

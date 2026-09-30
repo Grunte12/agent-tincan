@@ -127,3 +127,25 @@ func TestSaveArtifactsOwnerOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveArtifactsKeepsReportWhenCardFails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "reports")
+	f := completedCouncil()
+	blocked := filepath.Join(dir, artifactBase(f.At, f.RequestID)+".png")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report, card, err := SaveArtifacts(dir, f)
+	if err == nil {
+		t.Fatal("SaveArtifacts succeeded with a directory at the card path")
+	}
+	if card != "" {
+		t.Errorf("card path = %q, want empty", card)
+	}
+	if report != filepath.Join(dir, artifactBase(f.At, f.RequestID)+".html") {
+		t.Fatalf("report path = %q, want the saved report", report)
+	}
+	if _, err := os.Stat(report); err != nil {
+		t.Errorf("report not on disk: %v", err)
+	}
+}

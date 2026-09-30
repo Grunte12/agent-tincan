@@ -125,8 +125,17 @@ func (s *Store) Close() error { return s.db.Close() }
 // PutCouncil inserts or updates the council for rec.RequestID, keeping its
 // original creation time.
 func (s *Store) PutCouncil(ctx context.Context, rec CouncilRecord) error {
+	return s.putCouncil(ctx, s.db, rec)
+}
+
+// execer is a *sql.DB or a *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (s *Store) putCouncil(ctx context.Context, db execer, rec CouncilRecord) error {
 	now := s.now().UnixMilli()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 INSERT INTO councils (request_id, state, request, category, reply, report_path, card_path, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(request_id) DO UPDATE SET
@@ -135,6 +144,28 @@ ON CONFLICT(request_id) DO UPDATE SET
   updated_at = excluded.updated_at`,
 		rec.RequestID, string(rec.State), rec.Request, rec.Category, rec.Reply, rec.ReportPath, rec.CardPath, now, now)
 	return err
+}
+
+// FinishCouncil stores a council's final record and, when it completed,
+// its peer scores under rec.Category, in one transaction: either both land
+// or neither does, so a council is never completed without its scores. A
+// failed or declined council records no scores. Scores are recorded once
+// per request id, so finishing a council again never double-counts.
+func (s *Store) FinishCouncil(ctx context.Context, rec CouncilRecord, scores []Standing) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.putCouncil(ctx, tx, rec); err != nil {
+		return err
+	}
+	if rec.State == CouncilCompleted {
+		if err := s.insertScores(ctx, tx, rec.RequestID, rec.Category, scores); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 const councilColumns = `request_id, state, request, category, reply, report_path, card_path, created_at, updated_at`
@@ -202,6 +233,15 @@ func (s *Store) RecordScores(ctx context.Context, requestID, category string, sc
 	if CouncilState(state) != CouncilCompleted {
 		return ErrCouncilNotCompleted
 	}
+	if err := s.insertScores(ctx, tx, requestID, category, scores); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertScores inserts a council's scores in tx unless it already has
+// some.
+func (s *Store) insertScores(ctx context.Context, tx *sql.Tx, requestID, category string, scores []Standing) error {
 	var scored bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scores WHERE request_id = ?)`, requestID).Scan(&scored); err != nil {
 		return err
@@ -216,7 +256,7 @@ func (s *Store) RecordScores(ctx context.Context, requestID, category string, sc
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Leaderboard ranks members by wins, then mean peer score. An empty category

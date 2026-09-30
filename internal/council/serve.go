@@ -498,8 +498,10 @@ func (s *Service) run(ctx context.Context, req envelope.Request) {
 }
 
 // finish saves the report and scorecard, stores the council's final state
-// and reply, records a completed council's scores, and replies with the
-// report and scorecard attached.
+// and reply together with a completed council's scores, and replies with
+// the report and scorecard attached. A completed council that cannot be
+// stored gets no reply and stays unfinished, so it is never answered with
+// its scores lost.
 func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 	defer cancel()
@@ -515,13 +517,15 @@ func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) 
 	if f.Outcome.State == CouncilCompleted {
 		rec.Category = f.category()
 	}
-	if err := s.store.PutCouncil(fctx, rec); err != nil {
-		s.logf("request %s: store: %v", req.ID, err)
-	}
-	if f.Outcome.State == CouncilCompleted {
-		if err := s.store.RecordScores(fctx, req.ID, rec.Category, f.Outcome.Standings); err != nil {
-			s.logf("request %s: recording scores: %v", req.ID, err)
+	if err := s.store.FinishCouncil(fctx, rec, f.Outcome.Standings); err != nil {
+		if f.Outcome.State == CouncilCompleted {
+			// Replying now would answer the request while its scores are
+			// lost for good. Left unfinished, the council runs again on
+			// redelivery or at the next start and is recorded then.
+			s.logf("request %s: store: %v; council left unfinished, it runs again on redelivery or at the next start", req.ID, err)
+			return
 		}
+		s.logf("request %s: store: %v", req.ID, err)
 	}
 	s.logf("request %s from %s: council %s (%s)", req.ID, req.From, f.Outcome.State, f.statusLine())
 	s.sendFinal(fctx, req, body, status, f.ReportPath, f.CardPath)

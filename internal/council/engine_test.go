@@ -597,7 +597,7 @@ func TestGatherPacesPollsThatReturnAtOnce(t *testing.T) {
 				"alpha": {Request: envelope.Request{ID: "r1"}, Status: rl.status},
 				"bravo": {Request: envelope.Request{ID: "r2"}, Status: rl.status},
 			}
-			if err := e.gather(ctx, res, 10*time.Second); err != nil {
+			if err := e.gather(ctx, res, now.Add(10*time.Second)); err != nil {
 				t.Fatalf("gather: %v (after %d gets)", err, rl.gets)
 			}
 			// About one round per second of stage time plus the sub-second
@@ -606,5 +606,127 @@ func TestGatherPacesPollsThatReturnAtOnce(t *testing.T) {
 				t.Errorf("gets = %d over a 10s stage, want it paced", rl.gets)
 			}
 		})
+	}
+}
+
+// clockRelay runs on a fake clock: sending costs sendCost, and every Get
+// comes back at once with the ask held, so only the stage's pacing moves
+// the clock. It records when each
+// ask was cancelled and whether the cancel's context was still live.
+type clockRelay struct {
+	Relay
+	sendCost time.Duration
+	// stopAfter, when set, cancels stop once that many Gets have run.
+	stopAfter int
+	stop      context.CancelFunc
+	mu        sync.Mutex
+	now       time.Time
+	next      int
+	gets      int
+	cancelled map[string]time.Time
+	deadCtx   int
+}
+
+func (c *clockRelay) clock() (func() time.Time, func(time.Duration) <-chan time.Time) {
+	now := func() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+	after := func(d time.Duration) <-chan time.Time {
+		c.mu.Lock()
+		c.now = c.now.Add(d)
+		ch := make(chan time.Time, 1)
+		ch <- c.now
+		c.mu.Unlock()
+		return ch
+	}
+	return now, after
+}
+
+func (c *clockRelay) SendEach(_ context.Context, outs []client.Outgoing, _ envelope.Kind, _ string) (client.GroupResult, []error, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(c.sendCost)
+	var g client.GroupResult
+	for _, o := range outs {
+		c.next++
+		g.Results = append(g.Results, client.GroupEntry{Result: client.Result{Request: envelope.Request{ID: fmt.Sprintf("r%d", c.next), To: o.To}, Status: envelope.StatusQueued}})
+	}
+	return g, make([]error, len(outs)), nil
+}
+
+func (c *clockRelay) Get(_ context.Context, id string, _ time.Duration) (client.Result, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gets++
+	if c.stop != nil && c.gets >= c.stopAfter {
+		c.stop()
+	}
+	return client.Result{Request: envelope.Request{ID: id}, Status: envelope.StatusHeld}, nil
+}
+
+func (c *clockRelay) Cancel(ctx context.Context, id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ctx.Err() != nil {
+		c.deadCtx++
+		return ctx.Err()
+	}
+	if c.cancelled == nil {
+		c.cancelled = map[string]time.Time{}
+	}
+	c.cancelled[id] = c.now
+	return nil
+}
+
+// The stage limit counts from dispatch: when sending is slow, the stage
+// still closes at the limit measured from its start, not from the last
+// send.
+func TestStageLimitCountsSendingTime(t *testing.T) {
+	start := time.Unix(1000, 0)
+	rl := &clockRelay{sendCost: 6 * time.Second, now: start}
+	now, after := rl.clock()
+	e := &Engine{Relay: rl, Now: now, After: after}
+	var plans []plan
+	for i := range 10 { // two batches: twelve seconds of sending
+		n := fmt.Sprintf("m%d", i)
+		plans = append(plans, plan{member: n, out: client.Outgoing{To: n}})
+	}
+	if _, _, err := e.stage(t.Context(), "parent", plans, 20*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(rl.cancelled) != 10 {
+		t.Fatalf("cancelled %d asks, want 10", len(rl.cancelled))
+	}
+	for id, at := range rl.cancelled {
+		if got := at.Sub(start); got != 20*time.Second {
+			t.Errorf("%s cancelled %v after dispatch, want at the 20s limit", id, got)
+		}
+	}
+}
+
+// A stage interrupted mid-wait still cancels its unclaimed asks, on a
+// context that outlives the interruption, so a restart does not leave
+// them open beside the new ones.
+func TestGatherCancelsOpenAsksWhenInterrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	rl := &clockRelay{now: time.Unix(1000, 0), stopAfter: 2, stop: cancel}
+	now, after := rl.clock()
+	e := &Engine{Relay: rl, Now: now, After: after}
+	res := map[string]client.Result{
+		"alpha": {Request: envelope.Request{ID: "r1"}, Status: envelope.StatusQueued},
+		"bravo": {Request: envelope.Request{ID: "r2"}, Status: envelope.StatusDelivered},
+		"done":  {Request: envelope.Request{ID: "r3"}, Status: envelope.StatusAnswered, Reply: &envelope.Reply{Status: envelope.StatusAnswered}},
+	}
+	err := e.gather(ctx, res, now().Add(time.Minute))
+	if err != context.Canceled {
+		t.Fatalf("gather = %v, want context.Canceled", err)
+	}
+	if _, ok := rl.cancelled["r1"]; !ok || rl.deadCtx != 0 {
+		t.Errorf("cancelled %v with %d on a dead context, want r1 and r2 cancelled", rl.cancelled, rl.deadCtx)
+	}
+	if _, ok := rl.cancelled["r2"]; !ok {
+		t.Errorf("r2 not cancelled: %v", rl.cancelled)
+	}
+	if _, ok := rl.cancelled["r3"]; ok {
+		t.Error("a finished ask was cancelled")
 	}
 }

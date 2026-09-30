@@ -234,3 +234,81 @@ func TestStoreLeaderboard(t *testing.T) {
 		{"grok-web", 1, 0.1, 0},
 	})
 }
+
+// failScoreInserts makes every score insert fail until the returned func
+// is called, as a full disk or a broken database would.
+func failScoreInserts(t *testing.T, s *Store) func() {
+	t.Helper()
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_scores BEFORE INSERT ON scores BEGIN SELECT RAISE(ABORT, 'score write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if _, err := s.db.Exec(`DROP TRIGGER fail_scores`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A completed council's record and its scores land together or not at
+// all, and finishing it again records its scores once.
+func TestStoreFinishCouncilAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, filepath.Join(t.TempDir(), "council.db"))
+	putCouncil(t, s, CouncilRecord{RequestID: "r1", State: CouncilRunning, Request: "req"})
+	scores := []Standing{
+		{Member: "claude-web", Score: 0.9, Placement: 1, Ballots: 4},
+		{Member: "gemini-web", Score: 0.4, Placement: 2, Ballots: 4},
+	}
+	done := CouncilRecord{RequestID: "r1", State: CouncilCompleted, Request: "req", Category: "writing", Reply: "the reply"}
+
+	allow := failScoreInserts(t, s)
+	if err := s.FinishCouncil(ctx, done, scores); err == nil {
+		t.Fatal("FinishCouncil succeeded with score inserts failing")
+	}
+	rec, err := s.Council(ctx, "r1")
+	if err != nil || rec.State != CouncilRunning || rec.Reply != "" {
+		t.Fatalf("council after failed finish = %+v, %v; want still running", rec, err)
+	}
+	if board, err := s.Leaderboard(ctx, ""); err != nil || len(board) != 0 {
+		t.Fatalf("leaderboard after failed finish = %+v, %v; want empty", board, err)
+	}
+
+	allow()
+	for i := range 2 {
+		if err := s.FinishCouncil(ctx, done, scores); err != nil {
+			t.Fatalf("finish %d: %v", i, err)
+		}
+	}
+	rec, err = s.Council(ctx, "r1")
+	if err != nil || rec.State != CouncilCompleted || rec.Reply != "the reply" || rec.Category != "writing" {
+		t.Fatalf("council = %+v, %v", rec, err)
+	}
+	board, err := s.Leaderboard(ctx, "writing")
+	if err != nil || len(board) != 2 {
+		t.Fatalf("leaderboard = %+v, %v", board, err)
+	}
+	for _, row := range board {
+		if row.Councils != 1 {
+			t.Errorf("%s councils = %d, want 1", row.Member, row.Councils)
+		}
+	}
+}
+
+// A council that finishes failed or declined records no scores.
+func TestStoreFinishCouncilNotCompletedRecordsNoScores(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, filepath.Join(t.TempDir(), "council.db"))
+	for i, state := range []CouncilState{CouncilFailed, CouncilDeclined} {
+		id := []string{"r1", "r2"}[i]
+		if err := s.FinishCouncil(ctx, CouncilRecord{RequestID: id, State: state, Reply: "no"},
+			[]Standing{{Member: "grok-web", Score: 1, Placement: 1, Ballots: 3}}); err != nil {
+			t.Fatalf("%s: %v", state, err)
+		}
+		if rec, err := s.Council(ctx, id); err != nil || rec.State != state {
+			t.Fatalf("council = %+v, %v; want %s", rec, err, state)
+		}
+	}
+	if board, err := s.Leaderboard(ctx, ""); err != nil || len(board) != 0 {
+		t.Fatalf("leaderboard = %+v, %v; want empty", board, err)
+	}
+}
