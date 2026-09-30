@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -390,6 +394,122 @@ func TestServiceAnswersLeaderboard(t *testing.T) {
 	if len(res.Reply.Attachments) != 1 || filepath.Ext(res.Reply.Attachments[0].Name) != ".png" {
 		t.Errorf("attachments = %+v, want the leaderboard card", res.Reply.Attachments)
 	}
+	for _, m := range []string{"alpha", "bravo", "charlie"} {
+		if n := len(r.asks(m)); n != 0 {
+			t.Errorf("%s was asked %d times", m, n)
+		}
+	}
+}
+
+// faultyService rebuilds r.svc over a client that reaches the relay
+// through a reverse proxy. While the returned code is non-zero the proxy
+// answers every claim with that status instead of passing it on.
+func (r *serviceRig) faultyService() *atomic.Int32 {
+	r.t.Helper()
+	target, err := url.Parse(r.mesh.URL("council"))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	fault := &atomic.Int32{}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if code := int(fault.Load()); code != 0 && strings.HasSuffix(req.URL.Path, "/claim") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"error":"injected"}`))
+			return
+		}
+		proxy.ServeHTTP(w, req)
+	}))
+	r.t.Cleanup(ts.Close)
+	c, err := client.NewRelayForFile(client.Config{Relay: ts.URL, Agent: "council"}, "")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	cfg := r.svc.cfg
+	r.svc, err = NewService(ServiceConfig{Relay: c, Config: cfg, Store: r.store, ReportDir: filepath.Join(r.dir, "reports"),
+		Hold: time.Second, RenewEvery: time.Minute, Log: r.log})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return fault
+}
+
+// A transient relay error on the claim just before a queued council runs
+// leaves the council queued for redelivery: it is not recorded as failed
+// and no reply is sent.
+func TestServiceTransientClaimErrorLeavesCouncilQueued(t *testing.T) {
+	for _, code := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusBadRequest} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			r := newServiceRig(t, relay.Config{}, time.Minute)
+			fault := r.faultyService()
+			r.ungate()
+			sent := r.send("Which queue should we use?")
+			r.svc.Handle(t.Context(), sent)
+			req, ok := r.svc.next(t.Context())
+			if !ok || req.ID != sent.ID {
+				t.Fatalf("next = %+v %v, want the queued council", req, ok)
+			}
+			fault.Store(int32(code))
+			r.svc.run(t.Context(), req)
+			r.svc.done(req.ID)
+
+			rec, err := r.store.Council(t.Context(), sent.ID)
+			if err != nil || rec.State != CouncilQueued {
+				t.Fatalf("stored council = %+v, %v; want still queued", rec, err)
+			}
+			if st := r.status(sent.ID).Status; st != envelope.StatusClaimed {
+				t.Fatalf("request status %s, want still claimed (no reply sent)", st)
+			}
+			if !strings.Contains(r.log.String(), "leaving it for redelivery") {
+				t.Fatalf("log:\n%s", r.log.String())
+			}
+			for _, m := range []string{"alpha", "bravo", "charlie"} {
+				if n := len(r.asks(m)); n != 0 {
+					t.Errorf("%s was asked %d times", m, n)
+				}
+			}
+		})
+	}
+}
+
+// A queued council whose claim lapsed (the service was stopped) and that
+// the convener then cancels is dropped when it comes up to run: no member
+// is asked, it is recorded as failed, and its stored reply is an
+// explanation rather than empty, so a redelivery never resends nothing.
+func TestServiceDropsCouncilCancelledWhileQueued(t *testing.T) {
+	r := newServiceRig(t, relay.Config{ClaimLease: 500 * time.Millisecond, SweepEvery: 50 * time.Millisecond}, time.Minute)
+	r.ungate()
+	sent := r.send("Which queue should we use?")
+	r.svc.Handle(t.Context(), sent)
+	req, ok := r.svc.next(t.Context())
+	if !ok || req.ID != sent.ID {
+		t.Fatalf("next = %+v %v, want the queued council", req, ok)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for r.status(sent.ID).Status == envelope.StatusClaimed {
+		if time.Now().After(deadline) {
+			t.Fatal("claim never lapsed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := r.mesh.Client(t, "codex").Cancel(t.Context(), sent.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.run(t.Context(), req)
+	r.svc.done(req.ID)
+
+	rec, err := r.store.Council(t.Context(), sent.ID)
+	if err != nil || rec.State != CouncilFailed {
+		t.Fatalf("stored council = %+v, %v; want failed", rec, err)
+	}
+	if strings.TrimSpace(rec.Reply) == "" {
+		t.Fatalf("dropped council stored an empty reply: %+v", rec)
+	}
+	if !strings.Contains(r.log.String(), "no longer open") {
+		t.Fatalf("log:\n%s", r.log.String())
+	}
+	time.Sleep(500 * time.Millisecond)
 	for _, m := range []string{"alpha", "bravo", "charlie"} {
 		if n := len(r.asks(m)); n != 0 {
 			t.Errorf("%s was asked %d times", m, n)

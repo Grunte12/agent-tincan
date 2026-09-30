@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -198,7 +199,11 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	switch {
 	case err == nil && rec.State != CouncilQueued && rec.State != CouncilRunning:
 		s.logf("request %s from %s: redelivered after the council %s, resending its reply", req.ID, req.From, rec.State)
-		s.sendFinal(ctx, req, rec.Reply, rec.State.replyStatus(), rec.ReportPath, rec.CardPath)
+		reply := rec.Reply
+		if strings.TrimSpace(reply) == "" {
+			reply = droppedReply
+		}
+		s.sendFinal(ctx, req, reply, rec.State.replyStatus(), rec.ReportPath, rec.CardPath)
 		return
 	case err == nil:
 		if s.enqueue(req) {
@@ -236,6 +241,11 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	s.logf("request %s from %s: council queued", req.ID, req.From)
 	s.renewOne(ctx, req.ID)
 }
+
+// droppedReply is the reply stored for a council dropped because its
+// request was no longer open when it came up to run, so a redelivery never
+// resends an empty reply.
+const droppedReply = "Council did not run: the request was no longer open (cancelled, expired, or already answered) when its turn came."
 
 // newRecord is req's council record in state, carrying req serialized so
 // a restart can run it again. When req cannot be serialized it logs why
@@ -416,9 +426,13 @@ func (s *Service) run(ctx context.Context, req envelope.Request) {
 	// that expired must not be run.
 	cur, err := s.relay.Claim(ctx, req.ID)
 	if err != nil {
-		if _, answered := errors.AsType[*client.APIError](err); answered && ctx.Err() == nil {
+		// Only a relay that no longer has the request open (gone, or
+		// cancelled, expired, or answered) drops it. Any other error, a 5xx
+		// or a proxy's 502 among them, may be transient.
+		if gone := client.IsStatus(err, http.StatusNotFound) || client.IsStatus(err, http.StatusConflict); gone && ctx.Err() == nil {
 			s.logf("request %s: no longer open (%v), dropping the council", req.ID, err)
 			rec, _ := s.newRecord(req, CouncilFailed)
+			rec.Reply = droppedReply
 			if err := s.store.PutCouncil(context.WithoutCancel(ctx), rec); err != nil {
 				s.logf("request %s: store: %v", req.ID, err)
 			}
