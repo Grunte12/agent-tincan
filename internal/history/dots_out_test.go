@@ -707,17 +707,6 @@ func (r *dotOutRig) record(status string) *dotOutRecord {
 	return found
 }
 
-// count is how many typed messages are text.
-func (r *dotOutRig) count(text string) int {
-	n := 0
-	for _, m := range r.typed() {
-		if m == text {
-			n++
-		}
-	}
-	return n
-}
-
 const calendarAnswer = "[tincan-reply from muse]\n> @tincan ask muse check the calendar\n\nFriday is free."
 
 // The relay takes the ask but its response is lost: a later tick finds the
