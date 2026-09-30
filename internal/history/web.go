@@ -265,6 +265,17 @@ func parseWebRequest(body string) (webRequest, error) {
 	return r, nil
 }
 
+// dropNewChatLine returns body trimmed, less a first line that is exactly
+// "new chat" or "new chat:" (any case, surrounding space trimmed). Any
+// other first line, a "conversation:" one included, is kept.
+func dropNewChatLine(body string) string {
+	first, rest, _ := strings.Cut(body, "\n")
+	if head := strings.ToLower(strings.TrimSpace(first)); head == "new chat" || head == "new chat:" {
+		return strings.TrimSpace(rest)
+	}
+	return strings.TrimSpace(body)
+}
+
 // conversationRef reads a conversation id, or a conversation URL on any
 // site in the table.
 func conversationRef(ref string) (string, bool) {
@@ -362,7 +373,9 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	}
 
 	// 2. Threading and the message. A site with one thread takes the
-	// whole body as the message: a threading line is text to it.
+	// body as the message, less a leading bare "new chat" line (a
+	// council prompt starts with one); a "conversation:" line is text
+	// to it.
 	var wr webRequest
 	if site.oneThread {
 		thread, ok := site.canonical(w.Thread)
@@ -370,7 +383,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; run it with --thread <id>, the id in https://%s/dots/<id>.", label, w.Name, site.host), envelope.StatusFailed, nil)
 			return
 		}
-		wr = webRequest{mode: threadConversation, convID: thread, message: strings.TrimSpace(req.Body)}
+		wr = webRequest{mode: threadConversation, convID: thread, message: dropNewChatLine(req.Body)}
 		if wr.message == "" {
 			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: there is no message to send.", label), envelope.StatusFailed, nil)
 			return
