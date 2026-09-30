@@ -517,13 +517,17 @@ func TestServiceDropsCouncilCancelledWhileQueued(t *testing.T) {
 	}
 }
 
-// When a completed council's scores cannot be written, the council is not
-// stored as completed without them and no reply goes out: it stays
-// unfinished, and running it again records it and its scores once.
-func TestServiceScoreWriteFailureLeavesCouncilUnfinished(t *testing.T) {
+// A score write that fails for a moment is retried, so the convener is
+// answered promptly and the council's scores are recorded once, without
+// asking the members again.
+func TestServiceRetriesTransientScoreWriteFailure(t *testing.T) {
+	restore := finishRetryWaits
+	finishRetryWaits = []time.Duration{300 * time.Millisecond, 300 * time.Millisecond}
+	t.Cleanup(func() { finishRetryWaits = restore })
 	r := newServiceRig(t, relay.Config{}, time.Minute)
 	r.ungate()
 	allow := failScoreInserts(t, r.store)
+	time.AfterFunc(100*time.Millisecond, allow)
 	sent := r.send("Which queue should we use?")
 	r.svc.Handle(t.Context(), sent)
 	req, ok := r.svc.next(t.Context())
@@ -532,35 +536,41 @@ func TestServiceScoreWriteFailureLeavesCouncilUnfinished(t *testing.T) {
 	}
 	r.svc.run(t.Context(), req)
 	r.svc.done(req.ID)
+	if res := r.await(sent.ID, 30*time.Second); res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s:\n%s", res.Status, res.Reply.Body)
+	}
+	rows, err := r.store.Leaderboard(t.Context(), "debugging")
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("leaderboard = %+v, %v; want the council's three members", rows, err)
+	}
+}
 
-	rec, err := r.store.Council(t.Context(), sent.ID)
-	if err != nil || rec.State != CouncilRunning {
-		t.Fatalf("stored council = %+v, %v; want still running", rec, err)
+// When the score write keeps failing, the convener still gets the verdict
+// instead of waiting out the claim lease for a rerun; the council is stored
+// as completed and only its leaderboard scores are lost.
+func TestServicePersistentScoreWriteFailureStillReplies(t *testing.T) {
+	restore := finishRetryWaits
+	finishRetryWaits = []time.Duration{50 * time.Millisecond}
+	t.Cleanup(func() { finishRetryWaits = restore })
+	r := newServiceRig(t, relay.Config{}, time.Minute)
+	r.ungate()
+	failScoreInserts(t, r.store)
+	sent := r.send("Which queue should we use?")
+	r.svc.Handle(t.Context(), sent)
+	req, ok := r.svc.next(t.Context())
+	if !ok || req.ID != sent.ID {
+		t.Fatalf("next = %+v %v, want the queued council", req, ok)
 	}
-	if st := r.status(sent.ID).Status; st != envelope.StatusClaimed {
-		t.Fatalf("request status %s, want still claimed (no reply sent)", st)
-	}
-	if rows, err := r.store.Leaderboard(t.Context(), ""); err != nil || len(rows) != 0 {
-		t.Fatalf("leaderboard = %+v, %v; want empty", rows, err)
-	}
-
-	allow()
 	r.svc.run(t.Context(), req)
 	r.svc.done(req.ID)
 	if res := r.await(sent.ID, 30*time.Second); res.Status != envelope.StatusAnswered {
 		t.Fatalf("%s:\n%s", res.Status, res.Reply.Body)
 	}
-	rec, err = r.store.Council(t.Context(), sent.ID)
-	if err != nil || rec.State != CouncilCompleted {
-		t.Fatalf("stored council = %+v, %v; want completed", rec, err)
+	rec, err := r.store.Council(t.Context(), sent.ID)
+	if err != nil || rec.State != CouncilCompleted || rec.Reply == "" {
+		t.Fatalf("stored council = %+v, %v; want completed with its reply", rec, err)
 	}
-	rows, err := r.store.Leaderboard(t.Context(), "debugging")
-	if err != nil || len(rows) != 3 {
-		t.Fatalf("leaderboard = %+v, %v", rows, err)
-	}
-	for _, row := range rows {
-		if row.Councils != 1 {
-			t.Errorf("%s counted in %d councils, want 1", row.Member, row.Councils)
-		}
+	if rows, err := r.store.Leaderboard(t.Context(), ""); err != nil || len(rows) != 0 {
+		t.Fatalf("leaderboard = %+v, %v; want empty", rows, err)
 	}
 }

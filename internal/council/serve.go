@@ -36,6 +36,11 @@ const handleTimeout = 2 * time.Minute
 // is not run again because the service was stopping.
 const finishTimeout = 2 * time.Minute
 
+// finishRetryWaits spaces the retries of a failed final write: a completed
+// council's record and scores are retried briefly before the reply goes out
+// without its leaderboard scores.
+var finishRetryWaits = []time.Duration{time.Second, 3 * time.Second}
+
 // replyTimeout bounds sending one reply or progress note.
 const replyTimeout = 30 * time.Second
 
@@ -517,15 +522,27 @@ func (s *Service) finish(ctx context.Context, req envelope.Request, f Finished) 
 	if f.Outcome.State == CouncilCompleted {
 		rec.Category = f.category()
 	}
-	if err := s.store.FinishCouncil(fctx, rec, f.Outcome.Standings); err != nil {
-		if f.Outcome.State == CouncilCompleted {
-			// Replying now would answer the request while its scores are
-			// lost for good. Left unfinished, the council runs again on
-			// redelivery or at the next start and is recorded then.
-			s.logf("request %s: store: %v; council left unfinished, it runs again on redelivery or at the next start", req.ID, err)
-			return
+	err := s.store.FinishCouncil(fctx, rec, f.Outcome.Standings)
+	for _, wait := range finishRetryWaits {
+		if err == nil || f.Outcome.State != CouncilCompleted {
+			break
 		}
+		select {
+		case <-fctx.Done():
+		case <-time.After(wait):
+		}
+		err = s.store.FinishCouncil(fctx, rec, f.Outcome.Standings)
+	}
+	if err != nil {
 		s.logf("request %s: store: %v", req.ID, err)
+		if f.Outcome.State == CouncilCompleted {
+			// The convener gets the verdict rather than waiting out the
+			// claim lease for a rerun; only the leaderboard scores are lost.
+			if perr := s.store.PutCouncil(fctx, rec); perr != nil {
+				s.logf("request %s: store: %v", req.ID, perr)
+			}
+			s.logf("request %s: leaderboard scores for this council were not recorded", req.ID)
+		}
 	}
 	s.logf("request %s from %s: council %s (%s)", req.ID, req.From, f.Outcome.State, f.statusLine())
 	s.sendFinal(fctx, req, body, status, f.ReportPath, f.CardPath)
