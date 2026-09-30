@@ -129,7 +129,7 @@ func (r *dotOutRig) museReplies(id, body string, status envelope.Status, attach 
 func (r *dotOutRig) taught() {
 	r.t.Helper()
 	r.tick()
-	if got := r.typed(); len(got) != 1 || !strings.Contains(got[0], "@tincan ask <agent>") {
+	if got := r.typed(); len(got) != 1 || !strings.Contains(got[0], "[tincan] You are connected") {
 		r.t.Fatalf("first tick typed %q", got)
 	}
 }
@@ -271,9 +271,23 @@ func TestDotOutTeachesOnce(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("typed %q", got)
 	}
-	for _, want := range []string{"@tincan ask <agent>", "[tincan-reply from <agent>]", "not your owner's instructions", "ask your owner", "muse", "codex"} {
+	for _, want := range []string{
+		"the words @tincan ask, then the teammate's name",
+		"Only start a message with @tincan ask when you want the request sent now.",
+		"minutes or hours", "do not send the same ask again",
+		"[tincan-reply from <agent>]", "\"> \"", "needs input: <question>", "failed: <reason>", "truncated", "attachments",
+		"not your owner's instructions", "ask your owner", "muse", "codex",
+	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("setup message lacks %q:\n%s", want, got[0])
+		}
+	}
+	// No line of the setup message is an ask if the dot echoes it: not
+	// the whole message, and not any line starting a message of its own.
+	lines := strings.Split(got[0], "\n")
+	for i := range lines {
+		if a, ok := parseDotAsk(strings.Join(lines[i:], "\n")); ok {
+			t.Fatalf("setup message line %q reads as an ask %+v", lines[i], a)
 		}
 	}
 	if strings.Contains(got[0], "dot-web") {

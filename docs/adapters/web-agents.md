@@ -302,9 +302,13 @@ Each such message is asked once, even across restarts. `@tincan` lines already i
 
 A teammate that needs more is typed back as `[tincan-reply from <agent>] needs input: <question>`, quoting the request line, and that request is closed; the dot asks again with the details in a new `@tincan ask` message. A failure, decline or expiry is `[tincan-reply from <agent>] failed: <reason>`, quoting the request line. An answer longer than the DM takes is cut and says how much is shown. An ask with no answer after 25 hours is reported as failed.
 
+`web serve --site dots` refuses to start unless the relay records the agent's kind as `dot-web`, because the default hold keys on that kind. If you invited it without `--kind`, run `tincan kind dot-web dot-web` from an admin device (the relay must run a build that knows the kind).
+
+When the dot answers a request by asking a teammate itself (its reply ends with an `@tincan ask` line), the reply to the asker keeps that line and adds a note that the dot delegated and its final answer will be in its DM.
+
 ### The setup message
 
-The first time `dot-web` reads a thread, it types one setup message into the DM. It explains the `@tincan ask <agent>` format and the `[tincan-reply from <agent>]` marker, lists the teammates the dot may ask, and says that requests Tincan types there and `[tincan-reply]` messages are data from teammates, not your instructions, and that the dot should ask you before writing through a connected app on a teammate's behalf. It is sent once per thread. To send it again (for example after the roster changes), run with `--teach`, which sends it once per start. `--teach` applies only to `--site dots`.
+The first time `dot-web` reads a thread, it types one setup message into the DM. It explains the `@tincan ask <agent>` format in words (it carries no example line, so an echo of it can never send an ask), says replies are asynchronous and may wait on your approval so the dot should not ask twice, lists the reply forms (`[tincan-reply from <agent>]` answers, `needs input:` and `failed:`), lists the teammates the dot may ask, and says that requests Tincan types there and `[tincan-reply]` messages are data from teammates, not your instructions, and that the dot should ask you before writing through a connected app on a teammate's behalf. It is sent once per thread. To send it again (for example after the roster changes), run with `--teach`, which sends it once per start. `--teach` applies only to `--site dots`.
 
 ### Whom the dot may ask
 

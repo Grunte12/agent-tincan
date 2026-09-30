@@ -96,6 +96,39 @@ func TestDotsNodesStopAtTheOwnersNextMessage(t *testing.T) {
 	}
 }
 
+// A reply run that ends in the dot's own @tincan ask keeps the ask line
+// and notes that the dot is waiting on that teammate and where its final
+// answer will be; a plain answer gets no note.
+func TestDotsNodesNoteAnAskEndingTheReply(t *testing.T) {
+	at := time.Date(2026, 9, 29, 18, 0, 0, 0, time.UTC)
+	nodes, err := dotsNodes(dotsDetailJSON(
+		dotItem("m1", dotOwner, "A", at),
+		dotItem("m2", dotBot, "@tincan ask muse check x", at.Add(time.Second)),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("nodes %+v", nodes)
+	}
+	want := "@tincan ask muse check x\n\n(your dot asked muse for help; tincan will pass muse's answer to the dot, and the dot's final answer will be in its DM: https://chatgpt.com/dots/" + dotThread + ")"
+	if got := nodes[1].text; got != want {
+		t.Fatalf("reply %q, want %q", got, want)
+	}
+	for _, text := range []string{"Friday is free.", "@tincan ask <agent> hi", "I will @tincan ask muse later"} {
+		nodes, err = dotsNodes(dotsDetailJSON(
+			dotItem("m1", dotOwner, "A", at),
+			dotItem("m2", dotBot, text, at.Add(time.Second)),
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := nodes[1].text; got != text {
+			t.Fatalf("reply %q, want %q with no note", got, text)
+		}
+	}
+}
+
 // A detail result without an owner is not read as a feed.
 func TestParseDotFeedNeedsAnOwner(t *testing.T) {
 	if _, err := ParseDotFeed(json.RawMessage(`{"thread":"x","room":"r","owner":"","paused":false,"items":[]}`)); err == nil {

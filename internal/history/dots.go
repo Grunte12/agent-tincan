@@ -154,7 +154,7 @@ func dotsNodes(raw json.RawMessage) ([]webNode, error) {
 		for j < len(msgs) && !msgs[j].Owner {
 			j++
 		}
-		out = append(out, dotRun(msgs[i:j]))
+		out = append(out, dotRun(f.Thread, msgs[i:j]))
 		i = j
 	}
 	return out, nil
@@ -163,7 +163,12 @@ func dotsNodes(raw json.RawMessage) ([]webNode, error) {
 // dotRun is one run of the dot's messages as one reply node: its texts
 // joined by a blank line (with a note for attachments tincan does not
 // carry), identified by the run's first message and dated by its last.
-func dotRun(run []DotMessage) webNode {
+//
+// A run that ends in the dot's own "@tincan ask <agent>" is a dot waiting
+// on a teammate: the watcher cannot send that ask while this request holds
+// the send path, so the run would end there. The reply keeps the ask line
+// and notes where the dot's final answer will be.
+func dotRun(thread string, run []DotMessage) webNode {
 	var texts []string
 	files := 0
 	for _, m := range run {
@@ -178,6 +183,13 @@ func dotRun(run []DotMessage) webNode {
 			what = fmt.Sprintf("%d attachments", files)
 		}
 		texts = append(texts, fmt.Sprintf("(your dot also sent %s; open the DM to see them)", what))
+	}
+	if ask, ok := parseDotAsk(run[len(run)-1].Text); ok && ask.bad == "" {
+		dm := "its DM"
+		if thread != "" {
+			dm = "its DM: https://chatgpt.com/dots/" + thread
+		}
+		texts = append(texts, fmt.Sprintf("(your dot asked %s for help; tincan will pass %s's answer to the dot, and the dot's final answer will be in %s)", ask.target, ask.target, dm))
 	}
 	return webNode{id: run[0].ID, reply: true, text: strings.Join(texts, "\n\n"), at: run[len(run)-1].At}
 }

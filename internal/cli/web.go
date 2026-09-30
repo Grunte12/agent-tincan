@@ -15,6 +15,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
 
 func webCmd() *cobra.Command {
@@ -146,6 +147,17 @@ func webServeCmd() *cobra.Command {
 			}
 			if me.Name != name {
 				return wrongServeAgent("web serve", name, "the relay knows the machine using "+configPath+" as", me.Name)
+			}
+			// The relay holds a request to the dot for the owner's approval
+			// only when it knows the agent's kind is dot-web; under any other
+			// kind (an invite without --kind leaves it empty) teammates' asks
+			// would reach the dot unapproved, so refuse to start.
+			if history.WebSiteTakesThread(src) && me.Kind != onboard.KindDotWeb {
+				kind := me.Kind
+				if kind == "" {
+					kind = "none"
+				}
+				return fmt.Errorf("web serve: %s's kind on the relay is %q, so requests to it would not be held for the owner's approval; run `tincan kind %s %s` from an admin device (the relay must run this tincan build or later to accept the kind) and start again", name, kind, name, onboard.KindDotWeb)
 			}
 			// A connected extension that reports the site ungranted cannot
 			// serve it, so the service waits here for the grant rather than

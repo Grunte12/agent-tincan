@@ -329,3 +329,68 @@ func TestWebTeachIsDotsOnly(t *testing.T) {
 		t.Fatalf("--teach on chatgpt: %v", err)
 	}
 }
+
+// The relay holds requests to the dot for the owner's approval only when it
+// knows the agent's kind is dot-web; web serve --site dots refuses to start
+// as an agent of any other kind (an invite without --kind leaves it empty),
+// and gets past the check for kind dot-web.
+func TestWebServeDotsNeedsDotWebKind(t *testing.T) {
+	shortNativeDir(t)
+	t.Setenv("HOME", t.TempDir())
+	for _, kind := range []string{"", "codex", "dot-web"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/whoami":
+				_ = json.NewEncoder(w).Encode(map[string]string{"name": "dot-web", "kind": kind})
+			case "/v1/poll":
+				<-r.Context().Done()
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := Root()
+		var out syncBuffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"web", "serve", "--site", "dots", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--config", serveConfig(t, srv.URL, "dot-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+		done := make(chan error, 1)
+		go func() { done <- cmd.ExecuteContext(ctx) }()
+		if kind != "dot-web" {
+			select {
+			case err := <-done:
+				shown := kind
+				if shown == "" {
+					shown = "none"
+				}
+				if err == nil || !strings.Contains(err.Error(), `kind on the relay is "`+shown+`"`) || !strings.Contains(err.Error(), "tincan kind dot-web dot-web") {
+					t.Fatalf("kind %q: %v\n%s", kind, err, out.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("kind %q: web serve started\n%s", kind, out.String())
+			}
+		} else {
+			deadline := time.Now().Add(5 * time.Second)
+			for !strings.Contains(out.String(), "serving dots") && time.Now().Before(deadline) {
+				select {
+				case err := <-done:
+					t.Fatalf("kind dot-web: web serve exited: %v\n%s", err, out.String())
+				default:
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if !strings.Contains(out.String(), "serving dots") {
+				t.Fatalf("kind dot-web: web serve did not start:\n%s", out.String())
+			}
+		}
+		cancel()
+		if kind == "dot-web" {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("web serve did not stop")
+			}
+		}
+		srv.Close()
+	}
+}
