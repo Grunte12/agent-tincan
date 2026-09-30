@@ -88,7 +88,7 @@ Documentation
 - KTD2. The detail op reads the room feed, not the page. `dots.detail` reads three backend endpoints with the page's bearer, the same way `chatgptAuth` does:
   - `GET /backend-api/tbo/by-thread/<thread>` for `messaging_room_id` and `is_paused`;
   - `GET /backend-api/messaging/rooms/<room>` for `creator_account_user_id` (the owner);
-  - `GET /backend-api/messaging/rooms/<room>/messages?limit=50`, which returns `{items: [{id, created_at, account_user_id, content: {text, attachments}}]}` oldest first.
+  - `GET /backend-api/messaging/rooms/<room>/messages?limit=32` (the API refuses more than 32), which returns `{items: [{id, created_at, account_user_id, content: {text, attachments}}]}` oldest first.
 
   The owner's messages become user nodes. The dot's messages (any other account) become reply nodes, and consecutive dot messages after a user turn are one reply.
 - KTD3. Send drives the page. `dots.send` opens `https://chatgpt.com/dots/<thread>` in a background tab, types into `div[role="textbox"][aria-label="Message"]` (ProseMirror), and clicks `button[aria-label="Send"]`. The page's URL never changes, so the send confirms delivery by the new owner message appearing in the room feed, not by a conversation id in the address. It refuses when the composer already holds text.

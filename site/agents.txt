@@ -95,8 +95,8 @@ A5. Join this machine's own agent (you), if you are one of the team:
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
     history, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
-    copilot-web, scheduled, generic.
-    (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web, copilot-web and scheduled need a relay from this
+    copilot-web, dot-web, scheduled, generic.
+    (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>.)
 
@@ -334,6 +334,29 @@ C9. Optional: Microsoft Copilot (copilot-web). Tell your owner first, and go
     - Test: `tincan ask copilot-web "Tincan test: say hello in five words."` and
       `tincan ask history "what was the last thing I asked Copilot?"` (that
       read opens copilot.com in a background tab for a few seconds).
+
+C10. Optional: your owner's OpenAI dot (dot-web). Tell your owner first, and go
+    ahead only if they agree: a request is typed into the dot's DM as the
+    owner's own message, and the dot can act in the apps they connected to it
+    (Gmail, GitHub, Google Drive). Requests to dot-web are held for the
+    owner's approval by default. Nothing is installed on the dot. Then:
+    - Make sure your owner is signed in to chatgpt.com in this same Chrome.
+      No extra grant is needed; it uses the extension's ChatGPT access.
+    - Ask your owner to open the dot's DM in ChatGPT and give you the thread
+      id from its address: https://chatgpt.com/dots/<thread-id>.
+    - Get an invite code with kind dot-web and join and install it:
+
+        TINCAN_CONFIG=~/.config/tincan/dot-web.json  tincan join <CODE6> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/dot-web.json  tincan web install --site dots --thread <thread-id>
+
+    - On first start it types one setup message into the DM that teaches the
+      dot to ask teammates with a message whose first line is
+      `@tincan ask <agent>`; answers come back as `[tincan-reply from <agent>]`.
+      To limit whom the dot may ask, list agents in
+      ~/.config/tincan/dot-web-send.txt (no file means any joined agent).
+    - Test: `tincan ask dot-web "Tincan test: say hello in five words."`, then
+      ask your owner to approve it (`tincan held`, `tincan approve <id>`).
+      A paused dot fails with nothing sent.
 
 
 The history agent also reads the owner's Grok CLI (Grok Build) sessions on that
