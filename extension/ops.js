@@ -174,7 +174,7 @@ const COPILOT_MAX_SOURCES = 50;
 // reads, DOT_CONFIRM_LIMIT how many a send's confirmation polls read.
 // DOT_SKEW_MS is how much earlier than the send the server's created_at
 // may say, for clock skew.
-export const DOT_FEED_LIMIT = 50;
+export const DOT_FEED_LIMIT = 32;
 const DOT_CONFIRM_LIMIT = 20;
 const DOT_SKEW_MS = 2 * 60 * 1000;
 // DOT_ROOM_RE is a messaging room id as it goes into a URL path.

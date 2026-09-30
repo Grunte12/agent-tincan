@@ -1215,7 +1215,7 @@ const DOT_OWNER = 'user-owner__acct';
 const DOT_BOT = 'user-dot__acct';
 const DOT_TBO = `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`;
 const DOT_ROOM_URL = `https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}`;
-const DOT_FEED = `${DOT_ROOM_URL}/messages?limit=50`;
+const DOT_FEED = `${DOT_ROOM_URL}/messages?limit=32`;
 
 function dotMessage(id, from, text, at, extra = {}) {
   return { id, created_at: at, updated_at: at, role: 'user', account_user_id: from, content: { text, attachments: [] }, reply_to: null, deleted_at: null, ...extra };
