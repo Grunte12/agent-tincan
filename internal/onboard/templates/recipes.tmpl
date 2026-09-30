@@ -17,6 +17,9 @@ On the agent's machine: {{template "join.proxy-sandbox" .}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite notes --kind notes. The service only runs as the agent named notes. The code is valid 10 minutes; hand it straight to the Agent Notes Mac, never through group chat or logs.
 On the Agent Notes Mac: TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay {{.RelayURL}}
 {{- end -}}
+{{- define "recipe.invite.dot" -}}
+On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; send it only in {{.OwnerPoss}} DM with the dot, never through group chat or logs.
+{{- end -}}
 {{- define "recipe.invite.chatgpt" -}}
 No tincan invite: ChatGPT cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
 {{- end -}}

@@ -1,7 +1,9 @@
 // Package policy fills in a request's chain and stops runaway loops between
 // trusted agents. It never restricts who may ask whom: joined agents trust
-// each other. It only enforces the hop limit, rejects cycles, and rate-limits
-// each sender as a backstop against an agent stuck starting new chains.
+// each other. It enforces the hop limit, rejects cycles, and rate-limits
+// each sender as a backstop against an agent stuck starting new chains. It
+// also holds requests for the owner's approval: to targets the owner gates
+// in approval.json, and by default to the kinds in holdByDefault.
 package policy
 
 import (
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
@@ -25,6 +28,14 @@ var (
 	ErrUrgentLimited = errors.New("urgent limit reached; send without --urgent")
 	ErrRateLimited   = errors.New("too many requests from this agent; slow down")
 )
+
+// holdByDefault lists the target kinds whose inbound asks and notifies wait
+// for the owner's approval with no approval.json entry: a dot acts through
+// the owner's connected apps, so nothing reaches it unapproved unless the
+// owner says so. An approval.json entry for the target replaces the
+// default. Replies and answers never pass through Prepare, so replies to
+// the dot's own asks are not held.
+var holdByDefault = map[string]bool{onboard.KindDot: true}
 
 // Config tunes the policy.
 type Config struct {
@@ -95,7 +106,10 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Kind == envelope.KindPing {
 		return nil
 	}
-	held, err := p.cfg.Approval.Held(req)
+	held, gated, err := p.cfg.Approval.check(req)
+	if !gated && err == nil {
+		held, err = p.heldByDefault(ctx, req)
+	}
 	if held {
 		req.Status = envelope.StatusHeld
 		return nil
@@ -105,6 +119,20 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		return reject(http.StatusServiceUnavailable, err)
 	}
 	return nil
+}
+
+// heldByDefault holds req when its target's kind is in holdByDefault, with
+// the TTL and notify agent a gated hold would get.
+func (p *Policy) heldByDefault(ctx context.Context, req *envelope.Request) (bool, error) {
+	a, ok, err := p.st.AgentByName(ctx, req.To)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !holdByDefault[a.Kind] {
+		return false, nil
+	}
+	req.HoldTTL, req.ApprovalNotify = p.cfg.Approval.holdDefaults()
+	return true, nil
 }
 
 // parent resolves the request's parent: the one it names, or else the

@@ -97,7 +97,7 @@ func (a *Approval) reload() error {
 	if c.Gate == nil {
 		return errors.New("approval.json requires gate object")
 	}
-	ttl := 2 * time.Hour
+	ttl := defaultHoldTTL
 	if c.HoldTTL != "" {
 		ttl, err = time.ParseDuration(c.HoldTTL)
 		if err != nil || ttl < time.Millisecond {
@@ -139,30 +139,41 @@ func (a *Approval) reload() error {
 	return nil
 }
 
+// defaultHoldTTL is how long a held request waits for the owner when
+// approval.json sets no hold_ttl, or there is no approval.json.
+const defaultHoldTTL = 2 * time.Hour
+
 // Held evaluates the relay-recorded chain and sender. On reload failure it
 // holds all last-known gated targets; without a valid copy callers must reject.
 // HoldTTL and ApprovalNotify are internal metadata, never accepted from clients.
 func (a *Approval) Held(req *envelope.Request) (bool, error) {
+	held, _, err := a.check(req)
+	return held, err
+}
+
+// check is Held that also reports whether the target has a gate entry, so
+// a hold-by-default kind knows the owner's entry replaces its default.
+func (a *Approval) check(req *envelope.Request) (held, gated bool, err error) {
 	if a == nil {
-		return false, nil
+		return false, false, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	err := a.reload()
+	err = a.reload()
 	if a.good == nil || (err == nil && a.missing) {
-		return false, err
+		return false, false, err
 	}
 	rule, ok := a.good.Gate[req.To]
 	if !ok {
-		return false, nil
+		return false, false, nil
 	}
 	req.HoldTTL = a.ttl
 	req.ApprovalNotify = a.good.Notify
 	if err != nil {
-		return true, err
+		return true, true, err
 	}
 	if string(rule.From) == `"*"` {
-		return true, nil
+		return true, true, nil
 	}
 	names := rule.Unless
 	if len(rule.From) > 0 {
@@ -171,10 +182,25 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 	for _, name := range append(slices.Clone(req.Chain), req.From) {
 		match := slices.Contains(names, name)
 		if (rule.Unless != nil && !match) || (rule.Unless == nil && match) {
-			return true, nil
+			return true, true, nil
 		}
 	}
-	return false, nil
+	return false, true, nil
+}
+
+// holdDefaults are the TTL and notify agent of a hold with no gate entry:
+// the owner's hold_ttl and notify from the last valid approval.json while
+// the file exists, else the default TTL and no notice.
+func (a *Approval) holdDefaults() (time.Duration, string) {
+	if a == nil {
+		return defaultHoldTTL, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.good == nil || a.missing {
+		return defaultHoldTTL, ""
+	}
+	return a.ttl, a.good.Notify
 }
 
 // Reject ambiguous JSON rather than letting a repeated field replace a rule.

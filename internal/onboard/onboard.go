@@ -43,11 +43,12 @@ const (
 	KindPerplexityWeb = "perplexity-web"
 	KindCopilotWeb    = "copilot-web"
 	KindScheduled     = "scheduled"
+	KindDot           = "dot"
 	KindGeneric       = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindScheduled, KindDot, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -103,6 +104,7 @@ var defaultWake = map[string]string{
 	KindPerplexityWeb: "wait",
 	KindCopilotWeb:    "wait",
 	KindScheduled:     "schedule",
+	KindDot:           "webhook",
 	KindGeneric:       "none",
 }
 

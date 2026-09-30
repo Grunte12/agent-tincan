@@ -9,7 +9,7 @@ import (
 // an invite. Tailnet agents run tincan rejoin; the proxy sandbox adds its
 // proxy; ChatGPT, which is not a tailnet machine, is told it cannot; the
 // history and web agent services, which are not models, carry the rejoin in
-// their setup.
+// their setup. A dot asks the owner for a new join code.
 func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 	var roster []Member
 	for _, kind := range Kinds {
@@ -21,6 +21,14 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 		if kind == KindChatGPT {
 			if !strings.Contains(txt, "not joined") || !strings.Contains(txt, "tincan connect chatgpt") {
 				t.Errorf("chatgpt block lacks its not-joined line:\n%s", txt)
+			}
+			continue
+		}
+		if kind == KindDot {
+			// A reset cloud computer has no config to rejoin with: the dot asks
+			// the owner for a new join code instead (TestDotBlock).
+			if !strings.Contains(txt, "new join code") || strings.Contains(txt, "tincan rejoin") {
+				t.Errorf("dot block lacks its ask-for-a-join-code line:\n%s", txt)
 			}
 			continue
 		}
