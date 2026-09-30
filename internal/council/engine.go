@@ -490,21 +490,29 @@ func failedSend(to string, err error) client.Result {
 func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit time.Duration) error {
 	deadline := e.Now().Add(limit)
 	var mu sync.Mutex
-	// poll waits up to wait on each open ask: member -> request id.
-	poll := func(open map[string]string, wait time.Duration) {
+	// poll waits up to wait on each open ask: member -> request id. It
+	// reports whether every Get came back at once without finishing its
+	// ask: the relay does not wait on held or needs_input asks, and a Get
+	// error comes back at once too.
+	poll := func(open map[string]string, wait time.Duration) (stalled bool) {
 		var wg sync.WaitGroup
+		stalled = true
 		for m, id := range open {
 			wg.Go(func() {
 				next, err := e.Relay.Get(ctx, id, wait)
+				mu.Lock()
+				defer mu.Unlock()
 				if err != nil {
 					return // a later poll tries again
 				}
-				mu.Lock()
+				if next.Done() || (next.Status != envelope.StatusHeld && next.Status != envelope.StatusNeedsInput) {
+					stalled = false
+				}
 				res[m] = next
-				mu.Unlock()
 			})
 		}
 		wg.Wait()
+		return stalled
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -524,7 +532,16 @@ func (e *Engine) gather(ctx context.Context, res map[string]client.Result, limit
 			break
 		}
 		if left >= time.Second {
-			poll(open, min(left.Truncate(time.Second), client.MaxInlineWait))
+			if !poll(open, min(left.Truncate(time.Second), client.MaxInlineWait)) {
+				continue
+			}
+			// Nothing waited: pace the next round instead of spinning
+			// against the relay.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-e.After(min(left, time.Second)):
+			}
 			continue
 		}
 		poll(open, 0)

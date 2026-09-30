@@ -530,3 +530,80 @@ func TestCouncilDeclinesAQuestionOverTheCap(t *testing.T) {
 		t.Fatal("a member was asked")
 	}
 }
+
+// stallRelay answers every Get at once with a result that is not done
+// (or an error), as the relay does for held and needs_input asks. It
+// cancels the stage's context past capGets so a busy loop fails the test
+// instead of hanging it.
+type stallRelay struct {
+	Relay
+	status  envelope.Status
+	err     error
+	capGets int
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	gets    int
+	cancels int
+}
+
+func (s *stallRelay) Get(_ context.Context, id string, _ time.Duration) (client.Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets++
+	if s.gets >= s.capGets {
+		s.cancel()
+	}
+	if s.err != nil {
+		return client.Result{}, s.err
+	}
+	return client.Result{Request: envelope.Request{ID: id}, Status: s.status}, nil
+}
+
+func (s *stallRelay) Cancel(context.Context, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancels++
+	return nil
+}
+
+// A stage whose asks the relay answers at once without finishing them
+// (held, needs_input, or a Get error) paces its polls rather than
+// spinning against the relay.
+func TestGatherPacesPollsThatReturnAtOnce(t *testing.T) {
+	cases := map[string]*stallRelay{
+		"held":        {status: envelope.StatusHeld},
+		"needs_input": {status: envelope.StatusNeedsInput},
+		"get error":   {status: envelope.StatusQueued, err: fmt.Errorf("relay down")},
+	}
+	for name, rl := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			rl.cancel, rl.capGets = cancel, 1000
+			var mu sync.Mutex
+			now := time.Unix(0, 0)
+			e := &Engine{Relay: rl,
+				Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return now },
+				After: func(d time.Duration) <-chan time.Time {
+					mu.Lock()
+					now = now.Add(d)
+					mu.Unlock()
+					c := make(chan time.Time, 1)
+					c <- now
+					return c
+				}}
+			res := map[string]client.Result{
+				"alpha": {Request: envelope.Request{ID: "r1"}, Status: rl.status},
+				"bravo": {Request: envelope.Request{ID: "r2"}, Status: rl.status},
+			}
+			if err := e.gather(ctx, res, 10*time.Second); err != nil {
+				t.Fatalf("gather: %v (after %d gets)", err, rl.gets)
+			}
+			// About one round per second of stage time plus the sub-second
+			// tail and a last look at close, for each of two asks.
+			if rl.gets > 2*(10+10+1) {
+				t.Errorf("gets = %d over a 10s stage, want it paced", rl.gets)
+			}
+		})
+	}
+}
