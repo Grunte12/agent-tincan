@@ -2,6 +2,8 @@ package history
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
@@ -180,12 +183,12 @@ func TestParseDotAsk(t *testing.T) {
 func TestDotOutAskIsSentOnceAndItsAnswerTypedBack(t *testing.T) {
 	r := newDotOutRig(t)
 	r.taught()
-	r.dotSays("@tincan ask muse check the calendar")
+	msg := r.dotSays("@tincan ask muse check the calendar")
 	if d := r.tick(); d != DefaultDotWatchInterval {
 		t.Fatalf("next tick in %s", d)
 	}
 	reqs := r.museInbox()
-	if len(reqs) != 1 || reqs[0].Body != "check the calendar" || reqs[0].From != "dot-web" || reqs[0].Kind != envelope.KindAsk {
+	if len(reqs) != 1 || reqs[0].Body != askBody("check the calendar", msg) || reqs[0].From != "dot-web" || reqs[0].Kind != envelope.KindAsk {
 		t.Fatalf("muse got %+v", reqs)
 	}
 	r.tick()
@@ -260,9 +263,9 @@ func TestDotOutBaselineIgnoresEarlierLines(t *testing.T) {
 	if reqs := r.museInbox(); len(reqs) != 0 {
 		t.Fatalf("old line asked after a restart: %+v", reqs)
 	}
-	r.dotSays("@tincan ask muse a new request")
+	msg := r.dotSays("@tincan ask muse a new request")
 	r.tick()
-	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != "a new request" {
+	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != askBody("a new request", msg) {
 		t.Fatalf("muse got %+v", reqs)
 	}
 }
@@ -470,7 +473,7 @@ func TestDotOutEmptyRequestFails(t *testing.T) {
 func TestDotOutRateLimitBacksOffAndKeepsTheLine(t *testing.T) {
 	r := newDotOutRig(t)
 	r.taught()
-	r.dotSays("@tincan ask muse check the calendar")
+	msg := r.dotSays("@tincan ask muse check the calendar")
 	r.b.detailErr, r.b.retryAfter = "rate_limited", 120
 	if d := r.tick(); d < 120*time.Second {
 		t.Fatalf("next tick in %s after a 429 with retry_after 120", d)
@@ -501,7 +504,7 @@ func TestDotOutRateLimitBacksOffAndKeepsTheLine(t *testing.T) {
 	if d := r.tick(); d != DefaultDotWatchInterval {
 		t.Fatalf("next tick in %s after a good read", d)
 	}
-	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != "check the calendar" {
+	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != askBody("check the calendar", msg) {
 		t.Fatalf("muse got %+v", reqs)
 	}
 }
@@ -782,10 +785,10 @@ func TestDotOutAskIsNotResentWhenItsRecordIsNotSaved(t *testing.T) {
 // before asking, or the request failed before the relay got it) is asked
 // once on a later tick, and the dot is not told delivery is uncertain.
 func TestDotOutAskThatNeverReachedTheRelayIsAskedOnce(t *testing.T) {
-	check := func(t *testing.T, r *dotOutRig, f *askFault, wantAsks int) {
+	check := func(t *testing.T, r *dotOutRig, f *askFault, msg string, wantAsks int) {
 		t.Helper()
 		reqs := r.museInbox()
-		if len(reqs) != 1 || reqs[0].Body != "check the calendar\nand the weekend" {
+		if len(reqs) != 1 || reqs[0].Body != askBody("check the calendar\nand the weekend", msg) {
 			t.Fatalf("muse got %+v", reqs)
 		}
 		r.tick()
@@ -817,14 +820,14 @@ func TestDotOutAskThatNeverReachedTheRelayIsAskedOnce(t *testing.T) {
 		r.restart()
 		r.useFault(f)
 		r.tick()
-		check(t, r, f, 1)
+		check(t, r, f, id, 1)
 	})
 	t.Run("request failed before the relay", func(t *testing.T) {
 		r := newDotOutRig(t)
 		f := r.faultyRelay()
 		r.taught()
 		f.mode = "dropped"
-		r.dotSays("@tincan ask muse check the calendar\nand the weekend")
+		id := r.dotSays("@tincan ask muse check the calendar\nand the weekend")
 		r.tick()
 		if reqs := r.museInbox(); len(reqs) != 0 {
 			t.Fatalf("muse got %+v", reqs)
@@ -833,8 +836,85 @@ func TestDotOutAskThatNeverReachedTheRelayIsAskedOnce(t *testing.T) {
 			t.Fatalf("no sending record")
 		}
 		r.tick()
-		check(t, r, f, 2)
+		check(t, r, f, id, 2)
 	})
+}
+
+// askBody is the body dot-web sends for the request text of the dot
+// message msg in the rig's thread: the text, then a line with the ask's
+// unique reference.
+func askBody(text, msg string) string {
+	sum := sha256.Sum256([]byte(dotThread + ":" + msg))
+	return text + "\n\n(from the owner's dot, ref dotask" + hex.EncodeToString(sum[:])[:16] + ")"
+}
+
+// An ask whose response was lost is found on the relay by its reference,
+// even when more requests than one search returns, newer and sharing its
+// words, were sent since: it is adopted, never asked twice.
+func TestDotOutAskIsFoundByItsRefAmongManyAlike(t *testing.T) {
+	r := newDotOutRig(t)
+	r.mesh.Server.SetPreparer(policy.New(r.mesh.Store, policy.Config{PerMinute: 1000}))
+	me := r.agent.Relay
+	f := r.faultyRelay()
+	r.taught()
+	f.mode = "lost"
+	msg := r.dotSays("@tincan ask muse check the calendar")
+	r.tick()
+	for i := range 60 {
+		if _, err := me.Ask(t.Context(), "muse", fmt.Sprintf("check the calendar for week %d", i), "", 0, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.restart()
+	r.useFault(f)
+	r.tick()
+	r.tick()
+	if f.asks != 1 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+	want := askBody("check the calendar", msg)
+	var mine []envelope.Request
+	for _, q := range r.museInbox() {
+		if strings.HasPrefix(q.Body, "check the calendar\n") {
+			mine = append(mine, q)
+		}
+	}
+	if len(mine) != 1 || mine[0].Body != want {
+		t.Fatalf("muse got %+v, want one %q", mine, want)
+	}
+	if rec := r.record(dotSent); rec == nil || rec.Request != mine[0].ID || rec.Ask != "" {
+		t.Fatalf("record %+v, want sent as %s", rec, mine[0].ID)
+	}
+}
+
+// A record left sending by an older build has no reference: it is still
+// found on the relay by its words and adopted.
+func TestDotOutOldSendingRecordIsFoundByItsWords(t *testing.T) {
+	r := newDotOutRig(t)
+	me := r.agent.Relay
+	f := r.faultyRelay()
+	r.taught()
+	id := r.dotSays("@tincan ask muse check the calendar")
+	res, err := me.Ask(t.Context(), "muse", "check the calendar", "", 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.edit(func(th *dotOutThread) {
+		th.Messages[id] = &dotOutRecord{Status: dotSending, Target: "muse", Line: "@tincan ask muse check the calendar",
+			Ask: "check the calendar", At: time.Now().UTC().Add(-time.Second)}
+	})
+	r.restart()
+	r.useFault(f)
+	r.tick()
+	if f.asks != 0 {
+		t.Fatalf("%d asks sent", f.asks)
+	}
+	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].ID != res.Request.ID {
+		t.Fatalf("muse got %+v", reqs)
+	}
+	if rec := r.record(dotSent); rec == nil || rec.Request != res.Request.ID {
+		t.Fatalf("record %+v, want sent as %s", rec, res.Request.ID)
+	}
 }
 
 // While the relay cannot be searched, an ask left sending is neither asked
@@ -1051,14 +1131,14 @@ func TestDotOutRelayRateLimitKeepsTheLine(t *testing.T) {
 	f := r.faultyRelay()
 	r.taught()
 	f.mode = "429"
-	r.dotSays("@tincan ask muse check the calendar")
+	msg := r.dotSays("@tincan ask muse check the calendar")
 	r.tick()
 	if reqs := r.museInbox(); len(reqs) != 0 {
 		t.Fatalf("muse got %+v", reqs)
 	}
 	r.tick()
 	r.tick()
-	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != "check the calendar" {
+	if reqs := r.museInbox(); len(reqs) != 1 || reqs[0].Body != askBody("check the calendar", msg) {
 		t.Fatalf("muse got %+v", reqs)
 	}
 	if f.asks != 2 {

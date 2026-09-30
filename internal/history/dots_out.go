@@ -9,6 +9,8 @@ package history
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -204,6 +206,27 @@ type dotOutRecord struct {
 	// Ask is the request text of an ask still sending, kept so a later tick
 	// can look for it on the relay and ask it when the relay never got it.
 	Ask string `json:"ask,omitempty"`
+	// Ref is the ask's unique reference (dotAskRef), sent on the last line
+	// of its body so a later tick finds exactly this ask on the relay.
+	// Records from older builds have none and are looked for by their words.
+	Ref string `json:"ref,omitempty"`
+}
+
+// dotAskRef is the reference of the ask read from dot message msg in
+// thread: one alphanumeric word, which the relay's search indexes as a
+// single term, so searching it finds this ask alone.
+func dotAskRef(thread, msg string) string {
+	sum := sha256.Sum256([]byte(thread + ":" + msg))
+	return "dotask" + hex.EncodeToString(sum[:])[:16]
+}
+
+// dotAskBody is the body sent for an ask: the request text and, when the
+// ask has a reference, a last line carrying it.
+func dotAskBody(text, ref string) string {
+	if ref == "" {
+		return text
+	}
+	return text + "\n\n(from the owner's dot, ref " + ref + ")"
 }
 
 func (st *dotOutState) thread(id string) *dotOutThread {
@@ -465,7 +488,8 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		}
 		rec := w.refuseAsk(ask, now)
 		if rec == nil {
-			rec = &dotOutRecord{Status: dotSending, Target: ask.target, Line: ask.line, Ask: ask.text, At: now}
+			rec = &dotOutRecord{Status: dotSending, Target: ask.target, Line: ask.line, Ask: ask.text,
+				Ref: dotAskRef(thread, m.ID), At: now}
 			th.Messages[m.ID] = rec
 			if err := w.saveOut(st); err != nil {
 				delete(th.Messages, m.ID)
@@ -494,7 +518,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		if r.Done || r.Typing || sending[id] || r.Status != dotSending {
 			continue
 		}
-		if w.reconcileAsk(ctx, th, r, now) {
+		if w.reconcileAsk(ctx, th, dotAskRef(thread, id), r, now) {
 			if err := w.saveOut(st); err != nil {
 				return err
 			}
@@ -598,15 +622,15 @@ func (w *WebAgent) refuseAsk(ask dotAsk, now time.Time) *dotOutRecord {
 	return &dotOutRecord{Status: dotFailed, Target: target, Line: ask.line, Reason: reason, At: now}
 }
 
-// startAsk asks ask's target for the dot and updates rec, which is saved
-// as sending: sent with the request id, or failed when the relay refused
+// startAsk asks ask's target for the dot, with rec.Ref on the body's last
+// line, and updates rec, which is saved as sending: sent with the request id, or failed when the relay refused
 // it. On any other error rec stays sending, since the relay may have
 // taken the ask; a later tick looks for it there (reconcileAsk). It
 // returns false only when the ask provably was not taken (a 429), so it
 // may be asked on a later tick.
 func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) bool {
 	target := ask.target
-	res, err := w.Relay.Ask(ctx, target, ask.text, "", 0, false)
+	res, err := w.Relay.Ask(ctx, target, dotAskBody(ask.text, rec.Ref), "", 0, false)
 	var ae *client.APIError
 	switch {
 	case errors.As(err, &ae) && ae.Code == http.StatusTooManyRequests:
@@ -626,12 +650,12 @@ func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) 
 }
 
 // reconcileAsk settles r, an ask left sending by an earlier tick, against
-// the relay: found there (sent by this agent to r.Target with r.Ask as its
-// body, created after r was saved), r becomes sent with that request;
-// provably absent, it is asked now. While the relay cannot be searched r
-// is left sending, until dotOutReconcileFor after r was saved, when the dot
-// is told delivery is uncertain. It reports whether r changed.
-func (w *WebAgent) reconcileAsk(ctx context.Context, th *dotOutThread, r *dotOutRecord, now time.Time) bool {
+// the relay: found there (see findAsk), r becomes sent with that request;
+// provably absent, it is asked now, with ref when r has no reference yet.
+// While the relay cannot be searched r is left sending, until
+// dotOutReconcileFor after r was saved, when the dot is told delivery is
+// uncertain. It reports whether r changed.
+func (w *WebAgent) reconcileAsk(ctx context.Context, th *dotOutThread, ref string, r *dotOutRecord, now time.Time) bool {
 	if r.Ask == "" {
 		// Left by an older build, which kept no request text to look for.
 		w.uncertainAsk(r)
@@ -652,6 +676,9 @@ func (w *WebAgent) reconcileAsk(ctx context.Context, th *dotOutThread, r *dotOut
 		return true
 	}
 	w.logf("outbound: the ask %q never reached the relay; asking now", r.Line)
+	if r.Ref == "" {
+		r.Ref = ref
+	}
 	w.startAsk(ctx, dotAsk{target: r.Target, text: r.Ask, line: r.Line}, r)
 	return true
 }
@@ -665,15 +692,23 @@ func (w *WebAgent) uncertainAsk(r *dotOutRecord) {
 
 // findAsk looks on the relay for the request r asked: one this agent sent
 // to r.Target, created no earlier than r was saved (less webClockSkew),
-// whose body is r.Ask, and not already held by another record. It returns
-// "" when the relay has no such request, and an error when the relay could
-// not be searched or a candidate could not be read.
+// not already held by another record, whose body carries r.Ref. The
+// reference is unique, so a search for it alone is decisive. A record
+// without one (from an older build) is searched by its first words and
+// matched by a body equal to r.Ask. It returns "" when the relay has no
+// such request, and an error when the relay could not be searched or a
+// candidate could not be read.
 func (w *WebAgent) findAsk(ctx context.Context, th *dotOutThread, r *dotOutRecord) (string, error) {
-	query := dotSearchQuery(r.Ask)
+	query, limit := r.Ref, 5
+	matches := func(body string) bool { return strings.Contains(body, r.Ref) }
+	if r.Ref == "" {
+		query, limit = dotSearchQuery(r.Ask), 50
+		matches = func(body string) bool { return strings.TrimSpace(body) == strings.TrimSpace(r.Ask) }
+	}
 	if query == "" {
 		return "", errors.New("the request has no words to search for")
 	}
-	hits, err := w.Relay.Search(ctx, query, 50)
+	hits, err := w.Relay.Search(ctx, query, limit)
 	if err != nil {
 		return "", err
 	}
@@ -695,7 +730,7 @@ func (w *WebAgent) findAsk(ctx context.Context, th *dotOutThread, r *dotOutRecor
 		case err != nil:
 			return "", err
 		}
-		if res.Request.From == w.Name && res.Request.To == r.Target && strings.TrimSpace(res.Request.Body) == strings.TrimSpace(r.Ask) {
+		if res.Request.From == w.Name && res.Request.To == r.Target && matches(res.Request.Body) {
 			return h.RequestID, nil
 		}
 	}

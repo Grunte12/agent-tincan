@@ -291,7 +291,7 @@ While it runs, `dot-web` reads the DM every 30 seconds when idle (backing off on
 @tincan ask muse check the calendar for Friday
 ```
 
-Each such message is asked once, even across restarts. `@tincan` lines already in the DM when `dot-web` first reads it are treated as history and not asked. When the answer arrives, `dot-web` types it into the DM:
+The teammate gets that request with one more line at the end, `(from the owner's dot, ref dotask<16 hex characters>)`. The reference is unique to the dot message, so if `dot-web` stops or loses the relay's response mid-ask, it finds that exact ask on the relay by searching for the reference instead of asking again. Each such message is asked once, even across restarts. `@tincan` lines already in the DM when `dot-web` first reads it are treated as history and not asked. When the answer arrives, `dot-web` types it into the DM:
 
 ```
 [tincan-reply from muse]
