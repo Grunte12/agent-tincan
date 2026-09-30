@@ -1411,16 +1411,22 @@ const DOT_BOT = 'dot-acct';
 // dotFetch answers the session, the dot record, the room and its feed.
 // The feed holds an old exchange plus, for each message a dots page in
 // fc took, an owner message (after appearAfter feed reads, unless never).
-// Every feed read is counted.
+// Every feed read is counted. paused may be a function of the dot record
+// read's number (1 for the first), for a dot paused partway through.
 function dotFetch(fc, { paused = false, never = false, appearAfter = 1, echo = (t) => t } = {}) {
   const calls = [];
   let feedReads = 0;
+  let recordReads = 0;
   const fresh = new Map();
   const fn = async (url) => {
     const u = String(url);
     calls.push(u);
     if (u === 'https://chatgpt.com/api/auth/session') return jsonResponse({ accessToken: 'tok' });
-    if (u === `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`) return jsonResponse({ id: 't1', messaging_room_id: DOT_ROOM, is_paused: paused, status: paused ? 'paused' : 'active' });
+    if (u === `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`) {
+      recordReads++;
+      const p = typeof paused === 'function' ? paused(recordReads) === true : paused;
+      return jsonResponse({ id: 't1', messaging_room_id: DOT_ROOM, is_paused: p, status: p ? 'paused' : 'active' });
+    }
     if (u === `https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}`) return jsonResponse({ id: DOT_ROOM, type: 'DM', creator_account_user_id: DOT_OWNER, members: [] });
     if (u.startsWith(`https://chatgpt.com/backend-api/messaging/rooms/${DOT_ROOM}/messages?limit=`)) {
       feedReads++;
@@ -1533,6 +1539,25 @@ test('dots.send refuses a paused dot before opening a tab', async () => {
   await assert.rejects(sender(fc).send('dots', { message: 'x' }), (e) => e.code === 'bad_request');
   await assert.rejects(sender(fc).send('dots', { message: 'x', conversation_id: DOT_THREAD }), (e) => e.code === 'internal');
   assert.equal(fc.log.created.length, 0);
+});
+
+// The early check runs before the send joins the site's queue; a dot
+// paused while the send waited or its tab loaded is caught by the recheck
+// in the queued send, before anything is typed or clicked.
+test('dots.send rechecks pause in the queued send: a dot paused after the early check gets nothing', async () => {
+  for (const pausedFrom of [2, 3]) {
+    let page;
+    const fc = fakeChrome((url) => (page = dotSite(url)));
+    const r = createRunner({ fetch: dotFetch(fc, { paused: (n) => n >= pausedFrom }), sender: sender(fc) });
+    let caught;
+    await assert.rejects(r.run('dots.send', { message: 'x', conversation_id: DOT_THREAD }, () => {}), (e) => ((caught = e), e.code === 'paused'));
+    assert.notEqual(errorFrame(caught).error.clicked, true, `paused from read ${pausedFrom}: not marked as maybe sent`);
+    assert.equal(fc.log.created.length, 1, 'the early check passed, so the tab opened');
+    assert.deepEqual(page.submitted, [], `paused from read ${pausedFrom}: nothing sent`);
+    assert.equal(fc.log.scripts.filter((x) => x.func === pageSubmit).length, 0, `paused from read ${pausedFrom}: no click`);
+    if (pausedFrom === 2) assert.equal(fc.log.scripts.filter((x) => x.func === pageFill).length, 0, 'paused before the fill: nothing typed');
+    assert.deepEqual(fc.log.removed, [100], 'its own tab closed');
+  }
 });
 
 test('dots.close closes only the tab its send opened', async () => {

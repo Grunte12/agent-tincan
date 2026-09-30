@@ -849,11 +849,26 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
 
   // dotRoom reads the dot record for thread and its room: the room id,
   // the owner (the room's creator) and whether the dot is paused.
-  async function dotRoom(auth, thread) {
+  async function dotRecord(auth, thread) {
     const rec = await getJSON(`${CHATGPT}/backend-api/tbo/by-thread/${encodeURIComponent(thread)}`, auth, true);
     if (!isPlainObject(rec) || typeof rec.messaging_room_id !== 'string' || !DOT_ROOM_RE.test(rec.messaging_room_id) || typeof rec.is_paused !== 'boolean') {
       throw new OpError('endpoint_changed', 'unexpected dot record');
     }
+    return rec;
+  }
+
+  const dotPausedErr = () => new OpError('paused', 'the dot is paused; resume it in ChatGPT, then ask again');
+
+  // dotNotPaused reads the dot record again and fails paused if the dot
+  // is paused now, or endpoint_changed if its room is no longer room.
+  async function dotNotPaused(auth, thread, room) {
+    const rec = await dotRecord(auth, thread);
+    if (rec.messaging_room_id !== room) throw new OpError('endpoint_changed', 'the dot record names another room');
+    if (rec.is_paused) throw dotPausedErr();
+  }
+
+  async function dotRoom(auth, thread) {
+    const rec = await dotRecord(auth, thread);
     const room = await getJSON(`${CHATGPT}/backend-api/messaging/rooms/${rec.messaging_room_id}`, auth, true);
     if (!isPlainObject(room) || typeof room.creator_account_user_id !== 'string' || room.creator_account_user_id === '') {
       throw new OpError('endpoint_changed', 'unexpected room answer');
@@ -866,16 +881,24 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return dotItems(await getJSON(`${CHATGPT}/backend-api/messaging/rooms/${room}/messages?limit=${limit}`, auth, true));
   }
 
-  // dotHooks are the sender's feed hooks for one send of message: before
-  // notes the feed's message ids right before the click; confirm returns
+  // dotHooks are the sender's feed hooks for one send of message into
+  // thread: ready, called in the queued send right before the fill, and
+  // before, right before each click, both read the dot record again and
+  // fail paused if the dot was paused since dots.send checked it (the send
+  // may have waited in the site's queue meanwhile); before also notes the
+  // feed's message ids; confirm returns
   // the id of the first owner message not among them whose text is the
   // message and whose time is not before the click (less DOT_SKEW_MS),
   // or null while there is none.
-  function dotHooks(auth, d, message) {
+  function dotHooks(auth, thread, d, message) {
     let seen = null;
     let from = 0;
     return {
+      async ready() {
+        await dotNotPaused(auth, thread, d.room);
+      },
       async before() {
+        await dotNotPaused(auth, thread, d.room);
         seen = new Set((await dotFeed(auth, d.room, DOT_CONFIRM_LIMIT)).map((m) => m.id));
         from = Date.now() - DOT_SKEW_MS;
       },
@@ -1249,14 +1272,15 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       return { thread: a.id, room: d.room, owner: d.owner, paused: d.paused, items };
     },
     // A dot has one DM, so the send needs its thread and has no new chat.
-    // A paused dot is refused before any tab opens.
+    // A paused dot is refused before any tab opens, and again in the queued
+    // send before anything is typed or clicked (dotHooks).
     async 'dots.send'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       if (a.conversation_id === undefined || a.new_chat === true) throw bad('a dot send needs its thread id as conversation_id');
       const auth = await chatgptAuth();
       const d = await dotRoom(auth, a.conversation_id);
-      if (d.paused) throw new OpError('paused', 'the dot is paused; resume it in ChatGPT, then ask again');
-      return sender.send('dots', a, dotHooks(auth, d, a.message));
+      if (d.paused) throw dotPausedErr();
+      return sender.send('dots', a, dotHooks(auth, a.conversation_id, d, a.message));
     },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {

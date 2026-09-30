@@ -34,7 +34,8 @@
 // An OpenAI dot's DM (https://chatgpt.com/dots/<thread>) is the one
 // exception to step 3: its address never changes, so the send is
 // confirmed by the room feed instead. ops.js hands the sender two hooks:
-// before, called right before the click (it notes the feed as it is), and
+// ready (optional), called right before the fill, before, called right
+// before the click (it notes the feed as it is), and
 // confirm, polled after it every feedPollMs for at most feedWaitMs until
 // it names the new owner message. A dots send needs its thread id, and
 // never types over text already in the composer (keepDraft).
@@ -830,6 +831,9 @@ export function createSender({
           await onSite(tab.id, cfg);
         }
       }
+      // A feed-confirmed site's ready hook runs its last checks (a dot
+      // paused while this send waited) before anything is typed.
+      if (feed && typeof hooks.ready === 'function') await hooks.ready();
       const fill = await inject(tab.id, pageFill, [sel, args.message]);
       if (fill && fill.code === 'composer_busy') throw busy();
       if (!fill || fill.ok !== true) {

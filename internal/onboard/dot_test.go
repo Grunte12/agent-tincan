@@ -60,6 +60,24 @@ func TestDotWebBlock(t *testing.T) {
 			t.Errorf("dot-web setup missing %q:\n%s", want, setup)
 		}
 	}
+	// install and serve refuse --site dots without --thread, so no command the
+	// block prints may leave it off.
+	for _, cmd := range []string{"web install --site dots", "web serve --site dots"} {
+		for rest := setup; ; {
+			i := strings.Index(rest, cmd)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(cmd):]
+			line, _, _ := strings.Cut(rest, "\n")
+			if end := strings.IndexAny(line, ";)."); end >= 0 {
+				line = line[:end]
+			}
+			if !strings.Contains(line, "--thread <id>") {
+				t.Errorf("dot-web setup prints %q without --thread: %q\n%s", cmd, cmd+line, setup)
+			}
+		}
+	}
 	// A dot has one DM: the other web agents' threading lines do not apply.
 	txt := blockText(a)
 	for _, bad := range []string{`"new chat" starts`, "heartbeat", "[tincan-auto]", "tincan inbox", "checksums.txt", "new join code", `"method": "webhook"`} {
