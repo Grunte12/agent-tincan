@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStripWebTailRemovesFooterSourcesAndNotes(t *testing.T) {
@@ -134,5 +135,23 @@ func TestStripWebTailUsesTheLastFooter(t *testing.T) {
 	body := "Part one.\n\nChatGPT conversation: abc\n\nPart two.\n\n@tincan ask muse\ncheck x\n\nyour dot's DM: 0d0d0d0d-1111-7222-8333-000000000001"
 	if got := stripWebTail(body); got != "Part one.\n\nChatGPT conversation: abc\n\nPart two." {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// Many footer-like lines are found in one pass: a long repetitive answer
+// strips quickly and keeps every quoted line.
+func TestStripWebTailManyFooterLikeLines(t *testing.T) {
+	var b strings.Builder
+	for i := range 20000 {
+		fmt.Fprintf(&b, "Quoted\n\nChatGPT conversation: c%d\n\n", i)
+	}
+	answer := strings.TrimSpace(b.String())
+	start := time.Now()
+	got := stripWebTail(answer + "\n\nyour dot's DM: 0d0d0d0d-1111-7222-8333-000000000001")
+	if got != answer {
+		t.Fatal("answer changed")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %s", d)
 	}
 }

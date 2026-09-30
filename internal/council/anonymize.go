@@ -14,10 +14,6 @@ import (
 // The footer and notes name the site, so reviewers get the answer text
 // only.
 var (
-	webFooter = regexp.MustCompile(`\n\n[^\n]{1,40} conversation: \S+(?:\n[^\n]*)*$`)
-	// dmFooter is tried only when webFooter does not match, so a site
-	// reply that mentions someone's DM strips exactly as before.
-	dmFooter = regexp.MustCompile(`\n\n[^\n]{1,40}'s DM: \S+(?:\n[^\n]*)*$`)
 	webNotes = []*regexp.Regexp{
 		regexp.MustCompile(`^Sources:\n`),
 		regexp.MustCompile(`^\(reply truncated: showing \d+ of \d+ bytes\)$`),
@@ -33,9 +29,9 @@ var (
 func stripWebTail(body string) string {
 	// The real footer is the last one: an answer may quote a line that
 	// looks like either kind earlier on.
-	loc := lastFooter(webFooter, body)
+	loc := lastFooter(webFooterLine, body)
 	dot := false
-	if dm := lastFooter(dmFooter, body); dm != nil && (loc == nil || dm[0] > loc[0]) {
+	if dm := lastFooter(dmFooterLine, body); dm != nil && (loc == nil || dm[0] > loc[0]) {
 		loc, dot = dm, true
 	}
 	if loc == nil {
@@ -59,19 +55,30 @@ func stripWebTail(body string) string {
 // dots_out.go parseDotAsk).
 var dotAskLine = regexp.MustCompile(`(?i)^[*_\x60\s]*@tincan\s+ask\b`)
 
-// lastFooter is the latest start at which re matches through the end of
-// body (re is anchored at $ and swallows the lines after its start).
-func lastFooter(re *regexp.Regexp, body string) []int {
-	var last []int
-	for from := 0; from < len(body); {
-		loc := re.FindStringIndex(body[from:])
-		if loc == nil {
-			break
+// Footer lines: a footer is one of these lines after a blank line, with
+// anything after it (image lines) running to the end.
+var (
+	webFooterLine = regexp.MustCompile(`^[^\n]{1,40} conversation: \S+$`)
+	dmFooterLine  = regexp.MustCompile(`^[^\n]{1,40}'s DM: \S+$`)
+)
+
+// lastFooter is the start (at its preceding blank line) of the last line
+// in body that line matches and that follows a blank line, found in one
+// backward pass over the lines.
+func lastFooter(line *regexp.Regexp, body string) []int {
+	end := len(body)
+	for end > 0 {
+		i := strings.LastIndexByte(body[:end], '\n')
+		if i < 0 {
+			return nil
 		}
-		last = []int{from + loc[0], len(body)}
-		from += loc[0] + 1
+		// body[i+1:end] is one line; it must follow "\n\n".
+		if i > 0 && body[i-1] == '\n' && line.MatchString(body[i+1:end]) {
+			return []int{i - 1, len(body)}
+		}
+		end = i
 	}
-	return last
+	return nil
 }
 
 func isWebNote(p string) bool {
