@@ -548,9 +548,13 @@ func TestDotOutWaitsForAnInboundRequest(t *testing.T) {
 	if err != nil || res.Status != envelope.StatusAnswered || !strings.HasPrefix(res.Reply.Body, "Nothing today.") {
 		t.Fatalf("inbound %+v %v", res, err)
 	}
-	got := r.typed()
-	if len(got) != 2 || got[1] != "what is on today?" {
-		t.Fatalf("typed during the inbound wait: %q", got)
+	// A reply typed during the wait would have orphaned the inbound
+	// request, so the answer above proves the watcher held off. A tick
+	// that lands after the wait released the lock, before this loop saw
+	// it end, may already have typed muse's reply; either way it is typed
+	// after the inbound message, exactly once.
+	if got := r.typed(); len(got) < 2 || got[1] != "what is on today?" {
+		t.Fatalf("typed %q", got)
 	}
 	r.tick()
 	if got := r.typed(); len(got) != 3 || !strings.HasPrefix(got[2], "[tincan-reply from muse]\n") {

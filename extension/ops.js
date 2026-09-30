@@ -177,6 +177,9 @@ const COPILOT_MAX_SOURCES = 50;
 export const DOT_FEED_LIMIT = 32;
 const DOT_CONFIRM_LIMIT = 20;
 const DOT_SKEW_MS = 2 * 60 * 1000;
+// DOT_ROOM_TTL_MS is how long dots.detail reuses a thread's dot record and
+// room (so its paused flag is at most this stale; dots.send reads fresh).
+const DOT_ROOM_TTL_MS = 5 * 60 * 1000;
 // DOT_ROOM_RE is a messaging room id as it goes into a URL path.
 const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -657,6 +660,9 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // geminiReq is batchexecute's _reqid: a counter, as the app keeps one.
   let geminiReq = Math.floor(Math.random() * 9000) + 1000;
   let reloadPending = false;
+  // dotRooms caches dots.detail's dotRoom answer per thread:
+  // { room, owner, paused, at }.
+  const dotRooms = new Map();
 
   // scheduleReload reloads once the sender is idle, or at the cap after
   // closing its kept tabs. Timers are looked up at call time so tests can
@@ -1222,10 +1228,25 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (a.conversation_id !== undefined) copilotId(a.conversation_id);
       return sender.send('copilot', a);
     },
+    // The dot record and room are read once per DOT_ROOM_TTL_MS per
+    // thread; later reads fetch only the feed. A feed error that suggests
+    // the room changed drops the cached pair.
     async 'dots.detail'(a) {
       const auth = await chatgptAuth();
-      const d = await dotRoom(auth, a.id);
-      return { thread: a.id, room: d.room, owner: d.owner, paused: d.paused, items: await dotFeed(auth, d.room, DOT_FEED_LIMIT) };
+      let d = dotRooms.get(a.id);
+      if (!d || Date.now() - d.at >= DOT_ROOM_TTL_MS) {
+        dotRooms.delete(a.id);
+        d = { ...(await dotRoom(auth, a.id)), at: Date.now() };
+        dotRooms.set(a.id, d);
+      }
+      let items;
+      try {
+        items = await dotFeed(auth, d.room, DOT_FEED_LIMIT);
+      } catch (e) {
+        if (e instanceof OpError && (e.code === 'not_found' || e.code === 'endpoint_changed' || (e.code === 'http_error' && /^HTTP 422 /.test(e.message)))) dotRooms.delete(a.id);
+        throw e;
+      }
+      return { thread: a.id, room: d.room, owner: d.owner, paused: d.paused, items };
     },
     // A dot has one DM, so the send needs its thread and has no new chat.
     // A paused dot is refused before any tab opens.

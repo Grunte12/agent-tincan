@@ -191,8 +191,7 @@ type dotWatch struct {
 // watching reports whether the outbound watcher runs: a one-thread site
 // with an outbound state file.
 func (w *WebAgent) watching() bool {
-	s := w.site()
-	return w.OutPath != "" && s != nil && s.oneThread
+	return w.OutPath != "" && w.oneThread()
 }
 
 func (w *WebAgent) watchInterval() time.Duration {
@@ -274,7 +273,8 @@ func (w *WebAgent) watchBackoff(err error) time.Duration {
 
 // dotWork acts on one read of the DM under the send lock. An error stops
 // the tick (the DM cannot be typed into now); the state is saved as it
-// goes, so nothing done is lost.
+// goes, so nothing done is lost. dirty marks changes not saved yet (a
+// baseline record, a pruned record), saved once at the end of the tick.
 func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) error {
 	st := w.loadOut()
 	th := st.thread(thread)
@@ -293,6 +293,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 			return err
 		}
 	}
+	dirty := false
 	typed := 0
 	say := func(text string) (bool, error) {
 		id, err := w.typeDM(ctx, thread, text)
@@ -336,6 +337,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		}
 		if !m.At.IsZero() && m.At.Before(th.Started.Add(-webClockSkew)) {
 			th.Messages[m.ID] = &dotOutRecord{Status: dotBaseline, At: now, Done: true}
+			dirty = true
 			continue
 		}
 		rec := w.startAsk(ctx, ask)
@@ -389,7 +391,12 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 			w.settleAsk(ctx, r, res)
 		}
 	}
-	w.pruneOut(th, feed, now)
+	if w.pruneOut(th, feed, now) {
+		dirty = true
+	}
+	if !dirty {
+		return nil
+	}
 	return w.saveOut(st)
 }
 
@@ -431,21 +438,43 @@ func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk) *dotOutRecord {
 // sendRefused checks target against the send allowlist ("" when it may
 // be asked). No allowlist source means any joined agent.
 func (w *WebAgent) sendRefused(target string) string {
+	return w.loadSendAllowlist().refused(target)
+}
+
+// sendAllowlist is one read of the send allowlist. open: there is no
+// allowlist source, so any joined agent may be asked.
+type sendAllowlist struct {
+	open    bool
+	allowed []string
+	err     error
+	path    string
+}
+
+// loadSendAllowlist reads the send allowlist once.
+func (w *WebAgent) loadSendAllowlist() sendAllowlist {
 	if w.SendAllowlist == nil {
-		return ""
+		return sendAllowlist{open: true}
 	}
 	path := w.SendAllowlistPath
 	if path == "" {
 		path = "the send allowlist"
 	}
 	allowed, err := w.SendAllowlist()
-	if err != nil {
-		return fmt.Sprintf("the list of agents this dot may ask (%s) could not be read, so no agent is asked until the owner fixes it", path)
-	}
-	if slices.Contains(allowed, AllowAll) || slices.Contains(allowed, target) {
+	return sendAllowlist{allowed: allowed, err: err, path: path}
+}
+
+// refused checks target against l ("" when it may be asked). An
+// unreadable allowlist refuses every target.
+func (l sendAllowlist) refused(target string) string {
+	switch {
+	case l.open:
+		return ""
+	case l.err != nil:
+		return fmt.Sprintf("the list of agents this dot may ask (%s) could not be read, so no agent is asked until the owner fixes it", l.path)
+	case slices.Contains(l.allowed, AllowAll) || slices.Contains(l.allowed, target):
 		return ""
 	}
-	return fmt.Sprintf("%s is not in %s, the list of agents this dot may ask", target, path)
+	return fmt.Sprintf("%s is not in %s, the list of agents this dot may ask", target, l.path)
 }
 
 // dotReplyFor is the message to type for r, and whether r is finished
@@ -494,11 +523,8 @@ func dotFailure(target, line, reason string) string {
 	if target != "" {
 		head = "[tincan-reply from " + target + "]"
 	}
-	return capBytes(fmt.Sprintf("%s failed: %s\n> %s", head, oneLine(reason), line), MaxSendMessage)
+	return capBytes(fmt.Sprintf("%s failed: %s\n> %s", head, oneLineText(reason), line), MaxSendMessage)
 }
-
-// oneLine puts s on one line.
-func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // dotReplyText is what the DM gets for a finished ask, and false while it
 // is not finished:
@@ -592,9 +618,10 @@ func (w *WebAgent) dotTeammates(ctx context.Context) []string {
 		w.logf("outbound: reading the roster for the setup message: %v", err)
 		return nil
 	}
+	allow := w.loadSendAllowlist()
 	var names []string
 	for _, a := range agents {
-		if a.Name == w.Name || w.sendRefused(a.Name) != "" {
+		if a.Name == w.Name || allow.refused(a.Name) != "" {
 			continue
 		}
 		names = append(names, a.Name)
@@ -605,15 +632,18 @@ func (w *WebAgent) dotTeammates(ctx context.Context) []string {
 
 // pruneOut drops finished records older than dotOutRetention whose
 // message has left the feed; the start time keeps such a message from
-// ever counting as new.
-func (w *WebAgent) pruneOut(th *dotOutThread, feed DotFeed, now time.Time) {
+// ever counting as new. It reports whether it dropped any.
+func (w *WebAgent) pruneOut(th *dotOutThread, feed DotFeed, now time.Time) bool {
 	inFeed := map[string]bool{}
 	for _, m := range feed.Messages {
 		inFeed[m.ID] = true
 	}
+	pruned := false
 	for id, r := range th.Messages {
 		if r.Done && !inFeed[id] && now.Sub(r.At) > dotOutRetention {
 			delete(th.Messages, id)
+			pruned = true
 		}
 	}
+	return pruned
 }

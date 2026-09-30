@@ -1285,6 +1285,27 @@ test('dots.detail: 401 or no token is not_logged_in, 429 is rate_limited with Re
   await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse({}, 404) })) }), 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'not_found');
 });
 
+test('dots.detail caches the dot record and room per thread; not_found clears the cache', async () => {
+  const routes = dotRoutes();
+  const f = fakeFetch(routes);
+  const r = createRunner({ fetch: f });
+  const first = await run(r, 'dots.detail', { id: DOT_THREAD });
+  assert.deepEqual(f.calls.map((c) => c.url), [SESSION, DOT_TBO, DOT_ROOM_URL, DOT_FEED]);
+  f.calls.length = 0;
+  const second = await run(r, 'dots.detail', { id: DOT_THREAD });
+  assert.deepEqual(f.calls.map((c) => c.url), [SESSION, DOT_FEED], 'a second read of the same thread fetches only the feed');
+  assert.deepEqual(second, first);
+  // The room is gone: the feed is not_found and the cache is dropped.
+  routes[DOT_FEED] = jsonResponse({}, 404);
+  f.calls.length = 0;
+  await assert.rejects(run(r, 'dots.detail', { id: DOT_THREAD }), (e) => e.code === 'not_found');
+  assert.deepEqual(f.calls.map((c) => c.url), [SESSION, DOT_FEED]);
+  routes[DOT_FEED] = dotRoutes()[DOT_FEED];
+  f.calls.length = 0;
+  assert.equal((await run(r, 'dots.detail', { id: DOT_THREAD }))[0].ok, true);
+  assert.deepEqual(f.calls.map((c) => c.url), [SESSION, DOT_TBO, DOT_ROOM_URL, DOT_FEED], 'the next read fetches the dot record and room again');
+});
+
 test('dots.send refuses a paused dot, or a send with no thread, before any tab opens', async () => {
   const sent = [];
   const sender = { send: async (site, a) => (sent.push([site, a]), { conversation_id: DOT_THREAD, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };

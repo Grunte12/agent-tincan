@@ -663,9 +663,9 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	switch {
 	case errors.Is(err, ErrPaused):
 		return "Nothing was sent: " + label + " is paused; unpause it in ChatGPT and ask again."
-	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrNotFound):
+	case w.oneThread() && errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("Nothing was sent: %s's thread %s was not found; check the --thread the %s agent runs with.", label, convID, w.Name)
-	case w.site() != nil && w.site().oneThread && errors.Is(err, ErrTimeout) && clickedNote(err, w.Site) != "":
+	case w.oneThread() && errors.Is(err, ErrTimeout) && clickedNote(err, w.Site) != "":
 		return fmt.Sprintf("Sorry, the message was sent to %s, but it did not show up in the conversation in time; ask for the reply later instead of sending it again.", label)
 	case errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("No %s conversation with id %s was found. Start a new one with \"new chat\" on the first line.", label, convID)
@@ -693,6 +693,9 @@ func clickedNote(err error, src Source) string {
 // (Handle fails those requests before anything reads it).
 func (w *WebAgent) site() *webSite { return siteFor(w.Site) }
 
+// oneThread reports whether the agent's site serves one fixed conversation.
+func (w *WebAgent) oneThread() bool { s := w.site(); return s != nil && s.oneThread }
+
 func (w *WebAgent) live() *live { return w.site().reader(w.Native, nil).live() }
 
 // closeTab asks the extension to close the tab the send left open for
@@ -714,7 +717,7 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 		return fmt.Sprintf("Sorry, %s is rate-limiting this account right now. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", siteLimiter(w.Site), label, convID)
 	}
 	switch {
-	case errors.Is(err, errOrphaned) && w.site() != nil && w.site().oneThread:
+	case errors.Is(err, errOrphaned) && w.oneThread():
 		return fmt.Sprintf("Sorry, another message was sent to %s (conversation %s) before it answered this one, so there is no reply to return.", label, convID)
 	case errors.Is(err, errOrphaned):
 		return fmt.Sprintf("Sorry, another message was sent in the %s conversation %s before this one was answered, so there is no reply to return.", label, convID)
@@ -726,7 +729,7 @@ func (w *WebAgent) waitFailure(err error, convID string) string {
 	if errors.As(err, &ue) && !errors.Is(err, ErrTimeout) {
 		return fmt.Sprintf("Sorry, %s. The message was sent to %s (conversation %s), but the reply could not be read.", ue.Error(), label, convID)
 	}
-	if w.site() != nil && w.site().oneThread {
+	if w.oneThread() {
 		return fmt.Sprintf("Sorry, %s did not answer in time. The message was sent to %s (conversation %s); ask for the reply later instead of sending it again.", label, label, convID)
 	}
 	return fmt.Sprintf("Sorry, %s did not finish answering in time. The message was sent; the conversation is %s.", label, convID)
