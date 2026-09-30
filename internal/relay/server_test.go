@@ -607,6 +607,18 @@ func TestRelayAcceptsGrokCLIKind(t *testing.T) {
 	}
 }
 
+// The council service's kind is one the relay accepts, on an invite and when
+// an admin sets it.
+func TestRelayAcceptsCouncilKind(t *testing.T) {
+	h := newHarness(t, Config{})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"council","kind":"council"}`, http.StatusOK, &inv)
+	h.do(strangerAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	if k := kinds(t, h); k["council"] != "council" {
+		t.Fatalf("kinds after join = %v", k)
+	}
+}
+
 // The local admin socket can set a kind too.
 func TestLocalAdminSocketCanSetKind(t *testing.T) {
 	h := newHarness(t, Config{})

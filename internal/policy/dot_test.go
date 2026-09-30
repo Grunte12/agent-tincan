@@ -7,16 +7,8 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
-	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
-
-func (f *fixture) agent(t *testing.T, name, kind string) {
-	t.Helper()
-	if err := f.st.PutAgent(t.Context(), identity.Agent{Name: name, NodeID: "n" + name, NodeName: name, JoinedAt: f.now, Kind: kind}); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func approvalFile(t *testing.T, body string) *Approval {
 	t.Helper()

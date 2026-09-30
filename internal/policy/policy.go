@@ -1,9 +1,9 @@
 // Package policy fills in a request's chain and stops runaway loops between
 // trusted agents. It never restricts who may ask whom: joined agents trust
-// each other. It enforces the hop limit, rejects cycles, and rate-limits
-// each sender as a backstop against an agent stuck starting new chains. It
-// also holds requests for the owner's approval: to targets the owner gates
-// in approval.json, and by default to the kinds in holdByDefault.
+// each other. It enforces the hop limit, rejects cycles, rate-limits each
+// sender as a backstop against an agent stuck starting new chains, and holds
+// asks for the owner's approval (approval.json, and by default asks to the
+// kinds in holdByDefault).
 package policy
 
 import (
@@ -29,20 +29,14 @@ var (
 	ErrRateLimited   = errors.New("too many requests from this agent; slow down")
 )
 
-// holdByDefault lists the target kinds whose inbound asks and notifies wait
-// for the owner's approval with no approval.json entry: dot-web types each
-// request into the owner's dot DM as the owner, and a dot acts through the
-// owner's connected apps, so nothing reaches it unapproved unless the
-// owner says so. An approval.json entry for the target replaces the
-// default. Replies and answers never pass through Prepare, so replies to
-// the dot's own asks are not held.
-var holdByDefault = map[string]bool{onboard.KindDotWeb: true}
+// DefaultHopLimit is the longest allowed chain when Config.HopLimit is 0.
+const DefaultHopLimit = 4
 
 // Config tunes the policy.
 type Config struct {
 	Approval      *Approval
 	UrgentPerHour int // max urgent requests per sender per hour; default 5
-	HopLimit      int // longest allowed chain; default 4
+	HopLimit      int // longest allowed chain; default DefaultHopLimit
 	PerMinute     int // max new requests per sender per minute; default 30
 	Now           func() time.Time
 }
@@ -51,6 +45,8 @@ type Config struct {
 type Policy struct {
 	st  *store.Store
 	cfg Config
+	// kindOf returns an agent's stored kind ("" for none or unknown).
+	kindOf func(ctx context.Context, name string) (string, error)
 
 	mu     sync.Mutex
 	sent   map[string][]time.Time
@@ -60,7 +56,7 @@ type Policy struct {
 // New builds a Policy over the relay store.
 func New(st *store.Store, cfg Config) *Policy {
 	if cfg.HopLimit == 0 {
-		cfg.HopLimit = 4
+		cfg.HopLimit = DefaultHopLimit
 	}
 	if cfg.PerMinute == 0 {
 		cfg.PerMinute = 30
@@ -71,7 +67,12 @@ func New(st *store.Store, cfg Config) *Policy {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Policy{st: st, cfg: cfg, sent: map[string][]time.Time{}, urgent: map[string][]time.Time{}}
+	p := &Policy{st: st, cfg: cfg, sent: map[string][]time.Time{}, urgent: map[string][]time.Time{}}
+	p.kindOf = func(ctx context.Context, name string) (string, error) {
+		a, _, err := st.AgentByName(ctx, name)
+		return a.Kind, err
+	}
+	return p
 }
 
 // Prepare sets TraceID, Hop, Chain, and ParentID, then applies the loop and
@@ -107,10 +108,7 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Kind == envelope.KindPing {
 		return nil
 	}
-	held, gated, err := p.cfg.Approval.check(req)
-	if !gated && err == nil {
-		held, err = p.heldByDefault(ctx, req)
-	}
+	held, err := p.cfg.Approval.Held(req)
 	if held {
 		req.Status = envelope.StatusHeld
 		return nil
@@ -119,21 +117,33 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		p.Refund(*req)
 		return reject(http.StatusServiceUnavailable, err)
 	}
+	p.holdByKind(ctx, req)
 	return nil
 }
 
-// heldByDefault holds req when its target's kind is in holdByDefault, with
-// the TTL and notify agent a gated hold would get.
-func (p *Policy) heldByDefault(ctx context.Context, req *envelope.Request) (bool, error) {
-	a, ok, err := p.st.AgentByName(ctx, req.To)
-	if err != nil {
-		return false, err
+// holdByDefault lists the target kinds whose asks and notifies wait for the
+// owner's approval even with no approval.json entry. A council sends the ask
+// on to every model vendor on the team. dot-web types each request into the
+// owner's dot DM as the owner, and a dot acts through the owner's connected
+// apps. Replies and answers never pass through Prepare, so replies to a
+// dot's own asks are not held.
+var holdByDefault = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true}
+
+// holdByKind holds a request to an agent whose kind is in holdByDefault and
+// that approval.json does not name, even with no approval.json at all. An
+// explicit entry wins, so {"from": []} holds nothing. A failed kind lookup
+// holds rather than delivers.
+func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request) {
+	entry, ttl, notify := p.cfg.Approval.holdDefaults(req.To)
+	if entry {
+		return
 	}
-	if !ok || !holdByDefault[a.Kind] {
-		return false, nil
+	if kind, err := p.kindOf(ctx, req.To); err == nil && !holdByDefault[kind] {
+		return
 	}
-	req.HoldTTL, req.ApprovalNotify = p.cfg.Approval.holdDefaults()
-	return true, nil
+	req.Status = envelope.StatusHeld
+	req.HoldTTL = ttl
+	req.ApprovalNotify = notify
 }
 
 // parent resolves the request's parent: the one it names, or else the

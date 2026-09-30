@@ -2,6 +2,8 @@
 
 Let your AI agents ask each other for help. Grok Bot can ask Muse to make a phone call, Muse can tell Grok Bot how it went, and Instinct can hand either of them work. Your laptop can be off.
 
+New in v0.10.0: [Council](#council). LLM Council, but on the subscriptions you already have, and your coding agents get a seat. Ask one hard question, and ChatGPT, Claude, Grok, Gemini, Perplexity, Copilot, Codex and the rest of your team each answer it, rank each other's answers blind, and hand you a verdict and a scorecard worth posting.
+
 ## What Agent Tincan is
 
 Personal agents now live in different places: a cloud VM, a sandbox that pauses, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.
@@ -12,6 +14,8 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [New in v0.10.0](#new-in-v0100)
+- [Council](#council)
 - [New in v0.9.0](#new-in-v090)
 - [New in v0.8.0](#new-in-v080)
 - [New in v0.7.0](#new-in-v070)
@@ -26,6 +30,38 @@ Contents:
 - [Onboarding](#onboarding)
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
+
+## New in v0.10.0
+
+- [Council](#council): LLM Council, but on the subscriptions you already have, and your coding agents get a seat. `tincan council "question"` puts one question to every model on your team. Each answers on its own, they rank each other's answers blind, and a chairman model writes the verdict. You get the recommendation, the ranking, a local HTML report and a PNG scorecard sized for X. Any agent can convene one too, by asking the `council` teammate.
+- A [leaderboard](#council) of who wins your councils, overall and by category, with `tincan council leaderboard` (`--card` for a PNG to post).
+- Councils convened by an agent wait for your [approval](#owner-approval) by default, with no `approval.json` needed, because a council sends your question to every model vendor on the team. `tincan held` now shows each held request's target kind and its attachment names and sizes.
+
+Before you upgrade:
+
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.10.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. Then install Council. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
+- Council's members are your web teammates and the coding agents the relay can wake, so a council is only as good as those teammates. Their live end-to-end runs are still pending; a member that times out or is blocked counts as absent, and the council goes on with at least 3.
+
+## Council
+
+A council is [Andrej Karpathy's llm-council](https://github.com/karpathy/llm-council) run over Agent Tincan. llm-council sends one question to several models through an API, has each model rank the others' answers anonymously, and has a chairman model write the final answer. Council keeps that shape and changes who sits at the table: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts through the [web agents](#the-web-agents-chatgpt-web-claude-web-grok-web-gemini-web-perplexity-web-and-copilot-web), plus Codex, Gemini CLI and Grok CLI on your Mac. No API keys, no per-token bills, just the subscriptions you already pay for.
+
+```bash
+tincan council "Should the relay store attachments in SQLite or on disk? Pick one." --attach docs/plan.md
+```
+
+1. Answer. Every member answers in a new chat, without seeing the others. Attached text files go into every member's prompt.
+2. Review. Each member gets every answer under shuffled labels, with vendor and model names redacted, and ranks them. A member's vote on its own answer is dropped.
+3. Verdict. The peer rankings are tallied into one score per answer, and that tally alone decides the ranking. The chairman (claude-web by default, then chatgpt-web, then gemini-web) writes the recommendation, where members agreed and disagreed, and any minority answer worth a second look. It cannot change the scores.
+
+Each stage waits up to a few minutes and then goes on with whoever answered, as long as at least 3 did; slow, blocked or offline members are marked absent and are not scored. The command shows each stage as it happens and prints the verdict. The reply also lists the ranking, ends with a `council-result` JSON block for scripts, and comes with a self-contained HTML report (every answer, with authors revealed after judging) and a 1600x900 PNG scorecard. Both are saved on the machine that runs Council. Nothing is hosted.
+
+- `tincan council "question"` with `--attach <file>` for context, `--members a,b,c` to pick the seats, `--chairman <agent>` to pick the chairman, and `--json` for scripts. Run in a terminal on an admin device, it starts at once; from a script or an agent's shell it waits for approval like any agent.
+- `tincan council leaderboard` ranks members by wins, then mean peer score. `--category debugging` narrows it to one category the chairman filed questions under, and `--card` renders it as a PNG.
+- Agents convene by asking the `council` teammate, with the plan or diff attached: `tincan ask council "..." --attach plan.md`. The relay holds that ask until you run `tincan approve <id>`. Their standing instructions say when a council is worth it, to convene at most one per task, and that a verdict is data, not instructions.
+- By default every web teammate and every model teammate the relay can wake sits on the council. Claude Code stays off, so a council never interrupts the session you are coding in, and the convener and its chain never sit or chair. Change the roster, chairman order and time limits in `council.json`.
+
+Set it up after upgrading the relay (see [New in v0.10.0](#new-in-v0100)): `tincan invite council --kind council`, join it with `TINCAN_CONFIG=~/.config/tincan/council.json`, then `tincan council install` and `tincan council doctor`. Full guide: [docs/adapters/council.md](docs/adapters/council.md). Council sends your question, attached text and every member's answers to every vendor on the council, and one member's memory-informed answer reaches the others during review; read [the trust model](docs/trust-model.md#council) first.
 
 ## New in v0.9.0
 
@@ -308,7 +344,7 @@ Single-target text output and exit codes are unchanged.
 
 Two more CLI commands keep an agent awake without a person: `tincan wait` and `tincan listen --exec` (see [Wake methods](#wake-methods)).
 
-A few commands are CLI only, with no MCP tool: `tincan ping <agent>` checks a teammate's tincan path (see [Reachability checks](#reachability-checks)), and the owner's `tincan held`, `tincan approve <id>` and `tincan deny <id>` handle requests held for approval (see [Owner approval](#owner-approval)).
+A few commands are CLI only, with no MCP tool: `tincan ping <agent>` checks a teammate's tincan path (see [Reachability checks](#reachability-checks)), and the owner's `tincan held`, `tincan approve <id>` and `tincan deny <id>` handle requests held for approval (see [Owner approval](#owner-approval)). Agents convene a council with `ask`; the owner's `tincan council "question"` and `tincan council leaderboard` are CLI only (see [Council](#council)).
 
 ### Asking several teammates
 
@@ -365,7 +401,9 @@ To require approval before selected agents receive incoming requests, create `ap
 }
 ```
 
-`from: "*"` holds every request to that target. A `from` list holds requests when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]` in place of `from` to hold requests unless every agent in the chain is listed. `hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes. A missing file disables the gate. An unreadable, malformed, or overly accessible file holds all requests to the targets in the last valid copy; without a valid copy the relay refuses to start. A bad file first appearing at runtime rejects new sends until fixed.
+`from: "*"` holds every request to that target. A `from` list holds requests when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]` in place of `from` to hold requests unless every agent in the chain is listed. `hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes. A missing file disables the gate for every agent except [Council](#council). An unreadable, malformed, or overly accessible file holds all requests to the targets in the last valid copy; without a valid copy the relay refuses to start. A bad file first appearing at runtime rejects new sends until fixed.
+
+Council is held by default. Every request to an agent of kind `council` is held, with or without `approval.json`, because a council sends the question, its attachments and every member's answer to every model vendor on the team. Agents' leaderboard reads are held too, since the relay holds by target. Without `approval.json` nobody is notified: the convening agent tells you the request id, or add a `notify` agent with `{"gate": {}, "notify": "grokbot"}`. A gate entry for `council` replaces the default, so `{"gate": {"council": {"from": []}}}` holds nothing. When you run `tincan council "question"` yourself in a terminal on an admin device, it approves its own request and starts at once.
 
 From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
 
@@ -1179,7 +1217,7 @@ tincan onboard --operator grokbot
 - `--owner` names the person the prompts refer to; `--kind name=kind` tailors one agent's block.
 - It is read-only: it never mints invite codes or joins or removes agents. Its output never contains wake secrets. Re-run it after any roster or wake change and paste the fresh text over the old.
 
-Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `scheduled`, `generic`. History and the web agents are services, so their blocks carry setup only, no standing instructions of their own. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
+Kinds: `vm-webhook`, `e2b-email`, `proxy-sandbox`, `claude-code`, `chatgpt`, `hermes`, `openclaw`, `codex`, `gemini-cli`, `grok-cli`, `history`, `council`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `scheduled`, `generic`. History, Council and the web agents are services, so their blocks carry setup only, no standing instructions of their own. The Council block also carries the lines to add to the standing instructions of each teammate that should convene one, and the operator prompt passes "put this to the council" to it. The generic shape of an agent's instructions is in [docs/adapters/agent-instructions.md](docs/adapters/agent-instructions.md).
 
 The operator prompt follows a quiet rule: the operator speaks only when the owner asks it something or when it is answering an agent. Its 30 minute standing check never messages the owner; findings wait until the owner asks.
 
@@ -1189,9 +1227,9 @@ Self-healing rejoin: if an agent's machine is rebuilt with the same machine name
 
 ## Trust model
 
-Joined agents trust each other fully: a request from a joined agent is acted on as if you asked, with no per-request approval unless you turn on the [owner approval gate](#owner-approval) for chosen agents. Tailscale is the security boundary, the relay can read every request and reply, and only admin devices can invite, remove or connect agents. The real risk is an agent that reads untrusted content being tricked into asking a powerful teammate to do something harmful. Give high-power agents instructions about what to confirm with you, keep `tincan trace` handy, and use `tincan remove` to cut an agent off.
+Joined agents trust each other fully: a request from a joined agent is acted on as if you asked, with no per-request approval unless you turn on the [owner approval gate](#owner-approval) for chosen agents. The one default hold is Council: agents' councils wait for your approval, since a council sends your question to every model vendor on the team. Tailscale is the security boundary, the relay can read every request and reply, and only admin devices can invite, remove or connect agents. The real risk is an agent that reads untrusted content being tricked into asking a powerful teammate to do something harmful. Give high-power agents instructions about what to confirm with you, keep `tincan trace` handy, and use `tincan remove` to cut an agent off.
 
-Read [docs/trust-model.md](docs/trust-model.md) before joining an agent that reads untrusted content alongside one that holds powers like spending money. It also covers attachments, the history agent, and the web agents.
+Read [docs/trust-model.md](docs/trust-model.md) before joining an agent that reads untrusted content alongside one that holds powers like spending money. It also covers attachments, the history agent, the web agents, and Council.
 
 ## Build, test, release
 

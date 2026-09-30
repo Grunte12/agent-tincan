@@ -36,6 +36,7 @@ const (
 	KindGrokCLI       = "grok-cli"
 	KindHistory       = "history"
 	KindNotes         = "notes"
+	KindCouncil       = "council"
 	KindChatGPTWeb    = "chatgpt-web"
 	KindClaudeWeb     = "claude-web"
 	KindGrokWeb       = "grok-web"
@@ -48,7 +49,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindCouncil, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -63,7 +64,7 @@ const (
 var Sections = []string{"operator", "agents", "recipes", "all"}
 
 // runtimeNames maps runtime names to kinds when nothing else says. Only
-// product runtimes and product agents (history, notes) belong here, never anyone's
+// product runtimes and product agents (history, notes, council) belong here, never anyone's
 // personal agent names.
 var runtimeNames = map[string]string{
 	"claude-code":    KindClaudeCode,
@@ -75,6 +76,7 @@ var runtimeNames = map[string]string{
 	"grok-cli":       KindGrokCLI,
 	"history":        KindHistory,
 	"notes":          KindNotes,
+	"council":        KindCouncil,
 	"chatgpt-web":    KindChatGPTWeb,
 	"claude-web":     KindClaudeWeb,
 	"grok-web":       KindGrokWeb,
@@ -98,6 +100,7 @@ var defaultWake = map[string]string{
 	KindGrokCLI:       "command",
 	KindHistory:       "wait",
 	KindNotes:         "wait",
+	KindCouncil:       "wait",
 	KindChatGPTWeb:    "wait",
 	KindClaudeWeb:     "wait",
 	KindGrokWeb:       "wait",
@@ -303,9 +306,9 @@ func expectOnline(kind, wake string) bool {
 }
 
 // isService reports whether kind is a Tincan Go service rather than a
-// model: history, notes, and the web agents.
+// model: history, notes, council, and the web agents.
 func isService(kind string) bool {
-	return kind == KindHistory || kind == KindNotes || isWebKind(kind)
+	return kind == KindHistory || kind == KindNotes || kind == KindCouncil || isWebKind(kind)
 }
 
 // isWebKind reports whether kind is one of the web agents.
@@ -480,4 +483,26 @@ func indent(s string) string {
 		b.WriteString("  " + l + "\n")
 	}
 	return b.String()
+}
+
+// Profile is how the kit reads one roster entry.
+type Profile struct {
+	Kind, Wake string
+	// Service: a Tincan Go service rather than a model agent. Web agents
+	// are services that front a model, so Web is set with it.
+	Service, Web bool
+	// ExpectOnline: the agent is normally connected, not woken on demand.
+	ExpectOnline bool
+}
+
+// ProfileOf resolves m's kind and wake method the way Build does (stored
+// kind, then runtime name, then generic; the kind's default wake when m
+// has none), so other packages classify agents exactly as the kit does.
+func ProfileOf(m Member) Profile {
+	kind := resolveKind(m, nil)
+	wake := m.Wake
+	if wake == "" {
+		wake = defaultWake[kind]
+	}
+	return Profile{Kind: kind, Wake: wake, Service: isService(kind), Web: isWebKind(kind), ExpectOnline: expectOnline(kind, wake)}
 }

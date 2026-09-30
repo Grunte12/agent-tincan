@@ -16,6 +16,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
+// defaultHoldTTL is how long a held request waits for approval when
+// approval.json sets no hold_ttl, or there is no file.
+const defaultHoldTTL = 2 * time.Hour
+
 type approvalRule struct {
 	From   json.RawMessage `json:"from,omitempty"`
 	Unless []string        `json:"unless,omitempty"`
@@ -139,41 +143,30 @@ func (a *Approval) reload() error {
 	return nil
 }
 
-// defaultHoldTTL is how long a held request waits for the owner when
-// approval.json sets no hold_ttl, or there is no approval.json.
-const defaultHoldTTL = 2 * time.Hour
-
 // Held evaluates the relay-recorded chain and sender. On reload failure it
 // holds all last-known gated targets; without a valid copy callers must reject.
 // HoldTTL and ApprovalNotify are internal metadata, never accepted from clients.
 func (a *Approval) Held(req *envelope.Request) (bool, error) {
-	held, _, err := a.check(req)
-	return held, err
-}
-
-// check is Held that also reports whether the target has a gate entry, so
-// a hold-by-default kind knows the owner's entry replaces its default.
-func (a *Approval) check(req *envelope.Request) (held, gated bool, err error) {
 	if a == nil {
-		return false, false, nil
+		return false, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	err = a.reload()
+	err := a.reload()
 	if a.good == nil || (err == nil && a.missing) {
-		return false, false, err
+		return false, err
 	}
 	rule, ok := a.good.Gate[req.To]
 	if !ok {
-		return false, false, nil
+		return false, nil
 	}
 	req.HoldTTL = a.ttl
 	req.ApprovalNotify = a.good.Notify
 	if err != nil {
-		return true, true, err
+		return true, err
 	}
 	if string(rule.From) == `"*"` {
-		return true, true, nil
+		return true, nil
 	}
 	names := rule.Unless
 	if len(rule.From) > 0 {
@@ -182,25 +175,25 @@ func (a *Approval) check(req *envelope.Request) (held, gated bool, err error) {
 	for _, name := range append(slices.Clone(req.Chain), req.From) {
 		match := slices.Contains(names, name)
 		if (rule.Unless != nil && !match) || (rule.Unless == nil && match) {
-			return true, true, nil
+			return true, nil
 		}
 	}
-	return false, true, nil
+	return false, nil
 }
 
-// holdDefaults are the TTL and notify agent of a hold with no gate entry:
-// the owner's hold_ttl and notify from the last valid approval.json while
-// the file exists, else the default TTL and no notice.
-func (a *Approval) holdDefaults() (time.Duration, string) {
-	if a == nil {
-		return defaultHoldTTL, ""
+// holdDefaults reports whether the policy Held last read has an entry for
+// target, and the hold TTL and notify target a default hold should use: the
+// file's, or 2 hours and no notice when there is no file. Nil-safe.
+func (a *Approval) holdDefaults(target string) (entry bool, ttl time.Duration, notify string) {
+	if a != nil {
+		a.mu.Lock()
+		defer a.mu.Unlock()
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.good == nil || a.missing {
-		return defaultHoldTTL, ""
+	if a == nil || a.good == nil || a.missing {
+		return false, defaultHoldTTL, ""
 	}
-	return a.ttl, a.good.Notify
+	_, entry = a.good.Gate[target]
+	return entry, a.ttl, a.good.Notify
 }
 
 // Reject ambiguous JSON rather than letting a repeated field replace a rule.

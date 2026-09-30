@@ -787,12 +787,23 @@ func heldCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var reqs []envelope.Request
+			// to_kind is empty from a relay that predates it.
+			var reqs []struct {
+				envelope.Request
+				ToKind string `json:"to_kind"`
+			}
 			if err := r.Raw(cmd.Context(), "GET", "/v1/admin/held", nil, &reqs); err != nil {
 				return err
 			}
 			for _, req := range reqs {
-				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, req.To, strings.Join(req.Chain, " -> "), req.Body)
+				to := req.To
+				if req.ToKind != "" {
+					to += " (" + req.ToKind + ")"
+				}
+				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, to, strings.Join(req.Chain, " -> "), req.Body)
+				for _, a := range req.Attachments {
+					cmd.Printf("  attachment: %s (%d bytes)\n", a.Name, a.Size)
+				}
 			}
 			return nil
 		}}
