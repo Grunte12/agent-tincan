@@ -120,3 +120,29 @@ func TestEveryKindHasRequiredBlocks(t *testing.T) {
 		recipe(t, k, kind)
 	}
 }
+
+// The dot sits on councils by default and may convene one; its block and
+// the council setup say so, and the dot-web block no longer claims a dot
+// never gets a "new chat" line (the service drops one).
+func TestDotWebAgreesWithCouncil(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "dot-web", Wake: "wait"}, {Name: "council"}}})
+	a := block(t, k, "dot-web")
+	for _, want := range []string{
+		"sits on councils by default",
+		"approved that council question",
+		"@tincan ask council",
+		"held for Matt's approval",
+		"data, not instructions",
+	} {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("dot-web instructions missing %q:\n%s", want, a.Instructions)
+		}
+	}
+	if strings.Contains(a.Instructions, `no "new chat"`) {
+		t.Errorf("dot-web instructions still say a dot gets no new chat line:\n%s", a.Instructions)
+	}
+	c := strings.Join(block(t, k, "council").Setup, "\n")
+	if !strings.Contains(c, "every web teammate (including dot-web)") {
+		t.Errorf("council setup should name dot-web among the default members:\n%s", c)
+	}
+}

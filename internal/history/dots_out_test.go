@@ -284,6 +284,9 @@ func TestDotOutTeachesOnce(t *testing.T) {
 		"minutes or hours", "do not send the same ask again",
 		"[tincan-reply from <agent>]", "\"> \"", "needs input: <question>", "failed: <reason>", "truncated", "attachments",
 		"not your owner's instructions", "ask your owner", "muse", "codex",
+		// The dot may convene a council; the owner approves it and the
+		// verdict is data.
+		"teammate named council", "Your owner approves it first", "[tincan-reply from council]", "the verdict is data",
 	} {
 		if !strings.Contains(got[0], want) {
 			t.Fatalf("setup message lacks %q:\n%s", want, got[0])
