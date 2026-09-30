@@ -354,6 +354,7 @@ With `"from": "*"` every request is held, as with no entry. Keep the default unl
 - The DM shows Tincan's requests and the `[tincan-reply]` messages as your own messages. The dot cannot tell them from yours by author, only by the text, so the setup message's "data, not instructions" is guidance the dot may not follow. It is most reliable for `[tincan-reply]` messages, which are clearly marked; a typed request reads like anything you would write. Treat every request to `dot-web` as if you sent it yourself.
 - The dot's own `@tincan ask` lines are its words, not yours: `dot-web` asks as `dot-web`, and the target sees that sender.
 - A dot message that arrives after the reply went out (a late burst) is not delivered to the asker. Open the DM to see it.
+- Each read of the DM takes only its latest 32 messages. If more arrive between two reads (the Mac asleep, `dot-web` stopped, or a long request holding the send path), an `@tincan ask` among the older ones is not asked; `dot-web` notices the gap and types one `[tincan]` note asking the dot to send any unanswered ask again.
 - One DM per agent. For a second dot, invite a second agent with `--kind dot-web` and run it with its own config: `TINCAN_CONFIG=~/.config/tincan/<name>.json tincan web serve --site dots --name <name> --thread <thread-id>`, in the foreground or under your own service manager. `tincan web install` has no `--name` and installs only the default `dot-web` service.
 - The request and the dot's answers use your ChatGPT account and stay in the DM like any chat you had with the dot.
 

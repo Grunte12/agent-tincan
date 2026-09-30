@@ -48,6 +48,14 @@ const maxDotTypesPerTick = 3
 // maxDotLine caps the request line kept in the state file and quoted back.
 const maxDotLine = 300
 
+// dotFeedWindow is how many of the latest DM messages one read returns
+// (the extension's DOT_FEED_LIMIT); dots.detail has no paging.
+const dotFeedWindow = 32
+
+// dotGapNote is typed into the DM when more messages arrived between two
+// reads than one read returns, so an @tincan line may have been skipped.
+const dotGapNote = "[tincan] Tincan could not check some earlier messages here (more arrived than it reads at once). If you wrote an @tincan ask that has no [tincan-reply] yet, send it again."
+
 // DefaultDotOutPath is where a dot's web agent keeps its outbound state.
 func DefaultDotOutPath(agent string) string { return configPath("", agent+"-out.json") }
 
@@ -107,8 +115,38 @@ type dotOutThread struct {
 	Taught  bool      `json:"taught,omitempty"`
 	// Teaching: the setup message's typing started and is not confirmed
 	// yet; found on a later tick, the dot counts as taught.
-	Teaching bool                     `json:"teaching,omitempty"`
-	Messages map[string]*dotOutRecord `json:"messages"`
+	Teaching bool `json:"teaching,omitempty"`
+	// LastSeenID and LastSeenAt are the newest message of the last read.
+	// A later full read that no longer reaches back to it may have skipped
+	// messages.
+	LastSeenID string    `json:"last_seen_id,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
+	// GapNote: the dot is owed dotGapNote. GapNoting: its typing started
+	// and is not confirmed yet; found on a later tick, it counts as typed.
+	GapNote   bool                     `json:"gap_note,omitempty"`
+	GapNoting bool                     `json:"gap_noting,omitempty"`
+	Messages  map[string]*dotOutRecord `json:"messages"`
+}
+
+// noteGap records the read: it owes the dot dotGapNote when the thread
+// was read before, the feed is full, and it no longer reaches back to the
+// newest message of that read. It reports whether the thread changed.
+func (th *dotOutThread) noteGap(feed DotFeed) bool {
+	msgs := feed.Messages
+	if len(msgs) == 0 {
+		return false
+	}
+	newest := msgs[len(msgs)-1]
+	if newest.ID == th.LastSeenID {
+		return false
+	}
+	if th.LastSeenID != "" && !th.LastSeenAt.IsZero() && len(msgs) >= dotFeedWindow &&
+		!msgs[0].At.IsZero() && msgs[0].At.After(th.LastSeenAt) &&
+		!slices.ContainsFunc(msgs, func(m DotMessage) bool { return m.ID == th.LastSeenID }) {
+		th.GapNote = true
+	}
+	th.LastSeenID, th.LastSeenAt = newest.ID, newest.At
+	return true
 }
 
 // Record statuses.
@@ -300,11 +338,12 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 			}
 		}
 		w.pruneOut(th, feed, now)
+		th.noteGap(feed)
 		if err := w.saveOut(st); err != nil {
 			return err
 		}
 	}
-	dirty := false
+	dirty := th.noteGap(feed)
 	typed := 0
 	say := func(text string) (bool, error) {
 		id, err := w.typeDM(ctx, thread, text)
@@ -348,6 +387,33 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 			return err
 		}
 		th.Taught, th.Teaching, w.watch.taught = true, false, true
+		if err := w.saveOut(st); err != nil {
+			return err
+		}
+	}
+
+	// Tell the dot once when the read skipped messages (an @tincan line
+	// may be among them). Typing is saved as started first, like the setup
+	// message, so the note is typed at most once.
+	if th.GapNoting {
+		w.logf("outbound: the note about skipped messages may have been typed (not confirmed); not typing it again")
+		th.GapNote, th.GapNoting = false, false
+		dirty = true
+	}
+	if th.GapNote && typed < maxDotTypesPerTick {
+		w.logf("outbound: more messages arrived than one read of the DM takes; telling the dot an ask may have been missed")
+		th.GapNoting = true
+		if err := w.saveOut(st); err != nil {
+			th.GapNoting = false
+			return err
+		}
+		if _, err := say(dotGapNote); err != nil {
+			// Nothing was typed: it is typed on a later tick.
+			th.GapNoting = false
+			_ = w.saveOut(st)
+			return err
+		}
+		th.GapNote, th.GapNoting = false, false
 		if err := w.saveOut(st); err != nil {
 			return err
 		}

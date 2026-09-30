@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -805,4 +806,93 @@ func TestDotOutRelayRateLimitKeepsTheLine(t *testing.T) {
 	if got := r.typed(); len(got) != 1 {
 		t.Fatalf("typed %q", got)
 	}
+}
+
+// flood adds n messages from the dot dated a minute from now, then keeps
+// only the latest dotFeedWindow messages, as the extension's dots.detail
+// does.
+func (r *dotOutRig) flood(n int) {
+	r.b.mu.Lock()
+	defer r.b.mu.Unlock()
+	at := time.Now().Add(time.Minute)
+	for range n {
+		r.seq++
+		r.b.items = append(r.b.items, dotItem(fmt.Sprintf("flood-%d", r.seq), dotBot, "chatter", at))
+	}
+	if len(r.b.items) > dotFeedWindow {
+		r.b.items = r.b.items[len(r.b.items)-dotFeedWindow:]
+	}
+}
+
+// gapNotes counts the notes typed about messages the window skipped.
+func (r *dotOutRig) gapNotes() int {
+	n := 0
+	for _, m := range r.typed() {
+		if m == dotGapNote {
+			n++
+		}
+	}
+	return n
+}
+
+// More messages than one read takes arrived between two reads: the dot is
+// told once that an ask may have been missed, and not again.
+func TestDotOutNotesMessagesPastTheWindowOnce(t *testing.T) {
+	r := newDotOutRig(t)
+	r.taught()
+	r.tick() // sees the setup message
+	r.flood(dotFeedWindow + 8)
+	r.tick()
+	if n := r.gapNotes(); n != 1 {
+		t.Fatalf("%d gap notes, typed %q", n, r.typed())
+	}
+	r.tick()
+	r.restart()
+	r.tick()
+	if n := r.gapNotes(); n != 1 {
+		t.Fatalf("%d gap notes after more ticks", n)
+	}
+	if !strings.Contains(dotGapNote, "@tincan ask") || !strings.Contains(dotGapNote, "[tincan-reply]") {
+		t.Fatalf("note: %q", dotGapNote)
+	}
+	if _, ok := parseDotAsk(dotGapNote); ok {
+		t.Fatalf("the note reads as an ask")
+	}
+}
+
+// No note when the window still holds the last message seen, when the
+// feed is not full, or on the first read of a thread.
+func TestDotOutNoGapNote(t *testing.T) {
+	t.Run("last seen in the window", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.taught()
+		r.tick()
+		r.flood(dotFeedWindow - 1)
+		r.tick()
+		if n := r.gapNotes(); n != 0 {
+			t.Fatalf("typed %q", r.typed())
+		}
+	})
+	t.Run("feed not full", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.taught()
+		r.tick()
+		r.b.mu.Lock()
+		r.b.items = nil
+		r.b.mu.Unlock()
+		r.flood(10)
+		r.tick()
+		if n := r.gapNotes(); n != 0 {
+			t.Fatalf("typed %q", r.typed())
+		}
+	})
+	t.Run("first read", func(t *testing.T) {
+		r := newDotOutRig(t)
+		r.flood(dotFeedWindow + 8)
+		r.tick()
+		r.tick()
+		if n := r.gapNotes(); n != 0 {
+			t.Fatalf("typed %q", r.typed())
+		}
+	})
 }
