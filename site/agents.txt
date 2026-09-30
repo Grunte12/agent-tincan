@@ -382,7 +382,7 @@ scorecard. It is a service, not a model. It needs at least 3 teammates that
 can sit on a council, usually web teammates from PART C.
 
 D1. Upgrade in this order: the relay first (from an admin device,
-    `tincan relay-upgrade --from-github v0.10.0`, or put the release in the
+    `tincan relay-upgrade --from-github v0.10.1`, or put the release in the
     relay's --dist and run `tincan relay-upgrade`), then `tincan upgrade` on
     each agent, then for a dot `tincan kind dot-web dot-web` on an admin
     device (dot-web refuses to start without that kind), then install

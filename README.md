@@ -40,7 +40,7 @@ Contents:
 
 Before you upgrade:
 
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.10.0 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. For a dot, run `tincan kind dot-web dot-web` from an admin device next; `dot-web` refuses to start without that kind. Then install Council with `tincan council install`. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.10.1` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.10.1 files in the relay's `--dist` and run `tincan relay-upgrade`). Then run `tincan upgrade` on each agent. For a dot, run `tincan kind dot-web dot-web` from an admin device next; `dot-web` refuses to start without that kind. Then install Council with `tincan council install`. An older relay refuses the `council` kind and would never hold councils, and `tincan council serve` refuses to run until the relay stores kind `council` for it.
 - Council's members are your web teammates and the coding agents the relay can wake, so a council is only as good as those teammates. Their live end-to-end runs are still pending; a member that times out or is blocked counts as absent, and the council goes on with at least 3.
 
 ## Council
