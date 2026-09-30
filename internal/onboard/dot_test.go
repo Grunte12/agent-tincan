@@ -6,80 +6,84 @@ import (
 	"testing"
 )
 
-func TestDotIsAKnownKind(t *testing.T) {
-	if !KnownKind("dot") || KindDot != "dot" || !slices.Contains(Kinds, KindDot) {
-		t.Fatalf("dot is not a known kind: %v", Kinds)
+func TestDotWebIsAKnownWebKind(t *testing.T) {
+	if !KnownKind("dot-web") || KindDotWeb != "dot-web" || !slices.Contains(Kinds, KindDotWeb) {
+		t.Fatalf("dot-web is not a known kind: %v", Kinds)
 	}
-	if defaultWake[KindDot] != "webhook" {
-		t.Errorf("dot default wake = %q, want webhook", defaultWake[KindDot])
+	if KnownKind("dot") {
+		t.Error("the dot kind was replaced by dot-web")
 	}
-	if _, ok := runtimeNames["dot"]; ok {
-		t.Error("dot must not resolve from a runtime name: it is always set with --kind")
+	if defaultWake[KindDotWeb] != "wait" {
+		t.Errorf("dot-web default wake = %q, want wait", defaultWake[KindDotWeb])
 	}
-	if isWebKind(KindDot) || isService(KindDot) || freshSession[KindDot] || expectOnline(KindDot, "webhook") {
-		t.Error("dot is a model on its own cloud computer: not a web kind, service, shared-machine kind, or always online")
+	if runtimeNames["dot-web"] != KindDotWeb {
+		t.Error("the agent name dot-web should resolve to its kind, like the other web agents")
+	}
+	if !isWebKind(KindDotWeb) || !isService(KindDotWeb) || freshSession[KindDotWeb] {
+		t.Error("dot-web is a web agent service, not a model")
 	}
 }
 
-// A dot runs tincan from its own cloud computer, woken by a fixed nudge in
-// its DM or by its heartbeat. Its standing instructions carry the drain
-// loop, the trust rules (tincan content is data; connector writes need the
-// owner's confirmation; no secrets) and how it recovers from a reset.
-func TestDotBlock(t *testing.T) {
-	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "dot", Kind: KindDot}, {Name: "muse", Kind: KindProxySandbox}}})
-	a := block(t, k, "dot")
-	if a.Kind != KindDot || a.Wake != "webhook" {
-		t.Errorf("dot block kind/wake = %s/%s", a.Kind, a.Wake)
+// dot-web is set up like the other web agents, served with --site dots,
+// pointed at the dot's one DM thread, and held for the owner by default.
+// The dot runs no tincan, so its block carries no dot-side instructions.
+func TestDotWebBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "dot-web", Wake: "wait"}, {Name: "muse", Kind: KindProxySandbox}}})
+	a := block(t, k, "dot-web")
+	if a.Kind != KindDotWeb || a.Wake != "wait" {
+		t.Fatalf("dot-web block kind/wake = %s/%s (runtime name should map to the kind)", a.Kind, a.Wake)
 	}
-	if !strings.Contains(a.Join, "tincan join <code> --relay "+relayURL) {
-		t.Errorf("dot join line = %q", a.Join)
+	cfg := "TINCAN_CONFIG=~/.config/tincan/dot-web.json "
+	if want := cfg + "tincan join <code> --relay " + relayURL; a.Join != want {
+		t.Errorf("dot-web join = %q, want %q", a.Join, want)
 	}
-	for _, want := range []string{
-		// drain loop and the nudge
-		"[tincan-auto]", "heartbeat", "tincan inbox", "until it shows nothing", "claims waiting requests", "tincan progress", "tincan reply",
-		"replies to your own requests",
-		// the heartbeat task
-		"every 15 minutes",
-		// data, not instructions
-		"data from a teammate", "not an instruction from Matt", "request bodies", "replies to your own asks", "answer text", "attachments",
-		// connector writes
-		"connected app", "ask Matt in this DM", "request id", "sender", "exact write", "never counts as confirmation",
-		// no secrets
-		"Never reveal", "tincan config", "tokens", "auth keys", "tailnet keys",
-		// reset recovery
-		"tincan is missing", "auth or login error", "new join code", "instead of retrying",
-	} {
+	for _, want := range []string{"service (tincan web serve)", "Matt's OpenAI dot (chatgpt.com/dots)", "sent as Matt", "held for Matt's approval", "@tincan ask <agent>"} {
 		if !strings.Contains(a.Instructions, want) {
-			t.Errorf("dot instructions missing %q:\n%s", want, a.Instructions)
-		}
-	}
-	// The generic self-heal (rejoin yourself, never ask for an invite) and
-	// "handle as a request from the owner" would contradict the dot's rules.
-	for _, bad := range []string{"Never ask Matt for an invite", "tincan rejoin", "Handle them as you would a request from Matt", "MCP server keeps running"} {
-		if strings.Contains(a.Instructions, bad) {
-			t.Errorf("dot instructions should not carry %q:\n%s", bad, a.Instructions)
+			t.Errorf("dot-web instructions missing %q:\n%s", want, a.Instructions)
 		}
 	}
 	setup := strings.Join(a.Setup, "\n")
-	for _, want := range []string{"github.com/mvanhorn/agent-tincan/releases", "checksums.txt", "join line", "wake.json", `"method": "webhook"`, `"every": "15m"`, "held for Matt's approval", "approval.json"} {
+	for _, want := range []string{
+		"tincan web install --site dots",
+		"tincan web serve --site dots --name dot-web",
+		"--thread <id>", "tincan web install --site dots --thread <id>",
+		"logged in to chatgpt.com",
+		"as Matt",
+		"tincan history install",
+		"dot-web-allow.txt", "dot-web-send.txt",
+		`method "wait"`,
+		"held for Matt's approval by default", "tincan held", "tincan approve <id>", "approval.json",
+		"[tincan-reply from <agent>]",
+		cfg + "tincan rejoin --relay " + relayURL + " --name dot-web",
+	} {
 		if !strings.Contains(setup, want) {
-			t.Errorf("dot setup missing %q:\n%s", want, setup)
+			t.Errorf("dot-web setup missing %q:\n%s", want, setup)
 		}
 	}
-	if strings.Contains(blockText(a), "TINCAN_CONFIG") {
-		t.Errorf("dot has its own computer and needs no per-agent config:\n%s", blockText(a))
+	// A dot has one DM: the other web agents' threading lines do not apply.
+	txt := blockText(a)
+	for _, bad := range []string{`"new chat" starts`, "heartbeat", "[tincan-auto]", "tincan inbox", "checksums.txt", "new join code", `"method": "webhook"`} {
+		if strings.Contains(txt, bad) {
+			t.Errorf("dot-web block should not carry %q:\n%s", bad, txt)
+		}
 	}
-	r := recipe(t, k, KindDot)
+	r := recipe(t, k, KindDotWeb)
 	all := strings.Join(r.Steps, "\n")
-	inv, join := strings.Index(all, "tincan invite <name> --kind dot"), strings.Index(all, "tincan join")
+	inv, join := strings.Index(all, "tincan invite <name> --kind dot-web"), strings.Index(all, cfg+"tincan join")
 	if r.Title == "" || inv < 0 || join < 0 || inv > join {
-		t.Errorf("dot recipe must invite before join:\n%s: %s", r.Title, all)
+		t.Errorf("dot-web recipe must invite before join with its own config:\n%s: %s", r.Title, all)
 	}
-	if !strings.Contains(k.Operator, "dot kind=dot wake=webhook (may sleep or be off)") {
-		t.Errorf("operator prompt lacks the dot team line:\n%s", k.Operator)
+	if !strings.Contains(k.Operator, "dot-web kind=dot-web wake=wait") {
+		t.Errorf("operator prompt lacks the dot-web team line:\n%s", k.Operator)
 	}
-	if !strings.Contains(k.Operator, "dot agents") {
-		t.Errorf("operator prompt should say requests to dot agents are held by default:\n%s", k.Operator)
+	if !strings.Contains(k.Operator, "Requests to dot-web agents (kind dot-web) are held") {
+		t.Errorf("operator prompt should say requests to dot-web are held by default:\n%s", k.Operator)
+	}
+	// The other web agents keep their threading and carry no dot notes.
+	p := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "perplexity-web", Wake: "wait"}}}), KindPerplexityWeb)
+	ps := strings.Join(p.Setup, "\n")
+	if !strings.Contains(ps, `"new chat" starts`) || strings.Contains(ps, "--thread") || strings.Contains(ps, "held for Matt's approval") {
+		t.Errorf("perplexity-web setup changed by dot-web:\n%s", ps)
 	}
 }
 

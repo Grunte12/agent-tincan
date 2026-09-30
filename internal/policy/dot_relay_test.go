@@ -36,35 +36,35 @@ func (w *wakes) count(agent string) int {
 }
 
 // End to end through a real relay with no approval.json: an admin invites
-// a dot with --kind dot, a teammate's ask to it is held and wakes nothing,
-// the owner's approval queues it and wakes the dot, and the reply to the
-// dot's own ask comes back without a hold.
+// dot-web with --kind dot-web, a teammate's ask to it is held and wakes
+// nothing, the owner's approval queues it and wakes dot-web, and the reply to
+// an ask dot-web sends for the dot comes back without a hold.
 func TestDotHoldAndApproveThroughRelay(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	w := &wakes{}
 	m.Server.SetEvents(w)
 	admin := m.Client(t, "admin")
-	if code, err := admin.InviteKind(t.Context(), "dot", onboard.KindDot); err != nil || code == "" {
-		t.Fatalf("invite --kind dot: %q %v", code, err)
+	if code, err := admin.InviteKind(t.Context(), "dot-web", onboard.KindDotWeb); err != nil || code == "" {
+		t.Fatalf("invite --kind dot-web: %q %v", code, err)
 	}
-	dot := m.JoinOnMachineOf(t, "instinct", "dot")
-	if err := admin.SetKind(t.Context(), "dot", onboard.KindDot); err != nil {
+	dot := m.JoinOnMachineOf(t, "instinct", "dot-web")
+	if err := admin.SetKind(t.Context(), "dot-web", onboard.KindDotWeb); err != nil {
 		t.Fatal(err)
 	}
 	muse := m.Client(t, "muse")
 
-	req, err := muse.Send(t.Context(), "dot", "summarize my inbox", envelope.KindAsk, "", false)
+	req, err := muse.Send(t.Context(), "dot-web", "summarize my inbox", envelope.KindAsk, "", false)
 	if err != nil || req.Status != envelope.StatusHeld {
 		t.Fatalf("ask to dot = %q %v", req.Status, err)
 	}
-	if w.count("dot") != 0 || m.Server.QueuedCount("dot") != 0 {
+	if w.count("dot-web") != 0 || m.Server.QueuedCount("dot-web") != 0 {
 		t.Fatal("held request queued or woke the dot")
 	}
 	if err := admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if w.count("dot") != 1 || m.Server.QueuedCount("dot") != 1 {
-		t.Fatalf("approval did not queue and wake the dot: wakes %d queued %d", w.count("dot"), m.Server.QueuedCount("dot"))
+	if w.count("dot-web") != 1 || m.Server.QueuedCount("dot-web") != 1 {
+		t.Fatalf("approval did not queue and wake the dot: wakes %d queued %d", w.count("dot-web"), m.Server.QueuedCount("dot-web"))
 	}
 	inbox, err := dot.Poll(t.Context(), time.Millisecond)
 	if err != nil || len(inbox.Requests) != 1 || inbox.Requests[0].ID != req.ID {

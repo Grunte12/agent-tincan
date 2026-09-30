@@ -30,12 +30,13 @@ var (
 )
 
 // holdByDefault lists the target kinds whose inbound asks and notifies wait
-// for the owner's approval with no approval.json entry: a dot acts through
-// the owner's connected apps, so nothing reaches it unapproved unless the
+// for the owner's approval with no approval.json entry: dot-web types each
+// request into the owner's dot DM as the owner, and a dot acts through the
+// owner's connected apps, so nothing reaches it unapproved unless the
 // owner says so. An approval.json entry for the target replaces the
 // default. Replies and answers never pass through Prepare, so replies to
 // the dot's own asks are not held.
-var holdByDefault = map[string]bool{onboard.KindDot: true}
+var holdByDefault = map[string]bool{onboard.KindDotWeb: true}
 
 // Config tunes the policy.
 type Config struct {

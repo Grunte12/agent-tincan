@@ -9,7 +9,7 @@ import (
 // an invite. Tailnet agents run tincan rejoin; the proxy sandbox adds its
 // proxy; ChatGPT, which is not a tailnet machine, is told it cannot; the
 // history and web agent services, which are not models, carry the rejoin in
-// their setup. A dot asks the owner for a new join code.
+// their setup.
 func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 	var roster []Member
 	for _, kind := range Kinds {
@@ -24,14 +24,6 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
-		if kind == KindDot {
-			// A reset cloud computer has no config to rejoin with: the dot asks
-			// the owner for a new join code instead (TestDotBlock).
-			if !strings.Contains(txt, "new join code") || strings.Contains(txt, "tincan rejoin") {
-				t.Errorf("dot block lacks its ask-for-a-join-code line:\n%s", txt)
-			}
-			continue
-		}
 		if kind == KindHistory {
 			// A service, not a model: the owner rejoins it from its setup steps.
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")
@@ -40,7 +32,7 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
-		if kind == KindNotes || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb {
+		if kind == KindNotes || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb || kind == KindDotWeb {
 			// Services too, with the fixed config path their service sets.
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")
 			if want := "TINCAN_CONFIG=~/.config/tincan/" + kind + ".json tincan rejoin --relay " + relayURL + " --name a-" + kind; !strings.Contains(setup, "not joined") || !strings.Contains(setup, want) {
