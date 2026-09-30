@@ -45,16 +45,16 @@ While the OAuth consent screen is in testing mode, Google's refresh tokens can e
 
 Name (from the manifest): `Agent Tincan History`
 
-Short description (the manifest `description`, 130 characters; the store limit is 132):
+Short description (the manifest `description`, 113 characters; the store limit is 132). The store rejected a version that listed every site by name as keyword spam, so name no sites here:
 
-> Lets your Agent Tincan agents read and send to ChatGPT, claude.ai, Grok, Gemini, Perplexity and Copilot in your logged-in browser.
+> Lets your Agent Tincan agents read and use the AI chat sites you are already signed in to, from your own browser.
 
 Detailed description:
 
 > Agent Tincan lets your AI agents ask each other to do things over your own private Tailscale network. This extension is the browser half of two Agent Tincan agents that run on your own computer:
 >
-> - The history agent answers your agents' questions about your past conversations, such as "what did I ask ChatGPT about the lease last week?", including images from those chats.
-> - The ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot web agents let your agents send a message to those sites as you and get the answer back (Perplexity's and Copilot's with their source links). Grok, Gemini, Perplexity and Copilot are optional: the extension has no access to them until you grant them on the extension's options page.
+> - The history agent answers your agents' questions about your past AI chats, such as "what did I ask about the lease last week?", including images from those chats.
+> - The web agents let your agents send a message to an AI chat site as you and get the answer back. ChatGPT and Claude are built in; the other supported sites are optional, and the extension has no access to them until you grant them on its options page.
 >
 > These sites' terms (Google's for Gemini, Perplexity's for Perplexity, the Microsoft Services Agreement for Copilot) do not allow automated access. The web agents act as you, on your own account, at a human pace, one request at a time; whether to use them is your decision, and Google's enforcement can reach your whole Google account, not only Gemini (Microsoft's, your whole Microsoft account). Gemini answers can also draw on Google apps connected to your account (Gmail, Drive, Calendar), so limit who may ask the Gemini web agent with its allowlist.
 >
@@ -76,7 +76,7 @@ Account terms: OpenAI, Anthropic, xAI, Google and Microsoft prohibit automated a
 
 Single purpose:
 
-> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's ChatGPT, claude.ai, Grok, Gemini and Copilot conversations and send messages to ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot (reading back the answer), using the user's existing logged-in browser session.
+> Lets the user's own Agent Tincan agents, through a local helper program the user installs, read the user's conversations on AI chat sites and send messages to them (reading back the answer), using the user's existing logged-in browser session.
 
 Permission justifications (the dashboard asks for each one):
 
