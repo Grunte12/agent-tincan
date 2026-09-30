@@ -112,6 +112,11 @@ func Reply(f Finished) (string, envelope.Status) {
 	if o.State == CouncilFailed {
 		received = receivedAnswers(o.Answers)
 	}
+	// A completed council carries the chairman's verdict, cut to fit.
+	var verdict []verdictSection
+	if f.verdictShown() {
+		verdict = f.verdictSections()
+	}
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
@@ -123,7 +128,7 @@ func Reply(f Finished) (string, envelope.Status) {
 	case v.Unavailable:
 		line("Verdict unavailable: %s. The ranking below is the blind peer review's.", v.Reason)
 	default:
-		line("Recommendation: %s", revealLabels(v.Recommendation, v.Labels))
+		line("Recommendation: %s", verdict[0].text)
 	}
 	if q := firstLine(f.Question); q != "" {
 		line("Question: %s", q)
@@ -146,11 +151,9 @@ func Reply(f Finished) (string, envelope.Status) {
 	}
 	if f.verdictShown() {
 		line("")
-		for _, sec := range []struct{ head, text string }{
-			{"Agreement", v.Agreement}, {"Disagreement", v.Disagreement}, {"Minority", v.Minority},
-		} {
+		for _, sec := range verdict[1:] {
 			if sec.text != "" {
-				line("%s: %s", sec.head, revealLabels(sec.text, v.Labels))
+				line("%s: %s", sec.head, sec.text)
 			}
 		}
 	}
@@ -187,7 +190,7 @@ func Reply(f Finished) (string, envelope.Status) {
 		}
 	}
 
-	block, _ := json.MarshalIndent(f.result(received), "", "  ")
+	block, _ := json.MarshalIndent(f.result(received, verdict), "", "  ")
 	line("")
 	line("%s", ResultFence)
 	line("%s", block)
@@ -257,8 +260,9 @@ type resultMember struct {
 }
 
 // result is the council-result block; received are a failed council's
-// answers as the reply carries them.
-func (f Finished) result(received []Answer) councilResult {
+// answers and verdict a completed council's verdict sections, as the reply
+// carries them.
+func (f Finished) result(received []Answer, verdict []verdictSection) councilResult {
 	o := f.Outcome
 	v := o.Verdict
 	r := councilResult{
@@ -279,10 +283,10 @@ func (f Finished) result(received []Answer) councilResult {
 	case f.verdictShown():
 		r.Chairman = v.Chairman
 		r.Verdict = &resultVerdict{
-			Recommendation: revealLabels(v.Recommendation, v.Labels),
-			Agreement:      revealLabels(v.Agreement, v.Labels),
-			Disagreement:   revealLabels(v.Disagreement, v.Labels),
-			Minority:       revealLabels(v.Minority, v.Labels),
+			Recommendation: verdict[0].text,
+			Agreement:      verdict[1].text,
+			Disagreement:   verdict[2].text,
+			Minority:       verdict[3].text,
 		}
 	case o.State == CouncilCompleted:
 		r.VerdictUnavailable = v.Reason
@@ -320,3 +324,32 @@ func receivedAnswers(answers []Answer) []Answer {
 }
 
 func (a Answer) parts() (string, string) { return a.Member, a.Body }
+
+// verdictBudget caps the chairman's verdict sections a completed council's
+// reply carries, once in the text and once in the result block, for the
+// same reason and by the same arithmetic as receivedAnswerBudget; the
+// report keeps the verdict in full.
+const verdictBudget = 32 << 10
+
+// verdictSection is one section of the chairman's verdict, authors named.
+type verdictSection struct{ head, text string }
+
+func (s verdictSection) parts() (string, string) { return s.head, s.text }
+
+// verdictSections returns the recommendation, agreement, disagreement,
+// and minority sections with the authors named, cut to share
+// verdictBudget.
+func (f Finished) verdictSections() []verdictSection {
+	v := f.Outcome.Verdict
+	secs := []verdictSection{
+		{"Recommendation", revealLabels(v.Recommendation, v.Labels)},
+		{"Agreement", revealLabels(v.Agreement, v.Labels)},
+		{"Disagreement", revealLabels(v.Disagreement, v.Labels)},
+		{"Minority", revealLabels(v.Minority, v.Labels)},
+	}
+	texts, _ := truncateAll(secs, fit(lengths(secs), verdictBudget))
+	for i := range secs {
+		secs[i].text = texts[i]
+	}
+	return secs
+}

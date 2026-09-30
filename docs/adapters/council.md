@@ -31,7 +31,7 @@ tincan council "..." --members chatgpt-web,claude-web,codex --chairman chatgpt-w
 tincan council "..." --json
 ```
 
-`tincan council "question"` shows each stage as it happens and prints the verdict when done. `--attach` adds context files, `--members` replaces the default roster for this council, `--chairman` names the chairman to try first, and `--json` prints the result as JSON. Run interactively in a terminal on an admin device, it approves its own held request, so it starts at once. Run from a script or an agent's shell, it waits for approval like any agent's ask.
+`tincan council "question"` shows each stage as it happens and prints the verdict when done. `--attach` adds context files, `--members` replaces the default roster for this council, `--chairman` names the chairman to try first, and `--json` prints the result as JSON. When its stdin and stdout are both terminals on an admin device, it approves its own held request, so it starts at once. Otherwise it waits for approval like any agent's ask. An agent with a shell on an admin device can already approve its own requests with `tincan approve`, so the default hold restrains the agents that cannot approve.
 
 Free text is the question, asked of the default council. For more control, put `council:` first and one JSON object after it:
 

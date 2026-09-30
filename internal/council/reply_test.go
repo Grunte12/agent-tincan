@@ -204,3 +204,27 @@ func TestReplyNoQuorumFitsRelayBodyLimit(t *testing.T) {
 		t.Errorf("block answers = %d, want 2", len(answers))
 	}
 }
+
+func TestReplyCompletedLongVerdictFitsRelayBodyLimit(t *testing.T) {
+	f := completedCouncil()
+	f.Outcome.Verdict.Recommendation = strings.Repeat("<b>\"a long verdict\"</b> ", 200<<10/24)
+	f.Outcome.Verdict.Minority = strings.Repeat("minority \"view\" ", 20<<10/16)
+	text, status := Reply(f)
+	if status != envelope.StatusAnswered {
+		t.Fatalf("status = %s, want answered", status)
+	}
+	if len(text) > envelope.DefaultMaxBody {
+		t.Fatalf("reply is %d bytes, over the relay's %d byte body limit", len(text), envelope.DefaultMaxBody)
+	}
+	if !strings.Contains(text, "[truncated:") {
+		t.Errorf("reply does not say the verdict was cut")
+	}
+	res := resultBlock(t, text)
+	v, _ := res["verdict"].(map[string]any)
+	if rec, _ := v["recommendation"].(string); !strings.Contains(rec, "[truncated:") {
+		t.Errorf("block recommendation was not cut: %d bytes", len(rec))
+	}
+	if agr, _ := v["agreement"].(string); agr != "All answers agree the data fits on one node today." {
+		t.Errorf("short agreement changed: %q", agr)
+	}
+}

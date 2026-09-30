@@ -50,7 +50,8 @@ type Eligibility struct {
 // woken-on-demand model agents sit by default; services, live sessions,
 // and agents with no way to wake them do not, unless the owner lists them
 // in council.json. The convener and everyone in its chain never sit or
-// chair, so a council cannot widen who reaches whom.
+// chair, so a council cannot widen who reaches whom, and an agent the
+// owner or the form excludes never chairs.
 func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Request) Eligibility {
 	var e Eligibility
 	// A convening request at the relay's hop limit leaves no hop for the
@@ -129,8 +130,13 @@ func Resolve(roster []onboard.Member, conv envelope.Request, cfg Config, req Req
 			}
 		}
 	}
+	// An agent the owner or the request excludes never chairs, however it
+	// became a candidate.
+	excluded := func(name string) bool {
+		return slices.Contains(cfg.Exclude, name) || slices.Contains(req.Exclude, name)
+	}
 	for _, c := range candidates {
-		if !inChain(c) && !slices.Contains(e.Chairmen, c) {
+		if !inChain(c) && !excluded(c) && !slices.Contains(e.Chairmen, c) {
 			e.Chairmen = append(e.Chairmen, c)
 		}
 	}

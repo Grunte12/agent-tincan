@@ -244,3 +244,18 @@ func TestOwnerExcludedMemberCanBeRequested(t *testing.T) {
 		t.Fatalf("decline %q, members %v", e.Decline, e.Members)
 	}
 }
+
+func TestExcludedAgentNeverChairs(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Exclude = []string{"claude-web"}
+	e := Resolve(team, owner, cfg, question(t, `council: {"question":"q","exclude":["chatgpt-web"]}`, cfg))
+	if want := []string{"gemini-web"}; !slices.Equal(e.Chairmen, want) {
+		t.Fatalf("chairmen %v, want %v", e.Chairmen, want)
+	}
+	// Named by agent name in council.json, an excluded agent still does not chair.
+	cfg.Chairmen = []string{"claude-web", "gemini-web"}
+	e = Resolve(team, owner, cfg, question(t, `council: {"question":"q"}`, cfg))
+	if want := []string{"gemini-web"}; !slices.Equal(e.Chairmen, want) {
+		t.Fatalf("named chairmen %v, want %v", e.Chairmen, want)
+	}
+}
