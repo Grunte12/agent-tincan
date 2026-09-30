@@ -114,6 +114,21 @@ func TestChairmanCannotChangeTheScores(t *testing.T) {
 	}
 }
 
+// A web chairman's conversation footer is not part of the minority section.
+func TestChairmanFooterStaysOutOfTheVerdict(t *testing.T) {
+	r := newCouncilRig(t, relay.Config{})
+	for _, n := range []string{"alpha", "bravo", "delta"} {
+		r.member(n, honest(n, ""))
+	}
+	r.member("charlie", chairing("charlie", func(string) string {
+		return verdictBlock("architecture", "Use a queue.") + "\n\nclaude.ai conversation: 121d5309-95f2-4d5c-8ebf-5e1db586c466"
+	}))
+	out := r.chair(5*time.Second, seats(true, "alpha", "bravo", "charlie", "delta"), "charlie")
+	if v := out.Verdict; v.Minority != "none" || v.Recommendation != "Use a queue." {
+		t.Fatalf("verdict = %+v", v)
+	}
+}
+
 // AE7: every candidate fails (an error, a decline, a reply with no
 // verdict), and the council still completes with its ranking, the verdict
 // unavailable and the category uncategorized.
