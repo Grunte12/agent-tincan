@@ -4,15 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
@@ -262,5 +268,185 @@ func TestFormatAgentsBacklog(t *testing.T) {
 				t.Fatalf("idle roster = %q", got)
 			}
 		})
+	}
+}
+
+// An agent's good-at line is the last field on its own line, labelled and
+// quoted; an agent without one renders exactly as before.
+func TestFormatAgentsShowsGoodAtLast(t *testing.T) {
+	now := time.Now()
+	without := client.AgentInfo{Name: "grokbot", Online: true, Wake: "webhook", Kind: "openclaw", LastPoll: now, Version: "0.5.2"}
+	with := without
+	with.GoodAt = "phone calls, texts; fast pickup"
+	got := formatAgents([]client.AgentInfo{with, {Name: "chatgpt", Wake: "none"}}, now)
+	want := `grokbot        online   wake=webhook last seen just now kind=openclaw version=0.5.2 good_at="phone calls, texts; fast pickup"` + "\n" +
+		"chatgpt        offline  wake=none never seen\n"
+	if got != want {
+		t.Fatalf("agents =\n%s\nwant\n%s", got, want)
+	}
+	// The commas and semicolon stay inside the quotes: the rest of the line
+	// is what the agent renders without a line, and the quoted text unquotes
+	// back to the owner's line.
+	first, _, _ := strings.Cut(got, "\n")
+	rest, quoted, ok := strings.Cut(first, " good_at=")
+	if !ok || rest+"\n" != formatAgents([]client.AgentInfo{without}, now) {
+		t.Fatalf("line without the good-at field = %q", rest)
+	}
+	if line, err := strconv.Unquote(quoted); err != nil || line != with.GoodAt {
+		t.Fatalf("good_at value %s unquotes to %q, %v", quoted, line, err)
+	}
+}
+
+// For the same roster, tincan agents and list_agents show the same good-at
+// text for every agent, owner-set and stock lines alike, and list_agents
+// keeps one line per agent that splits on the first ":".
+func TestGoodAtParityAcrossCLIAndMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	admin := m.Client(t, "admin")
+	code, err := admin.InviteKind(ctx, "history", "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "stranger").Join(ctx, code); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.SetGoodAt(ctx, "muse", `phone calls, texts; says "hi"`); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := admin.Agents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	cliOut, err := run(t, agentsCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ss, err := mcpserver.New(m.Client(t, "grokbot"), "test").Connect(ctx, srvT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, cliT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpOut := res.Content[0].(*mcp.TextContent).Text
+
+	cliLines := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(cliOut), "\n") {
+		if name, _, ok := strings.Cut(line, " "); ok && !strings.HasPrefix(line, "#") {
+			cliLines[name] = line
+		}
+	}
+	mcpLines := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(mcpOut), "\n") {
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("list_agents line without a name: %q", line)
+		}
+		mcpLines[name] = line
+	}
+	if len(mcpLines) != len(agents) {
+		t.Fatalf("list_agents has %d lines for %d agents:\n%s", len(mcpLines), len(agents), mcpOut)
+	}
+	lined := 0
+	for _, a := range agents {
+		field := a.GoodAtField()
+		if field == "" {
+			if strings.Contains(cliLines[a.Name], "good_at=") || strings.Contains(mcpLines[a.Name], "good_at=") {
+				t.Errorf("%s has no line but shows one:\n%s\n%s", a.Name, cliLines[a.Name], mcpLines[a.Name])
+			}
+			continue
+		}
+		lined++
+		if !strings.HasSuffix(cliLines[a.Name], " "+field) || !strings.HasSuffix(mcpLines[a.Name], ", "+field) {
+			t.Errorf("%s good-at differs:\ncli %q\nmcp %q\nwant suffix %s", a.Name, cliLines[a.Name], mcpLines[a.Name], field)
+		}
+	}
+	if lined != 2 {
+		t.Fatalf("want the owner line on muse and the stock line on history, got %d lines in %+v", lined, agents)
+	}
+}
+
+// tincan good-at sets, replaces and clears a line; a line the relay rejects
+// reaches the owner as the relay's own message; an unknown agent's 404 is
+// not mistaken for an older relay.
+func TestGoodAtCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	out, err := run(t, goodAtCmd(), "muse", "phone calls")
+	if err != nil || out != "\"muse\" is now good at: phone calls\n" {
+		t.Fatalf("set: %q, %v", out, err)
+	}
+	if out, _ := run(t, agentsCmd()); !strings.Contains(out, `good_at="phone calls"`) {
+		t.Fatalf("roster after set:\n%s", out)
+	}
+	if _, err := run(t, goodAtCmd(), "muse", "phone calls and texts"); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := run(t, agentsCmd()); !strings.Contains(out, `good_at="phone calls and texts"`) {
+		t.Fatalf("roster after replace:\n%s", out)
+	}
+	out, err = run(t, goodAtCmd(), "muse", "")
+	if err != nil || out != "Cleared the good-at line of \"muse\".\n" {
+		t.Fatalf("clear: %q, %v", out, err)
+	}
+	if out, _ := run(t, agentsCmd()); strings.Contains(out, "good_at=") {
+		t.Fatalf("roster after clear:\n%s", out)
+	}
+	// The confirmation reports what the relay stored: surrounding space is
+	// trimmed, and a whitespace-only line is a clear.
+	out, err = run(t, goodAtCmd(), "muse", "  texts  ")
+	if err != nil || out != "\"muse\" is now good at: texts\n" {
+		t.Fatalf("padded set: %q, %v", out, err)
+	}
+	out, err = run(t, goodAtCmd(), "muse", "   ")
+	if err != nil || out != "Cleared the good-at line of \"muse\".\n" {
+		t.Fatalf("whitespace clear: %q, %v", out, err)
+	}
+
+	_, err = run(t, goodAtCmd(), "muse", strings.Repeat("x", 121))
+	if err == nil || !strings.Contains(err.Error(), "the good-at line is over 120 characters") || strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("too long: %v", err)
+	}
+	_, err = run(t, goodAtCmd(), "nobody", "anything")
+	if !client.IsStatus(err, http.StatusNotFound) || strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("unknown agent: %v", err)
+	}
+}
+
+// A relay older than the good-at route answers Go's plain "404 page not
+// found", which becomes an upgrade hint; a JSON 404 for an unknown agent
+// and other errors pass through unchanged.
+func TestOlderRelayGoodAt(t *testing.T) {
+	old := &client.APIError{Code: http.StatusNotFound, Message: "404 page not found"}
+	err := olderRelayGoodAt(old)
+	if !errors.Is(err, old) || !strings.Contains(err.Error(), "older than this tincan") || !strings.Contains(err.Error(), "upgrade the relay") {
+		t.Fatalf("older relay: %v", err)
+	}
+	for _, e := range []error{
+		&client.APIError{Code: http.StatusNotFound, Message: `no such agent "nobody"`},
+		&client.APIError{Code: http.StatusBadRequest, Message: "the good-at line is over 120 characters"},
+		errors.New("dial tcp: connection refused"),
+	} {
+		if got := olderRelayGoodAt(e); got != e {
+			t.Fatalf("%v became %v", e, got)
+		}
+	}
+
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	useConfig(t, client.Config{})
+	if _, err := run(t, goodAtCmd(), "muse", "phone calls", "--relay", srv.URL); err == nil || !strings.Contains(err.Error(), "upgrade the relay") {
+		t.Fatalf("good-at against an older relay: %v", err)
 	}
 }

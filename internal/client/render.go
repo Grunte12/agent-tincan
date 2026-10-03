@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -95,6 +96,16 @@ func (a AgentInfo) OverdueNote(now time.Time) string {
 		return "overdue: no check recorded since it joined or the relay restarted"
 	}
 	return "overdue: last check " + ageAgo(now.Sub(a.LastPoll))
+}
+
+// GoodAtField is the agent's good-at line as a roster field,
+// good_at="...", quoted so commas, semicolons and quotes in the owner's text
+// cannot read as more fields. It is empty for an agent with no line.
+func (a AgentInfo) GoodAtField() string {
+	if a.GoodAt == "" {
+		return ""
+	}
+	return "good_at=" + strconv.Quote(a.GoodAt)
 }
 
 // ageAgo renders an age for LastSeen and OverdueNote: "just now", "12m ago", "3h ago",

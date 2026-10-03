@@ -60,6 +60,10 @@ type AgentInfo struct {
 	LastActive time.Time `json:"last_active,omitzero"`
 	Wake       string    `json:"wake"`
 	Kind       string    `json:"kind,omitempty"` // agent runtime (hermes, codex, ...), empty when unknown
+	// GoodAt is the line saying what the agent is good at: the owner's line,
+	// else the stock line for a fixed-job kind. Empty when neither applies
+	// and from relays that predate it.
+	GoodAt string `json:"good_at,omitempty"`
 	// Version is the tincan build the agent last called the relay with,
 	// empty when it has not called since the relay learned to record it,
 	// or runs a client that predates the version header.
@@ -511,6 +515,17 @@ func (r *Relay) InviteKind(ctx context.Context, name, kind string) (string, erro
 // SetKind records a joined agent's kind; "" clears it (admin devices only).
 func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
 	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/kind", map[string]string{"kind": kind}, nil)
+}
+
+// SetGoodAt records the owner's line saying what an agent is good at; ""
+// clears it (admin devices only). It returns the line as the relay stored
+// it, trimmed, so "" means the line was cleared.
+func (r *Relay) SetGoodAt(ctx context.Context, name, line string) (string, error) {
+	var out struct {
+		GoodAt string `json:"good_at"`
+	}
+	err := r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/good-at", map[string]string{"good_at": line}, &out)
+	return out.GoodAt, err
 }
 
 // Remove unbinds an agent (admin devices only).

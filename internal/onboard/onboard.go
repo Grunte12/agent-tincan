@@ -112,6 +112,26 @@ var defaultWake = map[string]string{
 	KindGeneric:       "none",
 }
 
+// stockGoodAt is the good-at line a fixed-job kind shows when the owner has
+// set none, condensed from that kind's instructions in agent.tmpl. Its keys
+// are exactly the kinds isService reports; general kinds have no stock line.
+var stockGoodAt = map[string]string{
+	KindHistory:       "answers questions about the owner's past ChatGPT, Claude, Grok, Gemini, Copilot and Codex chats, images included",
+	KindNotes:         "saves, searches and reads the owner's Agent Notes on their Mac; never edits or deletes one",
+	KindCouncil:       "puts one question to every model on the team, has them rank the answers blind, and returns a verdict",
+	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any generated images",
+	KindClaudeWeb:     "asks Claude (claude.ai) in the owner's browser and replies with the answer and any generated images",
+	KindGrokWeb:       "asks Grok (grok.com) in the owner's browser and replies with the answer and any generated images",
+	KindGeminiWeb:     "asks Gemini (gemini.google.com) in the owner's browser and replies with the answer and any generated images",
+	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
+	KindCopilotWeb:    "asks Microsoft Copilot (copilot.com) in the owner's browser and replies with the answer and its source links",
+	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which can act in the owner's connected apps",
+}
+
+// StockGoodAt returns the stock good-at line for kind, "" for a kind that
+// has none.
+func StockGoodAt(kind string) string { return stockGoodAt[kind] }
+
 // wakeMethodOrder is every wake method, in the order the operator prompt
 // lists them.
 var wakeMethodOrder = []string{"webhook", "email", "wait", "channel", "command", "schedule", "none"}

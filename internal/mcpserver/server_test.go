@@ -117,6 +117,21 @@ func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 	if !strings.Contains(mcpserver.Instructions, "When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it.") {
 		t.Fatal("Instructions should tell the agent to finish and reply to the open request a reply is tied to")
 	}
+	for _, want := range []string{"good_at line the owner wrote", "to one teammate only", "only after the first declines, fails or hands it back"} {
+		if !strings.Contains(mcpserver.Instructions, want) {
+			t.Errorf("Instructions lack %q", want)
+		}
+	}
+	descs := map[string]string{}
+	for _, tool := range res.Tools {
+		descs[tool.Name] = tool.Description
+	}
+	if want := "never for calls, payments or bookings"; !strings.Contains(descs["ask"], want) {
+		t.Errorf("ask description lacks %q: %s", want, descs["ask"])
+	}
+	if want := "good_at line the owner wrote"; !strings.Contains(descs["list_agents"], want) {
+		t.Errorf("list_agents description lacks %q: %s", want, descs["list_agents"])
+	}
 	for _, n := range names {
 		if strings.Contains(n, "invite") || strings.Contains(n, "remove") {
 			t.Fatalf("admin action exposed as tool: %s", n)
@@ -1042,5 +1057,28 @@ func TestListAgentsShowsBacklog(t *testing.T) {
 	}
 	if out := call(t, cs, "list_agents", nil); !strings.Contains(out, "1 queued (oldest 0m), 1 claimed") {
 		t.Fatalf("busy roster = %q", out)
+	}
+}
+
+// list_agents ends an agent's line with its quoted good-at line, and the
+// owner's commas and semicolon do not add lines or fields before it.
+func TestListAgentsShowsGoodAt(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	if _, err := m.Client(t, "admin").SetGoodAt(context.Background(), "muse", "phone calls, texts; fast pickup"); err != nil {
+		t.Fatal(err)
+	}
+	out := call(t, session(t, m, "grokbot"), "list_agents", nil)
+	var muse string
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("line without a name: %q in %q", line, out)
+		}
+		if name == "muse" {
+			muse = line
+		}
+	}
+	if want := `muse: offline, wake=none, never seen, good_at="phone calls, texts; fast pickup"`; muse != want {
+		t.Fatalf("list_agents muse = %q, want %q", muse, want)
 	}
 }

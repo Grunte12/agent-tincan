@@ -234,3 +234,16 @@ func TestAgentInfoScheduleLabels(t *testing.T) {
 		})
 	}
 }
+
+// The good-at fragment is labelled and quoted, so commas, semicolons and
+// quotes in the owner's text stay inside one roster field; an agent with no
+// line has no fragment.
+func TestGoodAtField(t *testing.T) {
+	if got := (client.AgentInfo{Name: "muse"}).GoodAtField(); got != "" {
+		t.Fatalf("no line = %q, want empty", got)
+	}
+	got := (client.AgentInfo{Name: "muse", GoodAt: `phone calls, fast pickup; says "hi"`}).GoodAtField()
+	if want := `good_at="phone calls, fast pickup; says \"hi\""`; got != want {
+		t.Fatalf("field = %s, want %s", got, want)
+	}
+}

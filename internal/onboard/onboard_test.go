@@ -558,6 +558,36 @@ func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
 	}
 }
 
+// Every model agent, the scheduled kind included, is told to choose a
+// teammate by its good_at line in the live roster, to send a real-world
+// action to one teammate at a time, and to leave lines to the owner. Service
+// blocks carry no model guidance.
+func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: append(matts(),
+		Member{Name: "fo", Kind: KindScheduled}, Member{Name: "hermes", Wake: "webhook"},
+		Member{Name: "codex", Wake: "command"}, Member{Name: "chatgpt", Wake: "none"},
+		Member{Name: "history", Kind: KindHistory}, Member{Name: "notes", Kind: KindNotes},
+		Member{Name: "council", Kind: KindCouncil}, Member{Name: "chatgpt-web", Kind: KindChatGPTWeb})})
+	want := []string{
+		"read the good_at lines in the live roster (list_agents, or tincan agents from a shell)",
+		"Send a real-world action (a call, a payment, a booking) to one teammate only",
+		"Ask another only after the first declines, fails or hands it back.",
+		"Only Matt sets good-at lines",
+	}
+	var sawScheduled bool
+	for _, a := range k.Agents {
+		for _, w := range want {
+			if got := strings.Contains(a.Instructions, w); got == isService(a.Kind) {
+				t.Errorf("%s (%s): contains %q = %v", a.Name, a.Kind, w, got)
+			}
+		}
+		sawScheduled = sawScheduled || a.Kind == KindScheduled
+	}
+	if !sawScheduled {
+		t.Fatal("kit has no scheduled block")
+	}
+}
+
 // notes is a product service: its runtime name resolves to the notes kind,
 // it waits on the relay, and its block carries no model instructions for
 // itself, only the lines teammates that use it add to their own.

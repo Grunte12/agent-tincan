@@ -21,6 +21,8 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) PutAgent(_ context.Context, a Agent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Only SetAgentGoodAt writes the line; a rewrite keeps it.
+	a.GoodAt = m.agents[a.Name].GoodAt
 	m.agents[a.Name] = a
 	return nil
 }
@@ -63,6 +65,17 @@ func (m *MemoryStore) SetAgentKind(_ context.Context, name, kind string) (bool, 
 	a, ok := m.agents[name]
 	if ok {
 		a.Kind = kind
+		m.agents[name] = a
+	}
+	return ok, nil
+}
+
+func (m *MemoryStore) SetAgentGoodAt(_ context.Context, name, line string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[name]
+	if ok {
+		a.GoodAt = line
 		m.agents[name] = a
 	}
 	return ok, nil

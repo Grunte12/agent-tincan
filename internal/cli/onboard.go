@@ -155,3 +155,34 @@ Kinds: ` + strings.Join(onboard.Kinds, ", "),
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	return cmd
 }
+
+func goodAtCmd() *cobra.Command {
+	var relayURL, socket string
+	cmd := &cobra.Command{
+		Use:   "good-at <name> <line>",
+		Short: "Set the line saying what an agent is good at (admin devices only)",
+		Long: `Record one short line saying what an agent is good at, shown on its entry in
+"tincan agents" and the list_agents tool so teammates can pick the right one.
+Pass "" as the line to clear it; a fixed-job kind then shows its stock line.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			stored, err := r.SetGoodAt(cmd.Context(), args[0], args[1])
+			if err != nil {
+				return olderRelayGoodAt(err)
+			}
+			if stored == "" {
+				cmd.Printf("Cleared the good-at line of %q.\n", args[0])
+				return nil
+			}
+			cmd.Printf("%q is now good at: %s\n", args[0], stored)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
+	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
+	return cmd
+}

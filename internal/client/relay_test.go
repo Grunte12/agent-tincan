@@ -422,3 +422,66 @@ func TestAskCarriesScheduleTarget(t *testing.T) {
 		}
 	}
 }
+
+// A fixed-job kind lists with its stock good-at line until an admin sets
+// one, and clearing it brings the stock line back (AE1). A general kind lists
+// with no line until an admin sets one. A non-admin cannot set a line (AE3).
+func TestGoodAtLinesThroughClient(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	admin := m.Client(t, "admin")
+	code, err := admin.InviteKind(ctx, "history", "history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "stranger").Join(ctx, code); err != nil {
+		t.Fatal(err)
+	}
+	goodAt := func(name string) string {
+		t.Helper()
+		agents, err := admin.Agents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range agents {
+			if a.Name == name {
+				return a.GoodAt
+			}
+		}
+		t.Fatalf("no %s in %+v", name, agents)
+		return ""
+	}
+	stock := goodAt("history")
+	if !strings.Contains(stock, "ChatGPT") {
+		t.Fatalf("history stock line = %q", stock)
+	}
+	if _, err := admin.SetGoodAt(ctx, "history", "past chats, including images"); err != nil {
+		t.Fatal(err)
+	}
+	if got := goodAt("history"); got != "past chats, including images" {
+		t.Fatalf("history line after set = %q", got)
+	}
+	if _, err := admin.SetGoodAt(ctx, "history", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := goodAt("history"); got != stock {
+		t.Fatalf("history line after clear = %q, want stock %q", got, stock)
+	}
+
+	if got := goodAt("muse"); got != "" {
+		t.Fatalf("muse line before set = %q, want none", got)
+	}
+	if _, err := admin.SetGoodAt(ctx, "muse", "phone calls; fast pickup"); err != nil {
+		t.Fatal(err)
+	}
+	if got := goodAt("muse"); got != "phone calls; fast pickup" {
+		t.Fatalf("muse line after set = %q", got)
+	}
+
+	if _, err := m.Client(t, "grokbot").SetGoodAt(ctx, "muse", "anything"); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("non-admin set good-at: %v", err)
+	}
+	if got := goodAt("muse"); got != "phone calls; fast pickup" {
+		t.Fatalf("non-admin changed muse line to %q", got)
+	}
+}

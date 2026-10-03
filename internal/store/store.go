@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS agents (
   kind      TEXT,
   node_user TEXT,
   last_seen_at INTEGER,
-  version   TEXT
+  version   TEXT,
+  good_at   TEXT
 );
 CREATE TABLE IF NOT EXISTS invites (
   code    TEXT PRIMARY KEY, -- hex HMAC digest of the one-time code, never the raw code
@@ -133,6 +134,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateAgentVersion(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent version: %w", err)
+	}
+	if err := s.migrateAgentGoodAt(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent good-at: %w", err)
 	}
 	if err := s.migrateAgentFeatures(); err != nil {
 		db.Close()
@@ -318,6 +323,21 @@ func (s *Store) migrateAgentVersion() error {
 	return err
 }
 
+// migrateAgentGoodAt adds the good_at column (the owner's line saying what
+// the agent is good at, NULL until set) to an agents table created before
+// lines were stored. It is a no-op on a current table.
+func (s *Store) migrateAgentGoodAt() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'good_at')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN good_at TEXT`)
+	return err
+}
+
 func (s *Store) migrateAgentFeatures() error {
 	var pollColumn bool
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'poll_features')`).Scan(&pollColumn); err != nil {
@@ -402,18 +422,19 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	defer tx.Rollback()
 	// A name moving to a new machine replaces its old binding. Other agents
 	// on either machine are untouched: a node may carry several names. The
-	// name's last activity and the build it last reported carry over.
+	// name's last activity, the build it last reported and the owner's
+	// good-at line carry over; only SetAgentGoodAt writes the line.
 	var lastSeen sql.NullInt64
-	var version, features, pollFeatures sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures)
+	var version, features, pollFeatures, goodAt sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features, good_at FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures, &goodAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features, good_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures, goodAt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -431,6 +452,17 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 // SetAgentKind records an agent's runtime kind; "" stores NULL.
 func (s *Store) SetAgentKind(ctx context.Context, name, kind string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE agents SET kind = ? WHERE name = ?`, nullable(kind), name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// SetAgentGoodAt records the owner's good-at line for an agent; "" stores
+// NULL.
+func (s *Store) SetAgentGoodAt(ctx context.Context, name, line string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET good_at = ? WHERE name = ?`, nullable(line), name)
 	if err != nil {
 		return false, err
 	}
@@ -535,7 +567,7 @@ func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, b
 }
 
 func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +576,7 @@ func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]i
 	for rows.Next() {
 		var a identity.Agent
 		var joined int64
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser); err != nil {
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)
