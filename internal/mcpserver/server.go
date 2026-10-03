@@ -32,7 +32,8 @@ const Instructions = `You are one agent in the owner's Agent Tincan team. Other 
 - For work that takes more than a few minutes, post a progress note with progress when you start and at milestones.
 - search finds past requests and replies in chains you took part in; use trace with a returned trace_id to read the whole chain.
 - If you cannot proceed without a detail only the asker has, reply with status needs_input and your question rather than guessing. When a teammate needs input on your request, use answer to supply it. The same request resumes with the exchange attached.
-- list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, and which tincan build each runs.
+- list_agents shows who is in the team, who is online, how each one wakes, when each last called the relay, which tincan build each runs, and the good_at line the owner wrote for each. When you need a teammate for a job, pick the one whose good_at line fits.
+- Send a real-world action (a call, a payment, a booking) to one teammate only, and ask another only after the first declines, fails or hands it back.
 ` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
 
@@ -232,7 +233,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		s.AddReceivingMiddleware(watchMiddleware(f.watch))
 	}
 
-	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total). Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
+	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total); sending to several teammates at once is for questions, never for calls, payments or bookings. Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
 			if len(in.Also) > 0 {
 				gb, ok := b.(groupBackend)
@@ -411,7 +412,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, schedule with its check interval and an overdue marker when it has missed its checks, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, and queued work with its oldest wait and live claims."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, schedule with its check interval and an overdue marker when it has missed its checks, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, queued work with its oldest wait and live claims, and the good_at line the owner wrote for each, which you use to choose whom to ask for a job."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {
