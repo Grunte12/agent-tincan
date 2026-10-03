@@ -95,8 +95,8 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 	listed, source := r.lastListed, r.lastSource
 	r.findMu.Unlock()
 	if found == "" || found == old {
-		switch {
-		case source == "":
+		switch source {
+		case "":
 			log.Printf("tincan: relay at %s did not answer; no local tailnet netmap to search", old)
 		default:
 			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
