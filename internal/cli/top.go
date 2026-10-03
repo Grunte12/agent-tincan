@@ -151,7 +151,12 @@ func fetchFrame(ctx context.Context, r *client.Relay) (topFrame, error) {
 
 func attention(a client.AgentInfo, relayVersion string, now time.Time) (score int, flags []string) {
 	overdue := a.OverdueNote(now) != ""
-	if !a.Online && a.Queued > 0 && (a.Wake == "" || a.Wake == "none" || overdue) {
+	// Only webhook and email wakes come from the relay. An offline agent on
+	// an agent-side method (command, channel, wait) has lost the process
+	// that would notice its queue, and a scheduled one counts only once it
+	// misses its checks.
+	relayWakes := a.Wake == "webhook" || a.Wake == "email" || (a.Wake == "schedule" && !overdue)
+	if !a.Online && a.Queued > 0 && !relayWakes {
 		score += 8
 		flags = append(flags, "QUEUED-OFFLINE")
 	}
