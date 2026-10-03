@@ -484,6 +484,11 @@ func tailscaleBinary() string {
 // only while it still says old, so a config someone changed meanwhile is
 // kept.
 func updateSavedRelay(path, old, found string) error {
+	unlock, err := lockConfig(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := loadSavedConfig(path)
 	if err != nil {
 		return err
@@ -534,6 +539,11 @@ func LearnRelayKey(ctx context.Context, r *Relay) {
 	if r.configFile == "" {
 		return
 	}
+	unlock, err := lockConfig(r.configFile)
+	if err != nil {
+		return
+	}
+	defer unlock()
 	c, err := loadSavedConfig(r.configFile)
 	if err != nil || strings.TrimRight(c.Relay, "/") != r.Base() {
 		return
