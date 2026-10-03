@@ -674,6 +674,36 @@ func TestLocalAdminSocketCanSetGoodAtAndItIsAudited(t *testing.T) {
 	t.Fatalf("no good-at audit in %+v", events)
 }
 
+// A body without good_at, or with good_at null, is refused rather than read
+// as a clear, so a typo in the field name cannot erase the owner's line.
+func TestSetGoodAtRequiresTheField(t *testing.T) {
+	h := newHarness(t, Config{})
+	set := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PUT", "/v1/agents/muse/good-at", strings.NewReader(body))
+		req.RemoteAddr = "@"
+		rec := httptest.NewRecorder()
+		h.srv.AdminHandler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := set(`{"good_at":"phone calls"}`); rec.Code != http.StatusOK {
+		t.Fatalf("set: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, body := range []string{`{}`, `{"good_a":"x"}`, `{"good_at":null}`} {
+		if rec := set(body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s, want 400", body, rec.Code, rec.Body.String())
+		}
+	}
+	if g := goodAts(t, h); g["muse"] != "phone calls" {
+		t.Fatalf("line changed by a refused body: %v", g)
+	}
+	if rec := set(`{"good_at":""}`); rec.Code != http.StatusOK {
+		t.Fatalf("explicit clear: %d %s", rec.Code, rec.Body.String())
+	}
+	if g := goodAts(t, h); g["muse"] != "" {
+		t.Fatalf("explicit clear left %v", g)
+	}
+}
+
 type queuedRecorder struct {
 	mu sync.Mutex
 	to []string

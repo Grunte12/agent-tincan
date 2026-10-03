@@ -455,13 +455,13 @@ func TestGoodAtLinesThroughClient(t *testing.T) {
 	if !strings.Contains(stock, "ChatGPT") {
 		t.Fatalf("history stock line = %q", stock)
 	}
-	if err := admin.SetGoodAt(ctx, "history", "past chats, including images"); err != nil {
+	if _, err := admin.SetGoodAt(ctx, "history", "past chats, including images"); err != nil {
 		t.Fatal(err)
 	}
 	if got := goodAt("history"); got != "past chats, including images" {
 		t.Fatalf("history line after set = %q", got)
 	}
-	if err := admin.SetGoodAt(ctx, "history", ""); err != nil {
+	if _, err := admin.SetGoodAt(ctx, "history", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := goodAt("history"); got != stock {
@@ -471,14 +471,14 @@ func TestGoodAtLinesThroughClient(t *testing.T) {
 	if got := goodAt("muse"); got != "" {
 		t.Fatalf("muse line before set = %q, want none", got)
 	}
-	if err := admin.SetGoodAt(ctx, "muse", "phone calls; fast pickup"); err != nil {
+	if _, err := admin.SetGoodAt(ctx, "muse", "phone calls; fast pickup"); err != nil {
 		t.Fatal(err)
 	}
 	if got := goodAt("muse"); got != "phone calls; fast pickup" {
 		t.Fatalf("muse line after set = %q", got)
 	}
 
-	if err := m.Client(t, "grokbot").SetGoodAt(ctx, "muse", "anything"); !client.IsStatus(err, http.StatusForbidden) {
+	if _, err := m.Client(t, "grokbot").SetGoodAt(ctx, "muse", "anything"); !client.IsStatus(err, http.StatusForbidden) {
 		t.Fatalf("non-admin set good-at: %v", err)
 	}
 	if got := goodAt("muse"); got != "phone calls; fast pickup" {

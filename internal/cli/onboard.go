@@ -170,14 +170,15 @@ Pass "" as the line to clear it; a fixed-job kind then shows its stock line.`,
 			if err != nil {
 				return err
 			}
-			if err := r.SetGoodAt(cmd.Context(), args[0], args[1]); err != nil {
+			stored, err := r.SetGoodAt(cmd.Context(), args[0], args[1])
+			if err != nil {
 				return olderRelayGoodAt(err)
 			}
-			if args[1] == "" {
+			if stored == "" {
 				cmd.Printf("Cleared the good-at line of %q.\n", args[0])
 				return nil
 			}
-			cmd.Printf("%q is now good at: %s\n", args[0], args[1])
+			cmd.Printf("%q is now good at: %s\n", args[0], stored)
 			return nil
 		},
 	}

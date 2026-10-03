@@ -1064,7 +1064,7 @@ func TestListAgentsShowsBacklog(t *testing.T) {
 // owner's commas and semicolon do not add lines or fields before it.
 func TestListAgentsShowsGoodAt(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
-	if err := m.Client(t, "admin").SetGoodAt(context.Background(), "muse", "phone calls, texts; fast pickup"); err != nil {
+	if _, err := m.Client(t, "admin").SetGoodAt(context.Background(), "muse", "phone calls, texts; fast pickup"); err != nil {
 		t.Fatal(err)
 	}
 	out := call(t, session(t, m, "grokbot"), "list_agents", nil)

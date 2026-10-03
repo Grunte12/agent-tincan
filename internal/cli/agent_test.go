@@ -311,7 +311,7 @@ func TestGoodAtParityAcrossCLIAndMCP(t *testing.T) {
 	if _, err := m.Client(t, "stranger").Join(ctx, code); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.SetGoodAt(ctx, "muse", `phone calls, texts; says "hi"`); err != nil {
+	if _, err := admin.SetGoodAt(ctx, "muse", `phone calls, texts; says "hi"`); err != nil {
 		t.Fatal(err)
 	}
 	agents, err := admin.Agents(ctx)
@@ -402,6 +402,16 @@ func TestGoodAtCommand(t *testing.T) {
 	}
 	if out, _ := run(t, agentsCmd()); strings.Contains(out, "good_at=") {
 		t.Fatalf("roster after clear:\n%s", out)
+	}
+	// The confirmation reports what the relay stored: surrounding space is
+	// trimmed, and a whitespace-only line is a clear.
+	out, err = run(t, goodAtCmd(), "muse", "  texts  ")
+	if err != nil || out != "\"muse\" is now good at: texts\n" {
+		t.Fatalf("padded set: %q, %v", out, err)
+	}
+	out, err = run(t, goodAtCmd(), "muse", "   ")
+	if err != nil || out != "Cleared the good-at line of \"muse\".\n" {
+		t.Fatalf("whitespace clear: %q, %v", out, err)
 	}
 
 	_, err = run(t, goodAtCmd(), "muse", strings.Repeat("x", 121))

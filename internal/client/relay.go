@@ -514,9 +514,14 @@ func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
 }
 
 // SetGoodAt records the owner's line saying what an agent is good at; ""
-// clears it (admin devices only).
-func (r *Relay) SetGoodAt(ctx context.Context, name, line string) error {
-	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/good-at", map[string]string{"good_at": line}, nil)
+// clears it (admin devices only). It returns the line as the relay stored
+// it, trimmed, so "" means the line was cleared.
+func (r *Relay) SetGoodAt(ctx context.Context, name, line string) (string, error) {
+	var out struct {
+		GoodAt string `json:"good_at"`
+	}
+	err := r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/good-at", map[string]string{"good_at": line}, &out)
+	return out.GoodAt, err
 }
 
 // Remove unbinds an agent (admin devices only).

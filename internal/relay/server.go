@@ -1155,13 +1155,18 @@ func (s *Server) handleSetKind(w http.ResponseWriter, r *http.Request) {
 
 // handleSetGoodAt records the owner's line saying what a joined agent is good
 // at (admin only). An empty line clears it, so a fixed-job kind shows its
-// stock line again.
+// stock line again; a body without good_at is refused rather than read as a
+// clear.
 func (s *Server) handleSetGoodAt(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		GoodAt string `json:"good_at"`
+		GoodAt *string `json:"good_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.GoodAt == nil {
+		writeErr(w, http.StatusBadRequest, errors.New(`good_at is required; send "" to clear the line`))
 		return
 	}
 	if !s.isAdmin(r) {
@@ -1169,7 +1174,7 @@ func (s *Server) handleSetGoodAt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	line, err := s.dir.SetGoodAt(r.Context(), s.remote(r), name, in.GoodAt)
+	line, err := s.dir.SetGoodAt(r.Context(), s.remote(r), name, *in.GoodAt)
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return

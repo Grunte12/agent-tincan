@@ -483,7 +483,7 @@ func TestGoodAtLineDoesNotSkipApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
-	if err := m.Client(t, "admin").SetGoodAt(t.Context(), "muse", "phone calls; fast pickup"); err != nil {
+	if _, err := m.Client(t, "admin").SetGoodAt(t.Context(), "muse", "phone calls; fast pickup"); err != nil {
 		t.Fatal(err)
 	}
 	r, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "call the restaurant", envelope.KindAsk, "", false)
