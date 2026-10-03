@@ -14,6 +14,7 @@ Contents:
 
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
+- [New in v0.11.0](#new-in-v0110)
 - [New in v0.10.0](#new-in-v0100)
 - [Council](#council)
 - [New in v0.9.0](#new-in-v090)
@@ -103,6 +104,22 @@ tincan doctor
 ```
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
+
+## New in v0.11.0
+
+- [Relay moves are found on their own](#when-the-relays-address-changes): when the saved relay address goes silent, a client reads the local Tailscale netmap (LocalAPI first, `tailscale status --json` as a fallback), follows only the peer that proves the relay key, saves the new address and retries. This now works for long-running services on macOS, where the Tailscale app has no socket file. A slow relay that still proves its key is kept, and `tincan doctor` says why a search found nothing. A userspace tailscaled on a custom socket is reached with `TS_SOCKET`.
+- [Good-at lines](#last-seen): `tincan good-at muse "phone calls; fast pickup"` gives a teammate one line, in your words, saying what it is good at. `tincan agents` and `list_agents` show it as `good_at="..."`, and agents choose whom to ask by it. History, notes, council and the web teammates show a stock line until you write one. Agents are also told to send a real-world action (a call, a payment, a booking) to one teammate at a time.
+- [`tincan top`](#last-seen) shows the whole mesh live in one terminal, with the agents that need attention first.
+- Invite codes are stored on the relay as HMAC digests under a new `invite-pepper` file instead of in plain text.
+- [Grok Bot on hosts that are wiped and restored](docs/adapters/grokbot.md), with a no-sudo startup script.
+- Extension 0.6.1.
+
+Before you upgrade:
+
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.11.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.11.0 files in the relay's `--dist` and run `tincan relay-upgrade`). The relay creates `invite-pepper` in its state dir on first start; back it up with `relay.db`. Invite codes minted before the upgrade and not yet used stop working, so mint new ones. An older relay refuses `tincan good-at`.
+- Then run `tincan upgrade` on each agent and restart long-running services (web teammates, history, council, `tincan listen`) so they pick up relay discovery.
+- Set lines for your general agents, for example `tincan good-at muse "..."` and `tincan good-at fo "..."`.
+- Paste the standing instructions again (`tincan onboard --section agents`) into agents that read only their saved instructions, scheduled agents like Fo in particular.
 
 ## New in v0.10.0
 
