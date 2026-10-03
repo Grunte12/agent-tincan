@@ -192,6 +192,8 @@ type Relay struct {
 	configFile string
 	findMu     sync.Mutex
 	lastFind   time.Time
+	lastListed int                                             // IPv4 netmap addresses in the last FindRelay
+	lastSource string                                          // "localapi", "cli", "netmap", or ""
 	findRelays func(ctx context.Context, base string) []string // tests replace it
 }
 

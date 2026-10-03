@@ -262,6 +262,23 @@ func listenAddr(listen string, port int) (string, error) {
 	return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
 }
 
+// advertisePort is the port SelfURLs should name: the port --listen bound,
+// which may differ from --port when --listen carried :port.
+func advertisePort(listenAt string, flagPort int) int {
+	if listenAt == "" {
+		return flagPort
+	}
+	_, p, err := net.SplitHostPort(listenAt)
+	if err != nil {
+		return flagPort
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 1 || n > 65535 {
+		return flagPort
+	}
+	return n
+}
+
 func runRelay(ctx context.Context, f relayFlags) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -310,7 +327,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	dirCfg.InvitePepper = pepper
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), dirCfg)
 	srv := relay.New(dir, st, f.relayConfig())
-	urls := who.SelfURLs(ctx, f.port)
+	urls := who.SelfURLs(ctx, advertisePort(listenAt, f.port))
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))
 	if f.listen != "" {

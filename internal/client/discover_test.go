@@ -3,28 +3,26 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"testing"
+	"time"
+
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/types/key"
 )
 
 // fakeRelay answers hello with a proof under key, and agents.
 func fakeRelay(t *testing.T, key string) string {
 	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/hello":
-			_ = json.NewEncoder(w).Encode(map[string]string{"service": HelloService, "proof": HelloProof(key, r.URL.Query().Get("nonce"))})
-		case "/v1/whoami":
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "muse", "relay_key": key, "relay_urls": []string{"http://tincan-relay.example.ts.net"}})
-		case "/v1/agents":
-			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []AgentInfo{{Name: "muse"}}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	ts := httptest.NewServer(helloHandler(key))
 	t.Cleanup(ts.Close)
 	return ts.URL
 }
@@ -68,6 +66,9 @@ func TestRelayMovedIsFoundAndSaved(t *testing.T) {
 	c, err := LoadConfig()
 	if err != nil || c.Relay != moved || c.RelayKey != key {
 		t.Fatalf("saved config %+v %v", c, err)
+	}
+	if len(c.RelayURLs) != 1 || c.RelayURLs[0] != "http://tincan-relay.example.ts.net" || c.RelayInfoAt.IsZero() {
+		t.Fatalf("after the move, advertised URLs should be the live whoami list, got %+v", c)
 	}
 }
 
@@ -211,6 +212,9 @@ func TestNewRelayForFileWritesToItsOwnFile(t *testing.T) {
 	if c := readConfig(t, own); c.Relay != url || c.RelayKey != key {
 		t.Fatalf("own config after the move %+v", c)
 	}
+	if got := readConfig(t, own); len(got.RelayURLs) != 1 || got.RelayURLs[0] != "http://tincan-relay.example.ts.net" {
+		t.Fatalf("own advertised URLs after the move %+v", got)
+	}
 	if c := readConfig(t, ConfigPath()); c.Relay != old {
 		t.Fatalf("ConfigPath() followed the move for another agent: %+v", c)
 	}
@@ -261,4 +265,217 @@ func TestEnvRelayOverrideNeverWrites(t *testing.T) {
 	if c := readConfig(t, own); c.Relay != old {
 		t.Fatalf("--config file rewritten under TINCAN_RELAY: %+v", c)
 	}
+}
+
+func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
+	raw := []byte(`{
+		"Self": {"TailscaleIPs": ["100.98.147.65", "fd7a:115c:a1e0::1"], "HostName": "self-host", "Online": true},
+		"Peer": {
+			"n1": {"TailscaleIPs": ["100.96.137.127", "fd7a:115c:a1e0::2"], "HostName": "old-host", "Online": false},
+			"n2": {"TailscaleIPs": ["100.67.11.14"], "HostName": "live-host", "Online": false},
+			"n3": {"TailscaleIPs": ["100.1.2.3"], "HostName": "later-name", "Online": true},
+			"n4": {"TailscaleIPs": ["fd7a:115c:a1e0::9"], "HostName": "v6-only", "Online": true}
+		}
+	}`)
+	got, err := ipv4sFromStatusJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"100.98.147.65", "100.96.137.127", "100.67.11.14", "100.1.2.3"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want every IPv4 including offline, not host names or IPv6", got)
+	}
+}
+
+func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
+	got := peerURLs("http://100.96.137.127:8787", []string{"100.96.137.127", "100.67.11.14", "100.1.2.3", "100.67.11.14"})
+	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestTailnetCandidatesPrefersLocalAPIWhenCLIMissing(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return []string{"100.67.11.14"}, nil },
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787")
+	if !slices.Equal(got, []string{"http://100.67.11.14:8787"}) {
+		t.Fatalf("got %v, want the LocalAPI address on the saved port", got)
+	}
+	ips, src := netmapIPv4s(t.Context())
+	if src != "localapi" || !slices.Equal(ips, []string{"100.67.11.14"}) {
+		t.Fatalf("netmap %v via %s", ips, src)
+	}
+}
+
+func TestTailnetCandidatesFallsBackToCLI(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
+		func(context.Context) ([]string, error) { return []string{"100.67.11.14", "100.1.2.3"}, nil },
+	))
+	got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787")
+	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	_, src := netmapIPv4s(t.Context())
+	if src != "cli" {
+		t.Fatalf("source %q, want cli", src)
+	}
+}
+
+func TestTailnetCandidatesEmptyWithoutNetmap(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	if got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787"); got != nil {
+		t.Fatalf("got %v, want none", got)
+	}
+	ips, src := netmapIPv4s(t.Context())
+	if len(ips) != 0 || src != "" {
+		t.Fatalf("netmap %v via %q", ips, src)
+	}
+}
+
+func TestRelayMovedFromStaleIPFollowsProvingPeer(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	staleName := deadURL(t)
+	moved := fakeRelay(t, key)
+	other := fakeRelay(t, "k-other")
+	savedConfig(t, Config{Relay: old, Agent: "muse", RelayKey: key, RelayURLs: []string{staleName}})
+	r, err := NewRelayFor(Config{Relay: old, Agent: "muse", RelayKey: key, RelayURLs: []string{staleName}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.findRelays = func(context.Context, string) []string { return []string{other, moved} }
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != moved {
+		t.Fatalf("base %s, want the proving peer", r.Base())
+	}
+	c, _ := LoadConfig()
+	if c.Relay != moved || slices.Contains(c.RelayURLs, staleName) {
+		t.Fatalf("saved %+v still names the dead advertised URL", c)
+	}
+}
+
+func TestRelocateRunsAfterCallerDeadline(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	r.findRelays = func(context.Context, string) []string { return []string{moved} }
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if !r.relocate(ctx, &net.OpError{Op: "dial", Err: errors.New("connection refused")}) {
+		t.Fatal("a cancelled caller should not skip the search")
+	}
+	if r.Base() != moved {
+		t.Fatalf("base %s", r.Base())
+	}
+}
+
+func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
+	st := &ipnstate.Status{
+		Self: &ipnstate.PeerStatus{
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.98.147.65"), netip.MustParseAddr("fd7a:115c:a1e0::1")},
+			Online:       true,
+		},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.96.137.127")}, Online: false, HostName: "old-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.67.11.14")}, Online: false, HostName: "live-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.1.2.3")}, Online: true, HostName: "later-name"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::9")}, Online: true},
+		},
+	}
+	got := ipv4sFromLocalStatus(st)
+	want := []string{"100.98.147.65", "100.96.137.127", "100.67.11.14", "100.1.2.3"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want every IPv4 including offline, not host names or IPv6", got)
+	}
+}
+
+func TestLocalAPINetmapFailsFastWithoutSocket(t *testing.T) {
+	t.Setenv("TS_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	start := time.Now()
+	_, err := localAPINetmap(t.Context())
+	if err == nil {
+		t.Fatal("missing socket should fail")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %s, want an immediate miss so a 502 retry is not stalled", d)
+	}
+}
+
+// Production FindRelay path: LocalAPI IPs on the saved URL's port, no
+// findRelays hook, follow only the peer that proves the key.
+func TestRelayMovedFollowsLocalAPIAddresses(t *testing.T) {
+	const key = "k-real"
+	liveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(liveLn.Addr().(*net.TCPAddr).Port)
+	impLn, err := net.Listen("tcp", net.JoinHostPort("127.0.0.2", port))
+	if err != nil {
+		liveLn.Close()
+		t.Skip("cannot bind 127.0.0.2")
+	}
+	serveHello(t, liveLn, key)
+	serveHello(t, impLn, "k-other")
+	old := "http://" + net.JoinHostPort("127.0.0.3", port)
+	want := "http://" + net.JoinHostPort("127.0.0.1", port)
+	savedConfig(t, Config{Relay: old, Agent: "muse", RelayKey: key})
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) {
+			return []string{"127.0.0.3", "127.0.0.2", "127.0.0.1"}, nil
+		},
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	r, err := NewRelayFor(Config{Relay: old, Agent: "muse", RelayKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != want {
+		t.Fatalf("base %s, want the LocalAPI peer that proved the key", r.Base())
+	}
+	listed, src := r.LastFind()
+	if src != "localapi" || listed != 2 {
+		t.Fatalf("LastFind listed=%d source=%s, want 2 via localapi (current host skipped)", listed, src)
+	}
+}
+
+func serveHello(t *testing.T, ln net.Listener, key string) {
+	t.Helper()
+	srv := &http.Server{Handler: helloHandler(key)}
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	go func() { _ = srv.Serve(ln) }()
+}
+
+func helloHandler(key string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_ = json.NewEncoder(w).Encode(map[string]string{"service": HelloService, "proof": HelloProof(key, r.URL.Query().Get("nonce"))})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "muse", "relay_key": key, "relay_urls": []string{"http://tincan-relay.example.ts.net"}})
+		case "/v1/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []AgentInfo{{Name: "muse"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	})
 }

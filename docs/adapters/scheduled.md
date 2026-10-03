@@ -90,7 +90,7 @@ Overdue means her own cron stopped or her runs are failing. The relay cannot res
 - `tincan kind` or `tincan invite --kind scheduled` says the relay does not know the kind: upgrade the relay.
 - Overdue: her cron stopped, or each run fails before `tincan inbox`. Run `tincan doctor` in her sandbox.
 - She replies to some requests but not others: her cron job lacks the standing instructions, so a fresh run does not know to drain the inbox. Paste them into the cron job.
-- `tincan` cannot reach the relay from the sandbox: join or rejoin with `--proxy` if the sandbox only reaches the tailnet through a local proxy.
+- `tincan` cannot reach the relay from the sandbox: join or rejoin with `--proxy` if the sandbox only reaches the tailnet through a local proxy. If the relay host was rebuilt or re-joined Tailscale, run `tincan doctor`. A saved `relay_key` lets this sandbox find the new IP when it can see the tailnet; if doctor says it cannot search, `tincan rejoin --relay <live URL>`.
 
 ## Not built: iMessage wake
 

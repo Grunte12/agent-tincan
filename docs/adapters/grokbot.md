@@ -122,18 +122,15 @@ tincan join <code> --replace --relay http://tincan-relay --proxy http://localhos
 
 With the state in the home folder this should be rare. An ordinary wipe needs no re-link.
 
-## Limitation: relay rediscovery and the custom socket
+## Relay rediscovery and the custom socket
 
-When the relay moves, the client first tries the relay's advertised addresses, then scans online peers from `tailscale status --json` (`internal/client/discover.go`). That command uses tailscaled's default socket. The tailscale CLI has no environment variable for the socket, only the `--socket` flag. So with a userspace tailscaled on a custom socket, the plain binary sees no peers and the peer scan finds nothing.
-
-Workaround: the client looks up `tailscale` on `PATH` first. Put a wrapper there that adds the socket, as the script does in `~/.local/bin/tailscale`, and make sure `~/.local/bin` is on the `PATH` of whatever starts `tincan mcp`:
+When the relay moves, the client first tries the relay's advertised addresses, then every IPv4 address on the local Tailscale netmap (`internal/client/discover.go`). It reads the netmap from tailscaled's LocalAPI, and falls back to `tailscale status --json` only if LocalAPI is unreachable. With a userspace tailscaled on a custom socket, tell tincan where that socket is: set `TS_SOCKET` in the environment of every tincan process, including whatever starts `tincan mcp`:
 
 ```sh
-#!/bin/sh
-exec "$HOME/.local/lib/tailscale/tailscale" --socket="$HOME/.cache/tailscale/tailscaled.sock" "$@"
+export TS_SOCKET="$HOME/.cache/tailscale/tailscaled.sock"
 ```
 
-A userspace tailscaled on a custom socket must be reachable by tincan, whichever way you do it. If your tincan build reads a `TS_SOCKET` environment variable for its Tailscale calls, setting `TS_SOCKET` for tincan processes is the supported way. The wrapper keeps working either way.
+The `tailscale` wrapper the script installs in `~/.local/bin` still adds `--socket` for your own `tailscale` commands, and it also serves the CLI fallback when `~/.local/bin` is on `PATH`.
 
 ## Wake
 

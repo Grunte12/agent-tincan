@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +20,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/paths"
 )
 
 // HelloService is what a tincan relay's /v1/hello names itself.
@@ -35,33 +40,73 @@ func HelloProof(key, nonce string) string {
 // findEvery bounds how often one client searches the tailnet for its relay.
 var findEvery = 30 * time.Second
 
+// relocateFor is how long a search may run after the caller's context is
+// already done, so a timed-out inbox check still looks for a moved relay.
+const relocateFor = 15 * time.Second
+
+// lookupLocalNetmap lists tailnet IPv4s from Tailscale LocalAPI.
+// Tests replace it.
+var lookupLocalNetmap = localAPINetmap
+
+// lookupCLINetmap lists tailnet IPv4s from `tailscale status --json`.
+// Tests replace it.
+var lookupCLINetmap = cliStatusNetmap
+
+// SwapNetmapLookups replaces LocalAPI and CLI netmap listing for tests.
+// Either argument may be nil to leave that lookup as it is. The returned
+// function restores both.
+func SwapNetmapLookups(local, cli func(context.Context) ([]string, error)) func() {
+	oldLocal, oldCLI := lookupLocalNetmap, lookupCLINetmap
+	if local != nil {
+		lookupLocalNetmap = local
+	}
+	if cli != nil {
+		lookupCLINetmap = cli
+	}
+	return func() {
+		lookupLocalNetmap, lookupCLINetmap = oldLocal, oldCLI
+	}
+}
+
 // relocate is called after a failed call. When the failure means nothing
 // answered at the relay's address and the client knows the relay key, it
-// asks the tailnet's online peers for the relay, and on finding it switches
+// asks the tailnet's IPv4 peers for the relay, and on finding it switches
 // to the new address, saves it to the config file the client was built from
 // and reports true so the call is retried once.
 func (r *Relay) relocate(ctx context.Context, err error) bool {
-	if !unreachable(err) || ctx.Err() != nil {
+	if !unreachable(err) {
 		return false
 	}
+	search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
+	defer cancel()
+
 	r.findMu.Lock()
-	defer r.findMu.Unlock()
 	if r.key == "" {
+		r.findMu.Unlock()
 		return false
 	}
 	old := r.Base()
 	if time.Since(r.lastFind) < findEvery {
+		r.findMu.Unlock()
 		return false
 	}
 	r.lastFind = time.Now()
-	found := r.FindRelay(ctx)
+	found := r.FindRelay(search)
+	listed, source := r.lastListed, r.lastSource
+	r.findMu.Unlock()
 	if found == "" || found == old {
+		switch {
+		case source == "":
+			log.Printf("tincan: relay at %s did not answer; no local tailnet netmap to search", old)
+		default:
+			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
+		}
 		return false
 	}
 	r.baseMu.Lock()
 	r.base = found
 	r.baseMu.Unlock()
-	msg := fmt.Sprintf("tincan: the relay moved from %s to %s", old, found)
+	msg := fmt.Sprintf("tincan: the relay moved from %s to %s (listed %d peers via %s)", old, found, listed, source)
 	if r.configFile != "" {
 		if err := updateSavedRelay(r.configFile, old, found); err != nil {
 			msg += fmt.Sprintf("; could not update %s: %v", r.configFile, err)
@@ -70,10 +115,20 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 		}
 	}
 	log.Print(msg)
+	LearnRelayKey(search, r)
 	return true
 }
 
-// FindRelay asks every online tailnet peer, on the port of the current
+// LastFind is what the last relocate search saw: how many IPv4 netmap
+// addresses were probed, and which lookup supplied them ("localapi", "cli",
+// or "" if neither LocalAPI nor the Tailscale CLI answered).
+func (r *Relay) LastFind() (listed int, source string) {
+	r.findMu.Lock()
+	defer r.findMu.Unlock()
+	return r.lastListed, r.lastSource
+}
+
+// FindRelay asks every IPv4 tailnet address, on the port of the current
 // relay URL, to prove it holds the relay key, and returns the URL of the
 // first that does, or "". The caller holds findMu or owns r alone.
 func (r *Relay) FindRelay(ctx context.Context) string {
@@ -81,19 +136,28 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		return ""
 	}
 	base := r.Base()
-	// The relay's own advertised addresses (its stable name) come first;
-	// they work for agents that cannot search the tailnet.
+	// The relay's own advertised addresses come first; they work for
+	// agents that cannot search the tailnet.
 	var cands []string
 	for _, u := range r.known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
 	}
-	find := r.findRelays
-	if find == nil {
-		find = tailnetCandidates
+	var peers []string
+	var source string
+	if r.findRelays != nil {
+		peers = r.findRelays(ctx, base)
+		if len(peers) > 0 {
+			source = "netmap"
+		}
+	} else {
+		var ips []string
+		ips, source = netmapIPv4s(ctx)
+		peers = peerURLs(base, ips)
 	}
-	cands = append(cands, find(ctx, base)...)
+	r.lastListed, r.lastSource = len(peers), source
+	cands = append(cands, peers...)
 	if len(cands) == 0 {
 		return ""
 	}
@@ -172,52 +236,151 @@ func unreachable(err error) bool {
 	return errors.As(err, &ue) && ue.Timeout()
 }
 
-// tailnetCandidates lists relay URLs to try: every online peer from
-// tailscale status, with the scheme and port of base. None when the
-// tailscale CLI is not available (a proxy-only sandbox).
+// netmapIPv4s lists IPv4 addresses on the local tailnet: LocalAPI first,
+// then the Tailscale CLI. source is "localapi", "cli", or "".
+func netmapIPv4s(ctx context.Context) (ips []string, source string) {
+	ips, err := lookupLocalNetmap(ctx)
+	if err == nil {
+		return ips, "localapi"
+	}
+	ips, err = lookupCLINetmap(ctx)
+	if err == nil {
+		return ips, "cli"
+	}
+	return nil, ""
+}
+
+// tailnetCandidates lists relay URLs to try: every IPv4 address on the
+// local netmap, with the scheme and port of base. None when LocalAPI and
+// the Tailscale CLI are both unavailable (a proxy-only sandbox).
 func tailnetCandidates(ctx context.Context, base string) []string {
+	ips, _ := netmapIPv4s(ctx)
+	return peerURLs(base, ips)
+}
+
+// peerURLs builds relay URLs from IPv4s using the scheme and port of base,
+// skipping the host already in base.
+func peerURLs(base string, ips []string) []string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil
 	}
 	port := u.Port()
+	seen := map[string]bool{}
+	if h := u.Hostname(); h != "" {
+		seen[h] = true
+	}
+	var out []string
+	for _, ip := range ips {
+		if seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		host := ip
+		if port != "" {
+			host = net.JoinHostPort(ip, port)
+		}
+		out = append(out, u.Scheme+"://"+host)
+	}
+	return out
+}
+
+func localAPINetmap(ctx context.Context) ([]string, error) {
+	lc := &local.Client{}
+	sock := strings.TrimSpace(os.Getenv("TS_SOCKET"))
+	if sock != "" {
+		lc.Socket = sock
+		lc.UseSocketOnly = true
+	} else {
+		sock = paths.DefaultTailscaledSocket()
+	}
+	// A missing socket is not a Tailscale node; fail immediately rather
+	// than waiting on LocalAPI's dial timeout, then the CLI can run.
+	if sock != "" && runtime.GOOS != "windows" {
+		if _, err := os.Stat(sock); err != nil {
+			return nil, err
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ipv4sFromLocalStatus(st), nil
+}
+
+func ipv4sFromLocalStatus(st *ipnstate.Status) []string {
+	if st == nil {
+		return nil
+	}
+	var out []string
+	add := func(ips []netip.Addr) {
+		for _, ip := range ips {
+			if ip.Is4() {
+				out = append(out, ip.String())
+				return
+			}
+		}
+	}
+	if st.Self != nil {
+		add(st.Self.TailscaleIPs)
+	}
+	for _, p := range st.Peer {
+		if p != nil {
+			add(p.TailscaleIPs)
+		}
+	}
+	return out
+}
+
+func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	bin := tailscaleBinary()
 	if bin == "" {
-		return nil
+		return nil, errors.New("tailscale CLI not found")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
 	if err != nil {
-		return nil
+		return nil, err
 	}
+	return ipv4sFromStatusJSON(raw)
+}
+
+// ipv4sFromStatusJSON reads Self and Peer TailscaleIPs from `tailscale
+// status --json`, keeping every IPv4, including offline nodes. Host names
+// are ignored.
+func ipv4sFromStatusJSON(raw []byte) ([]string, error) {
 	var st struct {
+		Self *struct {
+			TailscaleIPs []string
+		}
 		Peer map[string]struct {
 			TailscaleIPs []string
-			Online       bool
 		}
 	}
-	if json.Unmarshal(raw, &st) != nil {
-		return nil
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
 	}
 	var out []string
-	for _, p := range st.Peer {
-		if !p.Online {
-			continue
-		}
-		for _, ip := range p.TailscaleIPs {
-			if strings.Contains(ip, ":") {
-				continue // the relay listens on the IPv4 tailnet address
+	add := func(ips []string) {
+		for _, ip := range ips {
+			parsed := net.ParseIP(ip)
+			if parsed == nil || parsed.To4() == nil {
+				continue
 			}
-			host := ip
-			if port != "" {
-				host = net.JoinHostPort(ip, port)
-			}
-			out = append(out, u.Scheme+"://"+host)
-			break
+			out = append(out, parsed.To4().String())
+			return
 		}
 	}
-	return out
+	if st.Self != nil {
+		add(st.Self.TailscaleIPs)
+	}
+	for _, p := range st.Peer {
+		add(p.TailscaleIPs)
+	}
+	return out, nil
 }
 
 func tailscaleBinary() string {

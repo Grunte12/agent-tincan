@@ -10,6 +10,13 @@ tincan join <code> --relay http://tincan-relay --proxy http://<user>:<pass>@hatc
 
 The proxy is saved in the agent's config and used only for relay traffic.
 
+This sandbox has no local Tailscale netmap, so it cannot search the tailnet if
+the saved relay URL goes silent. Join with the relay's stable name
+(`http://tincan-relay`, the default tsnet node). If the relay was started with
+`--listen` and the host later re-joins Tailscale, run `tincan doctor` and
+`tincan rejoin --relay <new URL>` when it says this client cannot search the
+tailnet.
+
 ## Wake: a background wait
 
 Muse gets a new turn when a background shell command finishes, and background processes survive between turns. So Muse keeps one running:

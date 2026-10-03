@@ -218,7 +218,7 @@ func TestRecipes(t *testing.T) {
 		}
 	}
 	host := strings.Join(recipe(t, k, "relay-host").Steps, "\n")
-	for _, want := range []string{"tincan relay --listen <tailscale-ip> --port 8787 --admin", "tsnet", "TS_AUTHKEY", "--hostname"} {
+	for _, want := range []string{"tincan relay --listen <tailscale-ip> --port 8787 --admin", "tsnet", "TS_AUTHKEY", "--hostname", "changes if the host re-joins Tailscale", "proxy-only"} {
 		if !strings.Contains(host, want) {
 			t.Errorf("relay-host recipe missing %q", want)
 		}

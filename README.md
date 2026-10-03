@@ -280,7 +280,7 @@ Step by step, including the relay and your first two agents: [docs/quickstart.md
 
 ### The relay
 
-One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead. Prefer the default: with `--listen` the relay's address follows the host's, which changes if the host re-joins Tailscale (agents find it again, but sandboxes that approve each site may need a new approval).
+One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead. Prefer the default: with `--listen` the relay's address follows the host's, which changes if the host re-joins Tailscale (agents that can see the tailnet find the new IP; a proxy-only agent needs `tincan rejoin` or tsnet). Sandboxes that approve each new site may also need a new approval.
 
 ```bash
 TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
@@ -522,17 +522,19 @@ It checks the saved join and the relay, whether the binary is the relay's curren
 
 ### When the relay's address changes
 
-Run the relay the default way, as its own tailnet node (no `--listen`), and keep its `--state-dir` (tsnet state, `relay.db`, `relay.key`, `invite-pepper`, `wake.json`) in your backups. `invite-pepper` must be restored with `relay.db` or outstanding invitations minted before the restore cannot be redeemed. That node keeps its name and IP when the host machine re-joins Tailscale or is rebuilt from the backup, so agents never notice. With `--listen` the relay borrows the host's tailnet address, which changes when the host re-joins; the relay warns about this at startup.
+Run the relay the default way, as its own tailnet node (no `--listen`), and keep its `--state-dir` (tsnet state, `relay.db`, `relay.key`, `invite-pepper`, `wake.json`) in your backups. `invite-pepper` must be restored with `relay.db` or outstanding invitations minted before the restore cannot be redeemed. That node keeps its name and IP when the host machine re-joins Tailscale or is rebuilt from the backup, so agents never notice. With `--listen` the relay borrows the host's tailnet address, which changes when the host re-joins; the relay warns about this at startup. A proxy-only agent cannot search the tailnet, so `--listen` plus a host re-registration means that agent needs `tincan rejoin` unless you switch the relay to tsnet.
 
-Agents find a relay that moved anyway, with nothing to configure:
+Agents find a relay that moved, with nothing to configure:
 
-- The relay keeps a secret key in `relay.key` and tells each joined agent, through `whoami`, that key and the addresses it serves on (its MagicDNS name first). Clients save them as `relay_key` and `relay_urls` and refresh them daily.
-- When nothing answers at the saved address (refused, no route, a 5-second connect timeout, or a proxy's 502/504), the client tries the relay's advertised addresses, then every online peer in `tailscale status` on the same port. It asks each for `/v1/hello` with a random nonce and follows only the one that returns the HMAC of the nonce under the key, so an impostor on the tailnet cannot pull agents over. It rewrites its config, logs `the relay moved from ... to ...`, and retries. Long-running `wait`, `listen` and `mcp` processes move with it.
+- Each client keeps the last relay URL that worked (`relay` in its config).
+- The relay keeps a secret key in `relay.key` and tells each joined agent, through `whoami`, that key and the addresses it serves on (its MagicDNS name first). Clients save them as `relay_key` and `relay_urls` and refresh them daily, and again after a successful find.
+- When nothing answers at the saved address (refused, no route, a 5-second connect timeout, or a proxy's 502/504), the client tries the relay's advertised addresses, then every IPv4 address on the local Tailscale netmap (LocalAPI first, `tailscale status --json` if LocalAPI is unreachable), including nodes that are not marked online, on the same port. It does not walk a list of host names. It asks each candidate for `/v1/hello` with a random nonce and follows only the one that returns the HMAC of the nonce under the key, so an impostor on the tailnet cannot pull agents over. It rewrites its config, logs `the relay moved from ... to ...`, and retries. Long-running `wait`, `listen` and `mcp` processes move with it. A timed-out inbox check still searches: the search has its own deadline.
 - `history serve` and `web serve` run as their own agent, so they learn the key themselves when they start and save it, and a new address after a move, to their own `--config` file. They refresh the key and addresses only when they restart, not daily.
 - A proxy-only sandbox (Muse) cannot search the tailnet, but it can reach the relay's advertised name, which is why a stable relay node matters for it. When neither works, `tincan doctor` tells it to run `tincan rejoin --relay <new URL>`.
+- Clients that already have a stale URL: upgrade tincan, then run `tincan inbox` or `tincan doctor`. If `relay_key` is saved, the client finds the live node and writes the new URL. If there is no key, `tincan rejoin --relay <live URL>` once (the live IPv4 with port, or `http://tincan-relay` when the relay is tsnet). Then `tincan doctor` until `relay moves` is ok.
 - Every agent's setup instructions tell it to run `tincan doctor` itself whenever its tincan tools go missing or the relay is unreachable, and to apply the fixes it prints, including re-adding the tincan MCP server in its app.
 
-`tincan doctor` shows whether the key is saved (`relay moves`).
+`tincan doctor` shows whether the key is saved (`relay moves`). If the saved URL is dead it says whether the client had no key, could not see a local netmap, or listed peers that did not prove they are this relay.
 
 ### Audit log and trace
 

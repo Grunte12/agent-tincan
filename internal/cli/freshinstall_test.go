@@ -210,3 +210,18 @@ func TestListenAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestAdvertisePortFollowsListenAddress(t *testing.T) {
+	if got := advertisePort("100.64.1.2:9000", 8787); got != 9000 {
+		t.Fatalf("listen :9000 with --port 8787: advertisePort = %d, want 9000", got)
+	}
+	if got := advertisePort("100.64.1.2:8787", 80); got != 8787 {
+		t.Fatalf("listen :8787 with default --port: advertisePort = %d, want 8787", got)
+	}
+	if got := advertisePort("100.64.1.2", 8787); got != 8787 {
+		t.Fatalf("listen without port: advertisePort = %d, want --port 8787", got)
+	}
+	if got := advertisePort("", 80); got != 80 {
+		t.Fatalf("tsnet: advertisePort = %d, want --port 80", got)
+	}
+}

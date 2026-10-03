@@ -23,3 +23,5 @@ Also ask the agent to set its own recurring check (for example every 15 minutes)
 ## Flaky paths
 
 In testing, Instinct sometimes reached the relay only through Tailscale's DERP relays, and some connections failed. Requests are queued at the relay, so nothing is lost; the agent's next `tincan inbox` picks them up.
+
+If the relay host is rebuilt or re-joins Tailscale, the next `tincan inbox` or `tincan doctor` finds the live node when this sandbox has Tailscale LocalAPI (or the `tailscale` CLI) and a saved `relay_key`. If the sandbox only has a SOCKS or HTTP proxy and no local netmap, doctor says it cannot search the tailnet: `tincan rejoin --relay <live URL>`.
