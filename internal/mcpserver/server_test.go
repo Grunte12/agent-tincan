@@ -1044,3 +1044,26 @@ func TestListAgentsShowsBacklog(t *testing.T) {
 		t.Fatalf("busy roster = %q", out)
 	}
 }
+
+// list_agents ends an agent's line with its quoted good-at line, and the
+// owner's commas and semicolon do not add lines or fields before it.
+func TestListAgentsShowsGoodAt(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	if err := m.Client(t, "admin").SetGoodAt(context.Background(), "muse", "phone calls, texts; fast pickup"); err != nil {
+		t.Fatal(err)
+	}
+	out := call(t, session(t, m, "grokbot"), "list_agents", nil)
+	var muse string
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("line without a name: %q in %q", line, out)
+		}
+		if name == "muse" {
+			muse = line
+		}
+	}
+	if want := `muse: offline, wake=none, never seen, good_at="phone calls, texts; fast pickup"`; muse != want {
+		t.Fatalf("list_agents muse = %q, want %q", muse, want)
+	}
+}

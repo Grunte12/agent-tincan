@@ -71,7 +71,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -189,6 +189,17 @@ func olderRelayKind(err error, name, kind string, invite bool) error {
 		"or pass tincan onboard --kind %s=%s every time you generate its block (that override is not saved on the relay)", err, kind, name, name, kind)
 }
 
+// olderRelayGoodAt turns an older relay's plain "404 page not found" for
+// the good-at route into an upgrade hint. The route's own 404, for an agent
+// the relay does not know, comes as a JSON error and passes through.
+func olderRelayGoodAt(err error) error {
+	apiErr, ok := errors.AsType[*client.APIError](err)
+	if !ok || apiErr.Code != http.StatusNotFound || !strings.Contains(apiErr.Message, "page not found") {
+		return err
+	}
+	return fmt.Errorf("%w. The relay is older than this tincan and cannot store good-at lines yet: upgrade the relay to this release and restart it", err)
+}
+
 // inviteRelayURL is the relay URL to print in an invite's join line: the
 // --relay flag, else the saved config (or TINCAN_RELAY) when the invite
 // went through it, else a placeholder. An invite over the admin socket
@@ -304,6 +315,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		}
 		if backlog := a.Backlog(now); backlog != "" {
 			fmt.Fprintf(&b, " %s", backlog)
+		}
+		if goodAt := a.GoodAtField(); goodAt != "" {
+			fmt.Fprintf(&b, " %s", goodAt)
 		}
 		b.WriteString("\n")
 	}

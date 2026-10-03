@@ -433,6 +433,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if backlog := a.Backlog(now); backlog != "" {
 					fmt.Fprintf(&out, ", %s", backlog)
 				}
+				if goodAt := a.GoodAtField(); goodAt != "" {
+					fmt.Fprintf(&out, ", %s", goodAt)
+				}
 				out.WriteString("\n")
 			}
 			if out.Len() == 0 {
