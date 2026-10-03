@@ -46,7 +46,7 @@ func TestStockGoodAtLinesPassValidationAndHygiene(t *testing.T) {
 		if err := store.PutAgent(ctx, identity.Agent{Name: kind, Kind: kind}); err != nil {
 			t.Fatal(err)
 		}
-		if err := dir.SetGoodAt(ctx, identity.LocalAdmin, kind, line); err != nil {
+		if _, err := dir.SetGoodAt(ctx, identity.LocalAdmin, kind, line); err != nil {
 			t.Errorf("%s stock line refused: %v", kind, err)
 			continue
 		}

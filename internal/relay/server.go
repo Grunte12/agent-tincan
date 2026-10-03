@@ -1169,12 +1169,11 @@ func (s *Server) handleSetGoodAt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if err := s.dir.SetGoodAt(r.Context(), s.remote(r), name, in.GoodAt); err != nil {
+	line, err := s.dir.SetGoodAt(r.Context(), s.remote(r), name, in.GoodAt)
+	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	// The directory stores the line trimmed.
-	line := strings.TrimSpace(in.GoodAt)
 	s.record(r.Context(), "good-at", "", "", name, store.DetailJSON(map[string]any{"good_at": line}))
 	writeJSON(w, http.StatusOK, map[string]string{"name": name, "good_at": line})
 }

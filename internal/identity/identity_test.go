@@ -469,16 +469,16 @@ func TestSetGoodAtIsAdminOnly(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "codex"))
-	if err := f.dir.SetGoodAt(ctx, "100.0.0.1:1", "codex", "refactors Go"); err != nil {
+	if _, err := f.dir.SetGoodAt(ctx, "100.0.0.1:1", "codex", "refactors Go"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.dir.SetGoodAt(ctx, "100.0.0.2:1", "codex", "phone calls"); !errors.Is(err, identity.ErrNotAdmin) {
+	if _, err := f.dir.SetGoodAt(ctx, "100.0.0.2:1", "codex", "phone calls"); !errors.Is(err, identity.ErrNotAdmin) {
 		t.Fatalf("non-admin set good-at: %v", err)
 	}
 	if a := agentNamed(t, f.dir, "codex"); a.GoodAt != "refactors Go" {
 		t.Fatalf("good-at after refused set = %q", a.GoodAt)
 	}
-	if err := f.dir.SetGoodAt(ctx, identity.LocalAdmin, "nobody", "phone calls"); !errors.Is(err, identity.ErrUnknownAgent) {
+	if _, err := f.dir.SetGoodAt(ctx, identity.LocalAdmin, "nobody", "phone calls"); !errors.Is(err, identity.ErrUnknownAgent) {
 		t.Fatalf("unknown agent: %v", err)
 	}
 }
@@ -489,7 +489,10 @@ func TestSetGoodAtValidates(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "codex"))
-	set := func(line string) error { return f.dir.SetGoodAt(ctx, identity.LocalAdmin, "codex", line) }
+	set := func(line string) error {
+		_, err := f.dir.SetGoodAt(ctx, identity.LocalAdmin, "codex", line)
+		return err
+	}
 	get := func() string { return agentNamed(t, f.dir, "codex").GoodAt }
 
 	max := strings.Repeat("é", 120)
@@ -525,7 +528,10 @@ func TestSetGoodAtDuringJoinIsNotLost(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	st.pause = func() {
-		go func() { done <- dir.SetGoodAt(ctx, identity.LocalAdmin, "grokbot", "phone calls") }()
+		go func() {
+			_, err := dir.SetGoodAt(ctx, identity.LocalAdmin, "grokbot", "phone calls")
+			done <- err
+		}()
 		select {
 		case err := <-done:
 			done <- err
@@ -552,7 +558,7 @@ func TestGoodAtSurvivesMoveAndVirtualRebind(t *testing.T) {
 	ctx := context.Background()
 	code, _ := dir.Invite(ctx, identity.LocalAdmin, "hermes")
 	dir.Join(ctx, "100.0.0.3:1", code)
-	if err := dir.SetGoodAt(ctx, identity.LocalAdmin, "hermes", "phone calls"); err != nil {
+	if _, err := dir.SetGoodAt(ctx, identity.LocalAdmin, "hermes", "phone calls"); err != nil {
 		t.Fatal(err)
 	}
 	code, _ = dir.Invite(ctx, identity.LocalAdmin, "hermes")
@@ -564,7 +570,7 @@ func TestGoodAtSurvivesMoveAndVirtualRebind(t *testing.T) {
 	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := dir.SetGoodAt(ctx, identity.LocalAdmin, "chatgpt", "web research"); err != nil {
+	if _, err := dir.SetGoodAt(ctx, identity.LocalAdmin, "chatgpt", "web research"); err != nil {
 		t.Fatal(err)
 	}
 	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {

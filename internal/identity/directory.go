@@ -55,19 +55,19 @@ func checkKind(kind string) error {
 	return nil
 }
 
-// MaxGoodAtRunes caps an agent's good-at line so the roster stays scannable.
-const MaxGoodAtRunes = 120
+// maxGoodAtRunes caps an agent's good-at line so the roster stays scannable.
+const maxGoodAtRunes = 120
 
 // checkGoodAt trims line and reports the line to store ("" clears it). A line
-// is one printable line: valid UTF-8, at most MaxGoodAtRunes runes, and no
+// is one printable line: valid UTF-8, at most maxGoodAtRunes runes, and no
 // control or format characters, newlines and tabs included.
 func checkGoodAt(line string) (string, error) {
 	line = strings.TrimSpace(line)
 	if !utf8.ValidString(line) {
 		return "", errors.New("the good-at line is not valid UTF-8")
 	}
-	if utf8.RuneCountInString(line) > MaxGoodAtRunes {
-		return "", fmt.Errorf("the good-at line is over %d characters", MaxGoodAtRunes)
+	if utf8.RuneCountInString(line) > maxGoodAtRunes {
+		return "", fmt.Errorf("the good-at line is over %d characters", maxGoodAtRunes)
 	}
 	if strings.IndexFunc(line, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
 		return "", errors.New("the good-at line contains a line break or other control character")
@@ -361,26 +361,26 @@ func (d *Directory) SetKind(ctx context.Context, remoteAddr, name, kind string) 
 }
 
 // SetGoodAt records the owner's line saying what an agent is good at (""
-// clears it). Only admin devices may set it.
-func (d *Directory) SetGoodAt(ctx context.Context, remoteAddr, name, line string) error {
+// clears it) and returns the line as stored. Only admin devices may set it.
+func (d *Directory) SetGoodAt(ctx context.Context, remoteAddr, name, line string) (string, error) {
 	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
-		return err
+		return "", err
 	}
 	line, err := checkGoodAt(line)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Serialize with Join, as SetKind does.
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	ok, err := d.store.SetAgentGoodAt(ctx, name, line)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !ok {
-		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+		return "", fmt.Errorf("%s: %w", name, ErrUnknownAgent)
 	}
-	return nil
+	return line, nil
 }
 
 // Agents lists joined agents.
