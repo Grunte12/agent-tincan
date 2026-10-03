@@ -40,9 +40,16 @@ func HelloProof(key, nonce string) string {
 // findEvery bounds how often one client searches the tailnet for its relay.
 var findEvery = 30 * time.Second
 
-// relocateFor is how long a search may run after the caller's context is
-// already done, so a timed-out inbox check still looks for a moved relay.
-const relocateFor = 15 * time.Second
+// relocateFor bounds one search for a moved relay. The search runs on its
+// own: a call whose deadline passes returns without waiting for it, so a
+// timed-out inbox check still sets off a look for the relay.
+var relocateFor = 15 * time.Second
+
+// refreshFor bounds the whoami that refreshes relay info after a move.
+const refreshFor = 5 * time.Second
+
+// learnAfterMove refreshes relay info after a move. Tests replace it.
+var learnAfterMove = LearnRelayKey
 
 // lookupLocalNetmap lists tailnet IPv4s from Tailscale LocalAPI.
 // Tests replace it.
@@ -70,30 +77,68 @@ func SwapNetmapLookups(local, cli func(context.Context) ([]string, error)) func(
 
 // relocate is called after a failed call. When the failure means nothing
 // answered at the relay's address and the client knows the relay key, it
-// asks the tailnet's IPv4 peers for the relay, and on finding it switches
-// to the new address, saves it to the config file the client was built from
-// and reports true so the call is retried once.
+// starts a search of the tailnet's IPv4 peers for the relay (or joins the
+// one running) and waits for it while ctx allows. A search that finds the
+// relay switches to the new address and saves it to the config file the
+// client was built from; relocate then reports true so the call is retried
+// once. A caller whose deadline passes returns at once and the search goes
+// on for the next call; a cancelled caller does not search, and cancelling
+// the caller that started a search stops it.
 func (r *Relay) relocate(ctx context.Context, err error) bool {
-	if !unreachable(err) {
-		return false
-	}
-	search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
-	defer cancel()
-
-	r.findMu.Lock()
-	if r.key == "" {
-		r.findMu.Unlock()
+	if !unreachable(err) || errors.Is(ctx.Err(), context.Canceled) {
 		return false
 	}
 	old := r.Base()
-	if time.Since(r.lastFind) < findEvery {
-		r.findMu.Unlock()
+	done := r.startFind(ctx, old)
+	if done == nil {
 		return false
 	}
+	select {
+	case <-done:
+		return r.Base() != old
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// startFind starts a search for the relay, or joins the one running, and
+// returns a channel closed when it ends; nil when the client has no relay
+// key or searched within findEvery.
+func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
+	r.findMu.Lock()
+	defer r.findMu.Unlock()
+	if r.finding != nil {
+		return r.finding
+	}
+	if r.key == "" || time.Since(r.lastFind) < findEvery {
+		return nil
+	}
 	r.lastFind = time.Now()
-	found := r.FindRelay(search)
-	listed, source := r.lastListed, r.lastSource
-	r.findMu.Unlock()
+	search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
+	stop := context.AfterFunc(ctx, func() {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	done := make(chan struct{})
+	r.finding = done
+	go func() {
+		defer close(done)
+		r.follow(search, old)
+		stop()
+		cancel()
+		r.findMu.Lock()
+		r.finding = nil
+		r.findMu.Unlock()
+	}()
+	return done
+}
+
+// follow searches for the relay and, if it is at a new address, switches
+// to it, saves it and refreshes the relay info there.
+func (r *Relay) follow(ctx context.Context, old string) {
+	found := r.FindRelay(ctx)
+	listed, source := r.LastFind()
 	if found == "" || found == old {
 		switch source {
 		case "":
@@ -101,7 +146,7 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 		default:
 			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
 		}
-		return false
+		return
 	}
 	r.baseMu.Lock()
 	r.base = found
@@ -115,8 +160,11 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 		}
 	}
 	log.Print(msg)
-	LearnRelayKey(search, r)
-	return true
+	// The search may have used up most of its time; the refresh gets its
+	// own.
+	refresh, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFor)
+	defer cancel()
+	learnAfterMove(refresh, r)
 }
 
 // LastFind is what the last relocate search saw: how many IPv4 netmap
@@ -130,16 +178,19 @@ func (r *Relay) LastFind() (listed int, source string) {
 
 // FindRelay asks every IPv4 tailnet address, on the port of the current
 // relay URL, to prove it holds the relay key, and returns the URL of the
-// first that does, or "". The caller holds findMu or owns r alone.
+// first that does, or "".
 func (r *Relay) FindRelay(ctx context.Context) string {
-	if r.key == "" {
+	r.findMu.Lock()
+	key, known := r.key, r.known
+	r.findMu.Unlock()
+	if key == "" {
 		return ""
 	}
 	base := r.Base()
 	// The relay's own advertised addresses come first; they work for
 	// agents that cannot search the tailnet.
 	var cands []string
-	for _, u := range r.known {
+	for _, u := range known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
@@ -156,7 +207,9 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		ips, source = netmapIPv4s(ctx)
 		peers = peerURLs(base, ips)
 	}
+	r.findMu.Lock()
 	r.lastListed, r.lastSource = len(peers), source
+	r.findMu.Unlock()
 	cands = append(cands, peers...)
 	if len(cands) == 0 {
 		return ""
@@ -167,7 +220,7 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 	var wg sync.WaitGroup
 	for _, c := range cands {
 		wg.Go(func() {
-			if r.proves(ctx, c) {
+			if r.proves(ctx, c, key) {
 				found <- c
 				cancel()
 			}
@@ -183,14 +236,14 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 // address the relay advertises.
 func (r *Relay) Proves(ctx context.Context, base string) bool {
 	r.findMu.Lock()
-	known := r.key != ""
+	key := r.key
 	r.findMu.Unlock()
-	return known && r.proves(ctx, strings.TrimRight(base, "/"))
+	return key != "" && r.proves(ctx, strings.TrimRight(base, "/"), key)
 }
 
 // proves reports whether the relay at base answers hello with a valid
-// proof of the relay key.
-func (r *Relay) proves(ctx context.Context, base string) bool {
+// proof of key.
+func (r *Relay) proves(ctx context.Context, base, key string) bool {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return false
@@ -214,7 +267,7 @@ func (r *Relay) proves(ctx context.Context, base string) bool {
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 4096)).Decode(&out) != nil {
 		return false
 	}
-	return out.Service == HelloService && hmac.Equal([]byte(out.Proof), []byte(HelloProof(r.key, nonce)))
+	return out.Service == HelloService && hmac.Equal([]byte(out.Proof), []byte(HelloProof(key, nonce)))
 }
 
 // unreachable reports whether err means nothing answered at the relay's

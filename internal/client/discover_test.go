@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,8 +292,6 @@ func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
 	}
 }
 
-var _ = time.Second
-
 func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
 	got := peerURLs("http://100.96.137.127:8787", []string{"100.96.137.127", "100.67.11.14", "100.1.2.3", "100.67.11.14"})
 	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
@@ -370,20 +369,145 @@ func TestRelayMovedFromStaleIPFollowsProvingPeer(t *testing.T) {
 	}
 }
 
-func TestRelocateRunsAfterCallerDeadline(t *testing.T) {
+// hangingURL is a relay address that accepts calls and never answers.
+func hangingURL(t *testing.T) string {
+	t.Helper()
+	stop := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	t.Cleanup(func() { close(stop); ts.Close() })
+	return ts.URL
+}
+
+// waitFor fails t unless ok turns true within 5s.
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !ok(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A call that runs out its own time (tincan wait --timeout, a timed-out
+// inbox check) returns at its deadline. The search it set off goes on by
+// itself, once, and the next call uses what it found.
+func TestTimedOutCallReturnsAtDeadlineAndSearchStillLands(t *testing.T) {
+	const key = "k-real"
+	old := hangingURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	var searches atomic.Int32
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		searches.Add(1)
+		select {
+		case <-time.After(time.Second):
+		case <-ctx.Done():
+		}
+		return []string{moved}
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		start := time.Now()
+		_, err := r.Agents(ctx)
+		cancel()
+		if err == nil {
+			t.Fatal("the hanging relay answered")
+		}
+		if d := time.Since(start); d > 700*time.Millisecond {
+			t.Fatalf("call took %s past its 200ms deadline; the search held it", d)
+		}
+	}
+	waitFor(t, "the background search to move the client", func() bool { return r.Base() == moved })
+	if n := searches.Load(); n != 1 {
+		t.Fatalf("%d searches, want one shared by both timed-out calls", n)
+	}
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatalf("next call after the search: %v", err)
+	}
+	if c, _ := LoadConfig(); c.Relay != moved {
+		t.Fatalf("saved relay %s, want %s", c.Relay, moved)
+	}
+}
+
+// A cancelled caller (a stopping service) ends the search instead of
+// holding shutdown for it.
+func TestCancelledCallerStopsSearch(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	started, stopped := make(chan struct{}), make(chan struct{})
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { _, err := r.Agents(ctx); done <- err }()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the call waited for the search after its caller was cancelled")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("the search kept running after its caller was cancelled")
+	}
+}
+
+// A caller already cancelled does not start a search at all.
+func TestCancelledCallerDoesNotSearch(t *testing.T) {
+	old := deadURL(t)
+	savedConfig(t, Config{Relay: old, RelayKey: "k-real"})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: "k-real"})
+	searched := false
+	r.findRelays = func(context.Context, string) []string { searched = true; return nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if r.relocate(ctx, &net.OpError{Op: "dial", Err: errors.New("connection refused")}) || searched {
+		t.Fatal("a cancelled caller searched")
+	}
+}
+
+// The whoami refresh after a move gets its own few seconds, not what is
+// left of the search.
+func TestRefreshAfterMoveHasItsOwnDeadline(t *testing.T) {
 	const key = "k-real"
 	old := deadURL(t)
 	moved := fakeRelay(t, key)
 	savedConfig(t, Config{Relay: old, RelayKey: key})
 	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
 	r.findRelays = func(context.Context, string) []string { return []string{moved} }
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if !r.relocate(ctx, &net.OpError{Op: "dial", Err: errors.New("connection refused")}) {
-		t.Fatal("a cancelled caller should not skip the search")
+	oldFor, oldLearn := relocateFor, learnAfterMove
+	t.Cleanup(func() { relocateFor, learnAfterMove = oldFor, oldLearn })
+	relocateFor = 300 * time.Millisecond
+	left := make(chan time.Duration, 1)
+	learnAfterMove = func(ctx context.Context, r *Relay) {
+		d, ok := ctx.Deadline()
+		if !ok || ctx.Err() != nil {
+			left <- 0
+			return
+		}
+		left <- time.Until(d)
+		LearnRelayKey(ctx, r)
 	}
-	if r.Base() != moved {
-		t.Fatalf("base %s", r.Base())
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-left; d < refreshFor-time.Second {
+		t.Fatalf("refresh had %s, want about %s of its own", d, refreshFor)
 	}
 }
 
