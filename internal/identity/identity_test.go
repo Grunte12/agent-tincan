@@ -496,7 +496,7 @@ func TestSetGoodAtValidates(t *testing.T) {
 	if err := set(max); err != nil || get() != max {
 		t.Fatalf("120-rune line: %v, stored %q", err, get())
 	}
-	for _, bad := range []string{strings.Repeat("é", 121), "calls\nbookings", "calls\x07", "calls​"} {
+	for _, bad := range []string{strings.Repeat("é", 121), "calls\nbookings", "calls\x07", "calls\u200b"} {
 		if err := set(bad); err == nil {
 			t.Errorf("line %q should be rejected", bad)
 		}
