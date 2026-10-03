@@ -272,10 +272,10 @@ func TestEnvRelayOverrideNeverWrites(t *testing.T) {
 
 func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
 	raw := []byte(`{
-		"Self": {"TailscaleIPs": ["100.98.147.65", "fd7a:115c:a1e0::1"], "HostName": "self-host", "Online": true},
+		"Self": {"TailscaleIPs": ["100.64.0.30", "fd7a:115c:a1e0::1"], "HostName": "self-host", "Online": true},
 		"Peer": {
-			"n1": {"TailscaleIPs": ["100.96.137.127", "fd7a:115c:a1e0::2"], "HostName": "old-host", "Online": false},
-			"n2": {"TailscaleIPs": ["100.67.11.14"], "HostName": "live-host", "Online": false},
+			"n1": {"TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::2"], "HostName": "old-host", "Online": false},
+			"n2": {"TailscaleIPs": ["100.64.0.20"], "HostName": "live-host", "Online": false},
 			"n3": {"TailscaleIPs": ["100.1.2.3"], "HostName": "later-name", "Online": true},
 			"n4": {"TailscaleIPs": ["fd7a:115c:a1e0::9"], "HostName": "v6-only", "Online": true}
 		}
@@ -284,7 +284,7 @@ func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"100.98.147.65", "100.96.137.127", "100.67.11.14", "100.1.2.3"}
+	want := []string{"100.64.0.30", "100.64.0.10", "100.64.0.20", "100.1.2.3"}
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
@@ -293,8 +293,8 @@ func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
 }
 
 func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
-	got := peerURLs("http://100.96.137.127:8787", []string{"100.96.137.127", "100.67.11.14", "100.1.2.3", "100.67.11.14"})
-	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
+	got := peerURLs("http://100.64.0.10:8787", []string{"100.64.0.10", "100.64.0.20", "100.1.2.3", "100.64.0.20"})
+	want := []string{"http://100.64.0.20:8787", "http://100.1.2.3:8787"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -302,11 +302,11 @@ func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
 
 func TestNetmapPrefersLocalAPIWhenCLIMissing(t *testing.T) {
 	t.Cleanup(SwapNetmapLookups(
-		func(context.Context) ([]string, error) { return []string{"100.67.11.14"}, nil },
+		func(context.Context) ([]string, error) { return []string{"100.64.0.20"}, nil },
 		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
 	))
 	ips, src := netmapIPv4s(t.Context())
-	if src != "localapi" || !slices.Equal(ips, []string{"100.67.11.14"}) {
+	if src != "localapi" || !slices.Equal(ips, []string{"100.64.0.20"}) {
 		t.Fatalf("netmap %v via %s", ips, src)
 	}
 }
@@ -314,10 +314,10 @@ func TestNetmapPrefersLocalAPIWhenCLIMissing(t *testing.T) {
 func TestNetmapFallsBackToCLI(t *testing.T) {
 	t.Cleanup(SwapNetmapLookups(
 		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
-		func(context.Context) ([]string, error) { return []string{"100.67.11.14", "100.1.2.3"}, nil },
+		func(context.Context) ([]string, error) { return []string{"100.64.0.20", "100.1.2.3"}, nil },
 	))
 	ips, src := netmapIPv4s(t.Context())
-	if src != "cli" || !slices.Equal(ips, []string{"100.67.11.14", "100.1.2.3"}) {
+	if src != "cli" || !slices.Equal(ips, []string{"100.64.0.20", "100.1.2.3"}) {
 		t.Fatalf("netmap %v via %s", ips, src)
 	}
 }
@@ -502,18 +502,18 @@ func TestRefreshAfterMoveHasItsOwnDeadline(t *testing.T) {
 func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
 	st := &ipnstate.Status{
 		Self: &ipnstate.PeerStatus{
-			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.98.147.65"), netip.MustParseAddr("fd7a:115c:a1e0::1")},
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.30"), netip.MustParseAddr("fd7a:115c:a1e0::1")},
 			Online:       true,
 		},
 		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
-			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.96.137.127")}, Online: false, HostName: "old-host"},
-			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.67.11.14")}, Online: false, HostName: "live-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.10")}, Online: false, HostName: "old-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.20")}, Online: false, HostName: "live-host"},
 			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.1.2.3")}, Online: true, HostName: "later-name"},
 			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::9")}, Online: true},
 		},
 	}
 	got := ipv4sFromLocalStatus(st)
-	want := []string{"100.98.147.65", "100.96.137.127", "100.67.11.14", "100.1.2.3"}
+	want := []string{"100.64.0.30", "100.64.0.10", "100.64.0.20", "100.1.2.3"}
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
