@@ -211,12 +211,16 @@ func (r *Relay) follow(ctx context.Context, old string) bool {
 		return false
 	}
 	r.baseMu.Lock()
-	r.base, r.movedFrom = found, old
+	r.base, r.unsaved = found, nil
 	r.baseMu.Unlock()
 	msg := fmt.Sprintf("tincan: the relay moved from %s to %s (listed %d peers via %s)", old, found, listed, source)
 	if r.configFile != "" {
+		before := configModTime(r.configFile)
 		if err := updateSavedRelay(r.configFile, old, found); err != nil {
 			msg += fmt.Sprintf("; could not update %s: %v", r.configFile, err)
+			r.baseMu.Lock()
+			r.unsaved = &unsavedMove{from: old, to: found, modTime: before}
+			r.baseMu.Unlock()
 		} else {
 			msg += "; updated " + r.configFile
 		}
@@ -523,6 +527,23 @@ func tailscaleBinary() string {
 	return ""
 }
 
+// unsavedMove is a relay move that could not be saved to the config file,
+// and the file's modification time when the move tried.
+type unsavedMove struct {
+	from, to string
+	modTime  time.Time
+}
+
+// configModTime is the config file's modification time, zero if it cannot
+// be read.
+func configModTime(path string) time.Time {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
 // updateSavedRelay rewrites the relay URL in the config file at path, but
 // only while it still says old, so a config someone changed meanwhile is
 // kept.
@@ -591,13 +612,15 @@ func LearnRelayKey(ctx context.Context, r *Relay) {
 	if err != nil {
 		return
 	}
-	r.baseMu.RLock()
-	base, movedFrom := r.base, r.movedFrom
-	r.baseMu.RUnlock()
+	r.baseMu.Lock()
+	base, unsaved := r.base, r.unsaved
+	r.unsaved = nil
+	r.baseMu.Unlock()
 	switch saved := strings.TrimRight(c.Relay, "/"); {
 	case saved == base:
-	case movedFrom != "" && saved == movedFrom:
-		// The move could not save itself (the config was locked); save it now.
+	case unsaved != nil && unsaved.to == base && saved == unsaved.from && configModTime(r.configFile).Equal(unsaved.modTime):
+		// The move could not save itself (the config was locked) and nothing
+		// has rewritten the file since, so a rejoin is never undone; save it.
 		c.Relay = base
 	default:
 		return
