@@ -116,7 +116,7 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 Before you upgrade:
 
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.11.0`. Self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; with only `--dist`, put the v0.11.0 files there and run `tincan relay-upgrade`. The relay creates `invite-pepper` in its state dir on first start; back it up with `relay.db`. Invite codes minted before the upgrade and not yet used stop working, so mint new ones. An older relay refuses `tincan good-at`.
+- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.11.0`. Self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; with only `--dist`, put the v0.11.0 binaries and `checksums.txt` there, write `0.11.0` to a `VERSION` file beside them, and run `tincan relay-upgrade`. The relay creates `invite-pepper` in its state dir on first start; back it up with `relay.db`. Invite codes minted before the upgrade and not yet used stop working, so mint new ones. An older relay refuses `tincan good-at`.
 - Then run `tincan upgrade` on each agent and restart long-running services (web teammates, history, council, `tincan listen`) so they pick up relay discovery.
 - Set lines for your general agents, for example `tincan good-at muse "..."` and `tincan good-at fo "..."`.
 - Paste the standing instructions again (`tincan onboard --section agents`) into agents that read only their saved instructions, scheduled agents like Fo in particular.
