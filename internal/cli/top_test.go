@@ -61,7 +61,7 @@ func TestRenderFrame(t *testing.T) {
 	f.held = []envelope.Request{{ID: "req1", From: "alpha", To: "zeta", Body: "approve me"}}
 	f.chains = []envelope.Result{{Request: envelope.Request{CreatedAt: at, From: "alpha", To: "zeta", Body: "hello"}, Status: envelope.StatusQueued}}
 	got := renderFrame(f, 120)
-	suffix := "Held for approval (1):\n  req1 alpha -> zeta approve me\nRecent chains:\n  12:00:00 alpha -> zeta [queued] hello\n"
+	suffix := "Held for approval (1):\n  req1 alpha -> zeta approve me\nRecent chains:\n  " + at.Local().Format("15:04:05") + " alpha -> zeta [queued] hello\n"
 	if !strings.HasSuffix(got, suffix) || !strings.Contains(got, "held 1") {
 		t.Fatal(got)
 	}
@@ -222,6 +222,31 @@ func TestTopLiveFrameHeight(t *testing.T) {
 	for line := range strings.SplitSeq(topLiveFrame(renderFrame(f, 20), 20, 2), "\n") {
 		if topTestDisplayWidth(line) > 20 {
 			t.Fatalf("overflow indicator too wide: %q", line)
+		}
+	}
+}
+
+// A day-old queue keeps its row in the column layout, and chain times are
+// shown in local time like the header.
+func TestRenderFrameAgeAndLocalTime(t *testing.T) {
+	at := time.Date(2026, 10, 2, 20, 26, 0, 0, time.Local)
+	sent := at.Add(-time.Hour).UTC()
+	f := topFrame{at: at, admin: true, roster: client.Roster{RelayVersion: "1.0.0", Agents: []client.AgentInfo{
+		{Name: "muse", Wake: "wait", Version: "1.0.0", Queued: 25, OldestQueued: at.Add(-(23*time.Hour + 31*time.Minute + 12*time.Second))},
+	}}, chains: []envelope.Result{{Request: envelope.Request{From: "a", To: "b", Body: "hi", CreatedAt: sent}, Status: envelope.StatusAnswered}}}
+	out := renderFrame(f, 120)
+	if !strings.Contains(out, "     25    23h      0 1.0.0") {
+		t.Fatalf("queue row not aligned:\n%s", out)
+	}
+	if want := "  " + sent.Local().Format("15:04:05") + " a -> b"; !strings.Contains(out, want) {
+		t.Fatalf("chain time not local, want %q in:\n%s", want, out)
+	}
+}
+
+func TestQueueAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{-time.Minute: "0m", 14 * time.Minute: "14m", 23*time.Hour + 31*time.Minute: "23h", 50 * time.Hour: "2d"} {
+		if got := client.QueueAge(d); got != want {
+			t.Errorf("QueueAge(%v) = %q, want %q", d, got, want)
 		}
 	}
 }

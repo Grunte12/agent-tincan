@@ -109,14 +109,7 @@ func (a AgentInfo) Backlog(now time.Time) string {
 	if a.Queued > 0 {
 		queued := fmt.Sprintf("%d queued", a.Queued)
 		if !a.OldestQueued.IsZero() {
-			d := max(now.Sub(a.OldestQueued), 0)
-			age := fmt.Sprintf("%dm", int(d/time.Minute))
-			if d >= 48*time.Hour {
-				age = fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-			} else if d >= time.Hour {
-				age = fmt.Sprintf("%dh", int(d/time.Hour))
-			}
-			queued += " (oldest " + age + ")"
+			queued += " (oldest " + QueueAge(now.Sub(a.OldestQueued)) + ")"
 		}
 		parts = append(parts, queued)
 	}
@@ -124,6 +117,19 @@ func (a AgentInfo) Backlog(now time.Time) string {
 		parts = append(parts, fmt.Sprintf("%d claimed", a.Claimed))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// QueueAge is how long the oldest queued request has waited, in whole
+// minutes, hours, or (from two days) days: "14m", "23h", "3d".
+func QueueAge(d time.Duration) string {
+	d = max(d, 0)
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%dm", int(d/time.Minute))
 }
 
 // sentStatus is a fresh send's status: held when the relay is holding it for

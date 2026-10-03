@@ -216,7 +216,7 @@ func renderFrame(f topFrame, width int) string {
 		_, flags := attention(a, f.roster.RelayVersion, f.at)
 		age := "-"
 		if a.Queued > 0 && !a.OldestQueued.IsZero() {
-			age = max(f.at.Sub(a.OldestQueued), 0).Round(time.Second).String()
+			age = client.QueueAge(f.at.Sub(a.OldestQueued))
 		}
 		line(fmt.Sprintf("%-16s %-7s %-12s %6d %6s %6d %s", topText(a.Name, 16), a.State(), topText(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
 		if len(flags) > 0 {
@@ -230,7 +230,7 @@ func renderFrame(f topFrame, width int) string {
 		}
 		line("Recent chains:")
 		for _, r := range f.chains {
-			line(fmt.Sprintf("  %s %s -> %s [%s] %s", r.Request.CreatedAt.Format("15:04:05"), r.Request.From, r.Request.To, r.Status, topText(r.Request.Body, 60)))
+			line(fmt.Sprintf("  %s %s -> %s [%s] %s", r.Request.CreatedAt.Local().Format("15:04:05"), r.Request.From, r.Request.To, r.Status, topText(r.Request.Body, 60)))
 		}
 	}
 	if f.note != "" {
