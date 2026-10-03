@@ -3,28 +3,29 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/paths"
+	"tailscale.com/types/key"
 )
 
 // fakeRelay answers hello with a proof under key, and agents.
 func fakeRelay(t *testing.T, key string) string {
 	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/hello":
-			_ = json.NewEncoder(w).Encode(map[string]string{"service": HelloService, "proof": HelloProof(key, r.URL.Query().Get("nonce"))})
-		case "/v1/whoami":
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "muse", "relay_key": key, "relay_urls": []string{"http://tincan-relay.example.ts.net"}})
-		case "/v1/agents":
-			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []AgentInfo{{Name: "muse"}}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	ts := httptest.NewServer(helloHandler(key))
 	t.Cleanup(ts.Close)
 	return ts.URL
 }
@@ -62,12 +63,16 @@ func TestRelayMovedIsFoundAndSaved(t *testing.T) {
 	if err != nil || len(agents) != 1 {
 		t.Fatalf("call after the move: %v %v", agents, err)
 	}
+	findIdle(t, r) // the relay info refresh runs after the retry
 	if r.Base() != moved {
 		t.Fatalf("base %s, want %s (the peer that proved the key, not the impostor)", r.Base(), moved)
 	}
 	c, err := LoadConfig()
 	if err != nil || c.Relay != moved || c.RelayKey != key {
 		t.Fatalf("saved config %+v %v", c, err)
+	}
+	if len(c.RelayURLs) != 1 || c.RelayURLs[0] != "http://tincan-relay.example.ts.net" || c.RelayInfoAt.IsZero() {
+		t.Fatalf("after the move, advertised URLs should be the live whoami list, got %+v", c)
 	}
 }
 
@@ -129,6 +134,7 @@ func TestRelayFoundAtItsAdvertisedNameWithoutTailscale(t *testing.T) {
 	if r.Base() != named {
 		t.Fatalf("base %s, want the advertised %s", r.Base(), named)
 	}
+	findIdle(t, r)
 }
 
 func TestProxyGatewayErrorsMeanUnreachable(t *testing.T) {
@@ -208,8 +214,12 @@ func TestNewRelayForFileWritesToItsOwnFile(t *testing.T) {
 	if _, err := r.Agents(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	findIdle(t, r) // the relay info refresh runs after the retry
 	if c := readConfig(t, own); c.Relay != url || c.RelayKey != key {
 		t.Fatalf("own config after the move %+v", c)
+	}
+	if got := readConfig(t, own); len(got.RelayURLs) != 1 || got.RelayURLs[0] != "http://tincan-relay.example.ts.net" {
+		t.Fatalf("own advertised URLs after the move %+v", got)
 	}
 	if c := readConfig(t, ConfigPath()); c.Relay != old {
 		t.Fatalf("ConfigPath() followed the move for another agent: %+v", c)
@@ -261,4 +271,559 @@ func TestEnvRelayOverrideNeverWrites(t *testing.T) {
 	if c := readConfig(t, own); c.Relay != old {
 		t.Fatalf("--config file rewritten under TINCAN_RELAY: %+v", c)
 	}
+}
+
+func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
+	raw := []byte(`{
+		"Self": {"TailscaleIPs": ["100.64.0.30", "fd7a:115c:a1e0::1"], "HostName": "self-host", "Online": true},
+		"Peer": {
+			"n1": {"TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::2"], "HostName": "old-host", "Online": false},
+			"n2": {"TailscaleIPs": ["100.64.0.20"], "HostName": "live-host", "Online": false},
+			"n3": {"TailscaleIPs": ["100.1.2.3"], "HostName": "later-name", "Online": true},
+			"n4": {"TailscaleIPs": ["fd7a:115c:a1e0::9"], "HostName": "v6-only", "Online": true}
+		}
+	}`)
+	got, err := ipv4sFromStatusJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"100.64.0.30", "100.64.0.10", "100.64.0.20", "100.1.2.3"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want every IPv4 including offline, not host names or IPv6", got)
+	}
+}
+
+func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
+	got := peerURLs("http://100.64.0.10:8787", []string{"100.64.0.10", "100.64.0.20", "100.1.2.3", "100.64.0.20"})
+	want := []string{"http://100.64.0.20:8787", "http://100.1.2.3:8787"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestNetmapPrefersLocalAPIWhenCLIMissing(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return []string{"100.64.0.20"}, nil },
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	ips, src := netmapIPv4s(t.Context())
+	if src != "localapi" || !slices.Equal(ips, []string{"100.64.0.20"}) {
+		t.Fatalf("netmap %v via %s", ips, src)
+	}
+}
+
+func TestNetmapFallsBackToCLI(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
+		func(context.Context) ([]string, error) { return []string{"100.64.0.20", "100.1.2.3"}, nil },
+	))
+	ips, src := netmapIPv4s(t.Context())
+	if src != "cli" || !slices.Equal(ips, []string{"100.64.0.20", "100.1.2.3"}) {
+		t.Fatalf("netmap %v via %s", ips, src)
+	}
+}
+
+func TestNetmapEmptyWithoutLocalAPIOrCLI(t *testing.T) {
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	ips, src := netmapIPv4s(t.Context())
+	if len(ips) != 0 || src != "" {
+		t.Fatalf("netmap %v via %q", ips, src)
+	}
+}
+
+func TestRelayMovedFromStaleIPFollowsProvingPeer(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	staleName := deadURL(t)
+	moved := fakeRelay(t, key)
+	other := fakeRelay(t, "k-other")
+	savedConfig(t, Config{Relay: old, Agent: "muse", RelayKey: key, RelayURLs: []string{staleName}})
+	r, err := NewRelayFor(Config{Relay: old, Agent: "muse", RelayKey: key, RelayURLs: []string{staleName}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.findRelays = func(context.Context, string) []string { return []string{other, moved} }
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != moved {
+		t.Fatalf("base %s, want the proving peer", r.Base())
+	}
+	findIdle(t, r) // the relay info refresh runs after the retry
+	c, _ := LoadConfig()
+	if c.Relay != moved || slices.Contains(c.RelayURLs, staleName) {
+		t.Fatalf("saved %+v still names the dead advertised URL", c)
+	}
+}
+
+// hangingURL is a relay address that accepts calls and never answers.
+func hangingURL(t *testing.T) string {
+	t.Helper()
+	stop := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	}))
+	t.Cleanup(func() { close(stop); ts.Close() })
+	return ts.URL
+}
+
+// waitFor fails t unless ok turns true within 5s.
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !ok(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A call that runs out its own time (tincan wait --timeout, a timed-out
+// inbox check) returns at its deadline. The search it set off goes on by
+// itself, once, and the next call uses what it found.
+func TestTimedOutCallReturnsAtDeadlineAndSearchStillLands(t *testing.T) {
+	const key = "k-real"
+	old := hangingURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	var searches atomic.Int32
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		searches.Add(1)
+		select {
+		case <-time.After(time.Second):
+		case <-ctx.Done():
+		}
+		return []string{moved}
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		start := time.Now()
+		_, err := r.Agents(ctx)
+		cancel()
+		if err == nil {
+			t.Fatal("the hanging relay answered")
+		}
+		if d := time.Since(start); d > 700*time.Millisecond {
+			t.Fatalf("call took %s past its 200ms deadline; the search held it", d)
+		}
+	}
+	waitFor(t, "the background search to move the client", func() bool { return r.Base() == moved })
+	findIdle(t, r) // the refresh after the move writes the config file
+	if n := searches.Load(); n != 1 {
+		t.Fatalf("%d searches, want one shared by both timed-out calls", n)
+	}
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatalf("next call after the search: %v", err)
+	}
+	if c, _ := LoadConfig(); c.Relay != moved {
+		t.Fatalf("saved relay %s, want %s", c.Relay, moved)
+	}
+}
+
+// A cancelled caller (a stopping service) ends the search instead of
+// holding shutdown for it.
+func TestCancelledCallerStopsSearch(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	started, stopped := make(chan struct{}), make(chan struct{})
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { _, err := r.Agents(ctx); done <- err }()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the call waited for the search after its caller was cancelled")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("the search kept running after its caller was cancelled")
+	}
+}
+
+// A caller already cancelled does not start a search at all.
+func TestCancelledCallerDoesNotSearch(t *testing.T) {
+	old := deadURL(t)
+	savedConfig(t, Config{Relay: old, RelayKey: "k-real"})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: "k-real"})
+	searched := false
+	r.findRelays = func(context.Context, string) []string { searched = true; return nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if r.relocate(ctx, &net.OpError{Op: "dial", Err: errors.New("connection refused")}) || searched {
+		t.Fatal("a cancelled caller searched")
+	}
+}
+
+// The whoami refresh after a move gets its own few seconds, not what is
+// left of the search.
+func TestRefreshAfterMoveHasItsOwnDeadline(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	r.findRelays = func(context.Context, string) []string { return []string{moved} }
+	oldFor, oldLearn := relocateFor, learnAfterMove
+	t.Cleanup(func() { relocateFor, learnAfterMove = oldFor, oldLearn })
+	relocateFor = 300 * time.Millisecond
+	left := make(chan time.Duration, 1)
+	learnAfterMove = func(ctx context.Context, r *Relay) {
+		d, ok := ctx.Deadline()
+		if !ok || ctx.Err() != nil {
+			left <- 0
+			return
+		}
+		left <- time.Until(d)
+		LearnRelayKey(ctx, r)
+	}
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-left; d < refreshFor-time.Second {
+		t.Fatalf("refresh had %s, want about %s of its own", d, refreshFor)
+	}
+	findIdle(t, r)
+}
+
+func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
+	st := &ipnstate.Status{
+		Self: &ipnstate.PeerStatus{
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.30"), netip.MustParseAddr("fd7a:115c:a1e0::1")},
+			Online:       true,
+		},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.10")}, Online: false, HostName: "old-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.20")}, Online: false, HostName: "live-host"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.1.2.3")}, Online: true, HostName: "later-name"},
+			key.NewNode().Public(): {TailscaleIPs: []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::9")}, Online: true},
+		},
+	}
+	got := ipv4sFromLocalStatus(st)
+	want := []string{"100.64.0.30", "100.64.0.10", "100.64.0.20", "100.1.2.3"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want every IPv4 including offline, not host names or IPv6", got)
+	}
+}
+
+// swapLocalStatus makes localAPINetmap's LocalAPI call report whether it
+// ran instead of dialing tailscaled.
+func swapLocalStatus(t *testing.T, platform string) *bool {
+	t.Helper()
+	asked := new(bool)
+	oldGOOS, oldStatus := goos, localStatus
+	goos = platform
+	localStatus = func(context.Context, *local.Client) (*ipnstate.Status, error) {
+		*asked = true
+		return &ipnstate.Status{}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	return asked
+}
+
+// TS_SOCKET naming a missing file means no tailscaled there: fail at once
+// so a proxy 502 retry is not stalled on LocalAPI's dial timeout.
+func TestLocalAPINetmapFailsFastWithMissingTSSocket(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		asked := swapLocalStatus(t, platform)
+		t.Setenv("TS_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+		if _, err := localAPINetmap(t.Context()); err == nil || *asked {
+			t.Fatalf("%s: err %v, asked LocalAPI %v; want an immediate miss", platform, err, *asked)
+		}
+	}
+}
+
+// On Linux the default socket is the only way to tailscaled, so a missing
+// one fails at once too.
+func TestLocalAPINetmapFailsFastWithoutLinuxSocket(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket")
+	}
+	asked := swapLocalStatus(t, "linux")
+	t.Setenv("TS_SOCKET", "")
+	if _, err := localAPINetmap(t.Context()); err == nil || *asked {
+		t.Fatalf("err %v, asked LocalAPI %v; want an immediate miss", err, *asked)
+	}
+}
+
+// The macOS Tailscale app has no socket file; LocalAPI is a localhost TCP
+// port with a token, which the local client finds by itself. A launchd
+// service must still ask it rather than stop at the missing socket.
+func TestLocalAPINetmapOnDarwinDoesNotNeedSocketFile(t *testing.T) {
+	asked := swapLocalStatus(t, "darwin")
+	t.Setenv("TS_SOCKET", "")
+	if _, err := localAPINetmap(t.Context()); err != nil || !*asked {
+		t.Fatalf("err %v, asked LocalAPI %v; want the darwin default to reach LocalAPI", err, *asked)
+	}
+}
+
+// Production FindRelay path: LocalAPI IPs on the saved URL's port, no
+// findRelays hook, follow only the peer that proves the key.
+func TestRelayMovedFollowsLocalAPIAddresses(t *testing.T) {
+	const key = "k-real"
+	liveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(liveLn.Addr().(*net.TCPAddr).Port)
+	impLn, err := net.Listen("tcp", net.JoinHostPort("127.0.0.2", port))
+	if err != nil {
+		liveLn.Close()
+		t.Skip("cannot bind 127.0.0.2")
+	}
+	serveHello(t, liveLn, key)
+	serveHello(t, impLn, "k-other")
+	old := "http://" + net.JoinHostPort("127.0.0.3", port)
+	want := "http://" + net.JoinHostPort("127.0.0.1", port)
+	savedConfig(t, Config{Relay: old, Agent: "muse", RelayKey: key})
+	t.Cleanup(SwapNetmapLookups(
+		func(context.Context) ([]string, error) {
+			return []string{"127.0.0.3", "127.0.0.2", "127.0.0.1"}, nil
+		},
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	r, err := NewRelayFor(Config{Relay: old, Agent: "muse", RelayKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != want {
+		t.Fatalf("base %s, want the LocalAPI peer that proved the key", r.Base())
+	}
+	listed, src, _ := r.LastFind()
+	if src != "localapi" || listed != 2 {
+		t.Fatalf("LastFind listed=%d source=%s, want 2 via localapi (current host skipped)", listed, src)
+	}
+	findIdle(t, r)
+}
+
+func serveHello(t *testing.T, ln net.Listener, key string) {
+	t.Helper()
+	srv := &http.Server{Handler: helloHandler(key)}
+	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
+	go func() { _ = srv.Serve(ln) }()
+}
+
+func helloHandler(key string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_ = json.NewEncoder(w).Encode(map[string]string{"service": HelloService, "proof": HelloProof(key, r.URL.Query().Get("nonce"))})
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "muse", "relay_key": key, "relay_urls": []string{"http://tincan-relay.example.ts.net"}})
+		case "/v1/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []AgentInfo{{Name: "muse"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// A live relay that is slow to answer a call (a long poll that outran the
+// client's timeout) still proves the key at its address. The client stays
+// put rather than moving to another address the same relay advertises.
+func TestSlowLiveRelayIsNotAMove(t *testing.T) {
+	const key = "k-real"
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		helloHandler(key).ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { close(release); slow.Close() })
+	other := fakeRelay(t, key) // the same relay's other advertised address
+	savedConfig(t, Config{Relay: slow.URL, RelayKey: key, RelayURLs: []string{other}})
+	r, _ := NewRelayFor(Config{Relay: slow.URL, RelayKey: key, RelayURLs: []string{other}})
+	r.api = &http.Client{Timeout: 200 * time.Millisecond}
+	r.findRelays = func(context.Context, string) []string { return nil }
+	_, err := r.Agents(t.Context())
+	if r.Base() != slow.URL {
+		t.Fatalf("moved to %s, but the relay at %s still proves the key", r.Base(), slow.URL)
+	}
+	if err == nil {
+		t.Fatal("the slow call answered")
+	}
+	if c, _ := LoadConfig(); c.Relay != slow.URL {
+		t.Fatalf("saved relay rewritten to %s", c.Relay)
+	}
+}
+
+// A large netmap is probed a bounded number of addresses at a time.
+func TestFindRelayBoundsProbes(t *testing.T) {
+	var now, most atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := now.Add(1)
+		defer now.Add(-1)
+		for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+		}
+		time.Sleep(50 * time.Millisecond)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	var peers []string
+	for i := range 3 * probeWorkers {
+		peers = append(peers, ts.URL+"/p"+strconv.Itoa(i))
+	}
+	r := NewRelayHTTP(deadURL(t), ts.Client())
+	r.key = "k-real"
+	r.findRelays = func(context.Context, string) []string { return peers }
+	if got := r.FindRelay(t.Context()); got != "" {
+		t.Fatalf("found %s", got)
+	}
+	if m := most.Load(); m > probeWorkers {
+		t.Fatalf("%d probes at once, want at most %d", m, probeWorkers)
+	}
+}
+
+// findIdle waits until no search (or post-move refresh) is running on r.
+func findIdle(t *testing.T, r *Relay) {
+	t.Helper()
+	waitFor(t, "the search to end", func() bool {
+		r.findMu.Lock()
+		defer r.findMu.Unlock()
+		return r.finding == nil
+	})
+}
+
+// Cancelling the caller that started a search does not stop it while
+// another caller still waits on it; that caller gets the found relay.
+func TestCancelledStarterDoesNotStopSharedSearch(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	started, release := make(chan struct{}), make(chan struct{})
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil
+		}
+		return []string{moved}
+	}
+	refused := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	ctx, cancel := context.WithCancel(t.Context())
+	first := make(chan bool, 1)
+	go func() { first <- r.relocate(ctx, refused) }()
+	<-started
+	second := make(chan bool, 1)
+	go func() { second <- r.relocate(t.Context(), refused) }()
+	waitJoined(t, r, 2)
+	cancel()
+	if <-first {
+		t.Fatal("the cancelled caller reported a move")
+	}
+	close(release)
+	select {
+	case ok := <-second:
+		if !ok || r.Base() != moved {
+			t.Fatalf("second caller got %v, base %s; want the found relay %s", ok, r.Base(), moved)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second caller never heard back")
+	}
+	findIdle(t, r)
+}
+
+// A search stopped because its callers were cancelled does not count
+// against findEvery: the next caller searches at once.
+func TestCancelledSearchDoesNotThrottle(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	var searches atomic.Int32
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		if searches.Add(1) == 1 {
+			<-ctx.Done()
+			return nil
+		}
+		return []string{moved}
+	}
+	refused := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan bool, 1)
+	go func() { done <- r.relocate(ctx, refused) }()
+	waitFor(t, "the first search", func() bool { return searches.Load() == 1 })
+	cancel()
+	<-done
+	findIdle(t, r)
+	if !r.relocate(t.Context(), refused) || r.Base() != moved {
+		t.Fatalf("after a cancelled search: base %s, %d searches; want a new search to find %s", r.Base(), searches.Load(), moved)
+	}
+	findIdle(t, r)
+}
+
+// Once the relay is found and saved, waiting callers retry at once; a slow
+// whoami refresh runs afterwards and does not hold them.
+func TestSlowRefreshDoesNotDelayRetry(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	r.findRelays = func(context.Context, string) []string { return []string{moved} }
+	oldLearn := learnAfterMove
+	t.Cleanup(func() { learnAfterMove = oldLearn })
+	release := make(chan struct{})
+	refreshed := make(chan struct{})
+	learnAfterMove = func(ctx context.Context, r *Relay) {
+		defer close(refreshed)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := r.Agents(ctx); err != nil {
+		t.Fatalf("retry waited on the refresh: %v", err)
+	}
+	if c, _ := LoadConfig(); c.Relay != moved {
+		t.Fatalf("saved relay %s, want %s before the refresh ends", c.Relay, moved)
+	}
+	close(release)
+	<-refreshed
+	findIdle(t, r)
+}
+
+// waitJoined waits until n callers wait on r's running search.
+func waitJoined(t *testing.T, r *Relay, n int) {
+	t.Helper()
+	waitFor(t, "callers to join the search", func() bool {
+		r.findMu.Lock()
+		defer r.findMu.Unlock()
+		return r.finding != nil && r.finding.live == n
+	})
 }

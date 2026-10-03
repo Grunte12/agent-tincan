@@ -15,10 +15,11 @@ type Config struct {
 	Proxy string `json:"proxy,omitempty"` // proxy for relay traffic (Muse: its tailnet tunnel proxy)
 	Agent string `json:"agent,omitempty"` // the agent name this config joined as; sent on every relay call
 	// RelayKey is the relay's secret, learned from whoami. With it the
-	// client can find its relay again after the relay's address changes.
+	// client can find its relay again after the relay's address changes,
+	// by proving IPv4 tailnet peers rather than walking a host-name list.
 	RelayKey string `json:"relay_key,omitempty"`
-	// RelayURLs are the addresses the relay advertises for itself (its
-	// stable tailnet name first), tried before searching the tailnet.
+	// RelayURLs are the addresses the relay last advertised for itself
+	// (its tailnet name first), tried before searching the live netmap.
 	RelayURLs []string `json:"relay_urls,omitempty"`
 	// RelayInfoAt is when RelayKey and RelayURLs were last refreshed.
 	RelayInfoAt time.Time `json:"relay_info_at,omitzero"`

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +20,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/paths"
 )
 
 // HelloService is what a tincan relay's /v1/hello names itself.
@@ -35,36 +40,184 @@ func HelloProof(key, nonce string) string {
 // findEvery bounds how often one client searches the tailnet for its relay.
 var findEvery = 30 * time.Second
 
+// probeWorkers bounds how many addresses one search probes at a time.
+const probeWorkers = 16
+
+// relocateFor bounds one search for a moved relay. The search runs on its
+// own: a call whose deadline passes returns without waiting for it, so a
+// timed-out inbox check still sets off a look for the relay.
+var relocateFor = 15 * time.Second
+
+// refreshFor bounds the whoami that refreshes relay info after a move. The
+// search may have used up most of its time; the refresh gets its own.
+const refreshFor = 5 * time.Second
+
+// learnAfterMove refreshes relay info after a move. Tests replace it.
+var learnAfterMove = LearnRelayKey
+
+// lookupLocalNetmap lists tailnet IPv4s from Tailscale LocalAPI.
+// Tests replace it.
+var lookupLocalNetmap = localAPINetmap
+
+// lookupCLINetmap lists tailnet IPv4s from `tailscale status --json`.
+// Tests replace it.
+var lookupCLINetmap = cliStatusNetmap
+
+// SwapNetmapLookups replaces LocalAPI and CLI netmap listing for tests.
+// Either argument may be nil to leave that lookup as it is. The returned
+// function restores both.
+func SwapNetmapLookups(local, cli func(context.Context) ([]string, error)) func() {
+	oldLocal, oldCLI := lookupLocalNetmap, lookupCLINetmap
+	if local != nil {
+		lookupLocalNetmap = local
+	}
+	if cli != nil {
+		lookupCLINetmap = cli
+	}
+	return func() {
+		lookupLocalNetmap, lookupCLINetmap = oldLocal, oldCLI
+	}
+}
+
 // relocate is called after a failed call. When the failure means nothing
 // answered at the relay's address and the client knows the relay key, it
-// asks the tailnet's online peers for the relay, and on finding it switches
-// to the new address, saves it to the config file the client was built from
-// and reports true so the call is retried once.
+// starts a search of the tailnet's IPv4 peers for the relay (or joins the
+// one running) and waits for it while ctx allows. A search that finds the
+// relay switches to the new address and saves it to the config file the
+// client was built from; relocate then reports true so the call is retried
+// once. A caller whose deadline passes returns at once and the search goes
+// on for the next call; a cancelled caller does not search, and the search
+// stops once every caller that joined it has been cancelled.
 func (r *Relay) relocate(ctx context.Context, err error) bool {
-	if !unreachable(err) || ctx.Err() != nil {
-		return false
-	}
-	r.findMu.Lock()
-	defer r.findMu.Unlock()
-	if r.key == "" {
+	if !unreachable(err) || errors.Is(ctx.Err(), context.Canceled) {
 		return false
 	}
 	old := r.Base()
-	if time.Since(r.lastFind) < findEvery {
+	done := r.startFind(ctx, old)
+	if done == nil {
 		return false
 	}
-	r.lastFind = time.Now()
+	select {
+	case <-done:
+		return r.Base() != old
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// relocation is one running search, shared by the callers that joined it.
+// Guarded by Relay.findMu.
+type relocation struct {
+	done      chan struct{}      // closed when the search has its answer
+	live      int                // joined callers not cancelled
+	cancel    context.CancelFunc // stops the search
+	cancelled bool               // stopped because every caller was cancelled
+	ended     bool               // the search has its answer; a refresh may still run
+	stops     []func() bool      // unregister each caller's cancel watch
+}
+
+// startFind starts a search for the relay, or joins the one running, and
+// returns a channel closed when it has its answer; nil when the client has
+// no relay key, searched within findEvery, or is still refreshing relay
+// info after a move. A search stopped by cancellation does not count
+// against findEvery.
+func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
+	r.findMu.Lock()
+	defer r.findMu.Unlock()
+	f := r.finding
+	if f != nil && f.ended {
+		return nil
+	}
+	if f == nil {
+		if r.key == "" || time.Since(r.lastFind) < findEvery {
+			return nil
+		}
+		prev := r.lastFind
+		r.lastFind = time.Now()
+		search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
+		f = &relocation{done: make(chan struct{}), cancel: cancel}
+		r.finding = f
+		go func() {
+			moved := r.follow(search, old)
+			cancel()
+			r.findMu.Lock()
+			f.ended = true
+			for _, stop := range f.stops {
+				stop()
+			}
+			if f.cancelled {
+				r.lastFind = prev
+			}
+			r.findMu.Unlock()
+			// Callers retry at the new address now; the relay info
+			// refresh does not hold them. The search stays registered
+			// until the refresh ends, so no other search runs alongside.
+			close(f.done)
+			if moved {
+				refresh, cancel := context.WithTimeout(context.WithoutCancel(search), refreshFor)
+				learnAfterMove(refresh, r)
+				cancel()
+			}
+			r.findMu.Lock()
+			r.finding = nil
+			r.findMu.Unlock()
+		}()
+	}
+	f.live++
+	f.stops = append(f.stops, context.AfterFunc(ctx, func() {
+		// A deadline that passes is not a cancellation: the search goes
+		// on for the next call.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+		r.findMu.Lock()
+		defer r.findMu.Unlock()
+		if f.ended {
+			return
+		}
+		if f.live--; f.live == 0 {
+			f.cancelled = true
+			f.cancel()
+		}
+	}))
+	return f.done
+}
+
+// follow searches for the relay and, if it is at a new address, switches
+// to it and saves it. It reports whether it moved; the caller then
+// refreshes the relay info there.
+func (r *Relay) follow(ctx context.Context, old string) bool {
+	// A live relay that was only slow (a long poll past the client's
+	// timeout) still proves the key where it is; ask it alongside the
+	// search so a real move does not wait on it.
+	r.findMu.Lock()
+	key := r.key
+	r.findMu.Unlock()
+	stays := make(chan bool, 1)
+	go func() { stays <- r.proves(ctx, old, key) }()
 	found := r.FindRelay(ctx)
+	listed, source, _ := r.LastFind()
 	if found == "" || found == old {
+		switch source {
+		case "":
+			log.Printf("tincan: relay at %s did not answer; no local tailnet netmap to search", old)
+		default:
+			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
+		}
+		return false
+	}
+	if <-stays {
+		log.Printf("tincan: relay at %s was slow to answer but still proves the relay key; staying", old)
 		return false
 	}
 	r.baseMu.Lock()
 	r.base = found
 	r.baseMu.Unlock()
-	msg := fmt.Sprintf("tincan: the relay moved from %s to %s", old, found)
+	msg := fmt.Sprintf("tincan: the relay moved from %s to %s (listed %d peers via %s)", old, found, listed, source)
 	if r.configFile != "" {
 		if err := updateSavedRelay(r.configFile, old, found); err != nil {
-			msg += fmt.Sprintf("; could not update %s: %v", r.configFile, err)
+			msg += fmt.Sprintf("; could not update %s yet: %v", r.configFile, err)
+			go r.retrySave(old, found)
 		} else {
 			msg += "; updated " + r.configFile
 		}
@@ -73,37 +226,68 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 	return true
 }
 
-// FindRelay asks every online tailnet peer, on the port of the current
+// LastFind is what the last relocate search saw: how many IPv4 netmap
+// addresses were probed, and which lookup supplied them ("localapi", "cli",
+// or "" if neither LocalAPI nor the Tailscale CLI answered). searched is
+// false when no search has run, as when the relay answered with an error.
+func (r *Relay) LastFind() (listed int, source string, searched bool) {
+	r.findMu.Lock()
+	defer r.findMu.Unlock()
+	return r.lastListed, r.lastSource, r.searched
+}
+
+// FindRelay asks every IPv4 tailnet address, on the port of the current
 // relay URL, to prove it holds the relay key, and returns the URL of the
-// first that does, or "". The caller holds findMu or owns r alone.
+// first that does, or "".
 func (r *Relay) FindRelay(ctx context.Context) string {
-	if r.key == "" {
+	r.findMu.Lock()
+	key, known := r.key, r.known
+	r.findMu.Unlock()
+	if key == "" {
 		return ""
 	}
 	base := r.Base()
-	// The relay's own advertised addresses (its stable name) come first;
-	// they work for agents that cannot search the tailnet.
+	// The relay's own advertised addresses come first; they work for
+	// agents that cannot search the tailnet.
 	var cands []string
-	for _, u := range r.known {
+	for _, u := range known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
 	}
-	find := r.findRelays
-	if find == nil {
-		find = tailnetCandidates
+	var peers []string
+	var source string
+	if r.findRelays != nil {
+		peers = r.findRelays(ctx, base)
+		if len(peers) > 0 {
+			source = "netmap"
+		}
+	} else {
+		var ips []string
+		ips, source = netmapIPv4s(ctx)
+		peers = peerURLs(base, ips)
 	}
-	cands = append(cands, find(ctx, base)...)
+	r.findMu.Lock()
+	r.lastListed, r.lastSource, r.searched = len(peers), source, true
+	r.findMu.Unlock()
+	cands = append(cands, peers...)
 	if len(cands) == 0 {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	found := make(chan string, len(cands))
+	slots := make(chan struct{}, probeWorkers)
 	var wg sync.WaitGroup
 	for _, c := range cands {
 		wg.Go(func() {
-			if r.proves(ctx, c) {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				return
+			}
+			if r.proves(ctx, c, key) {
 				found <- c
 				cancel()
 			}
@@ -119,14 +303,14 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 // address the relay advertises.
 func (r *Relay) Proves(ctx context.Context, base string) bool {
 	r.findMu.Lock()
-	known := r.key != ""
+	key := r.key
 	r.findMu.Unlock()
-	return known && r.proves(ctx, strings.TrimRight(base, "/"))
+	return key != "" && r.proves(ctx, strings.TrimRight(base, "/"), key)
 }
 
 // proves reports whether the relay at base answers hello with a valid
-// proof of the relay key.
-func (r *Relay) proves(ctx context.Context, base string) bool {
+// proof of key.
+func (r *Relay) proves(ctx context.Context, base, key string) bool {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return false
@@ -150,7 +334,7 @@ func (r *Relay) proves(ctx context.Context, base string) bool {
 	if resp.StatusCode != http.StatusOK || json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 4096)).Decode(&out) != nil {
 		return false
 	}
-	return out.Service == HelloService && hmac.Equal([]byte(out.Proof), []byte(HelloProof(r.key, nonce)))
+	return out.Service == HelloService && hmac.Equal([]byte(out.Proof), []byte(HelloProof(key, nonce)))
 }
 
 // unreachable reports whether err means nothing answered at the relay's
@@ -172,52 +356,156 @@ func unreachable(err error) bool {
 	return errors.As(err, &ue) && ue.Timeout()
 }
 
-// tailnetCandidates lists relay URLs to try: every online peer from
-// tailscale status, with the scheme and port of base. None when the
-// tailscale CLI is not available (a proxy-only sandbox).
-func tailnetCandidates(ctx context.Context, base string) []string {
+// netmapIPv4s lists IPv4 addresses on the local tailnet: LocalAPI first,
+// then the Tailscale CLI. source is "localapi", "cli", or "".
+func netmapIPv4s(ctx context.Context) (ips []string, source string) {
+	ips, err := lookupLocalNetmap(ctx)
+	if err == nil {
+		return ips, "localapi"
+	}
+	ips, err = lookupCLINetmap(ctx)
+	if err == nil {
+		return ips, "cli"
+	}
+	return nil, ""
+}
+
+// peerURLs builds relay URLs from IPv4s using the scheme and port of base,
+// skipping the host already in base.
+func peerURLs(base string, ips []string) []string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return nil
 	}
 	port := u.Port()
+	seen := map[string]bool{}
+	if h := u.Hostname(); h != "" {
+		seen[h] = true
+	}
+	var out []string
+	for _, ip := range ips {
+		if seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		host := ip
+		if port != "" {
+			host = net.JoinHostPort(ip, port)
+		}
+		out = append(out, u.Scheme+"://"+host)
+	}
+	return out
+}
+
+// goos is runtime.GOOS; tests replace it to take another platform's path.
+var goos = runtime.GOOS
+
+// localStatus asks LocalAPI for the netmap. Tests replace it.
+var localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status, error) {
+	return lc.Status(ctx)
+}
+
+func localAPINetmap(ctx context.Context) ([]string, error) {
+	lc := &local.Client{}
+	sock := strings.TrimSpace(os.Getenv("TS_SOCKET"))
+	switch {
+	case sock != "":
+		lc.Socket = sock
+		lc.UseSocketOnly = true
+	case goos == "darwin":
+		// The macOS Tailscale app has no socket file: the local client
+		// finds its LocalAPI port and token itself, and fails fast when
+		// there is neither.
+	default:
+		sock = paths.DefaultTailscaledSocket()
+	}
+	// A missing socket is not a Tailscale node; fail immediately rather
+	// than waiting on LocalAPI's dial timeout, then the CLI can run.
+	if sock != "" && goos != "windows" {
+		if _, err := os.Stat(sock); err != nil {
+			return nil, err
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	st, err := localStatus(ctx, lc)
+	if err != nil {
+		return nil, err
+	}
+	return ipv4sFromLocalStatus(st), nil
+}
+
+func ipv4sFromLocalStatus(st *ipnstate.Status) []string {
+	if st == nil {
+		return nil
+	}
+	var out []string
+	add := func(ips []netip.Addr) {
+		for _, ip := range ips {
+			if ip.Is4() {
+				out = append(out, ip.String())
+				return
+			}
+		}
+	}
+	if st.Self != nil {
+		add(st.Self.TailscaleIPs)
+	}
+	for _, p := range st.Peer {
+		if p != nil {
+			add(p.TailscaleIPs)
+		}
+	}
+	return out
+}
+
+func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	bin := tailscaleBinary()
 	if bin == "" {
-		return nil
+		return nil, errors.New("tailscale CLI not found")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
 	if err != nil {
-		return nil
+		return nil, err
 	}
+	return ipv4sFromStatusJSON(raw)
+}
+
+// ipv4sFromStatusJSON reads Self and Peer TailscaleIPs from `tailscale
+// status --json`, keeping every IPv4, including offline nodes. Host names
+// are ignored.
+func ipv4sFromStatusJSON(raw []byte) ([]string, error) {
 	var st struct {
+		Self *struct {
+			TailscaleIPs []string
+		}
 		Peer map[string]struct {
 			TailscaleIPs []string
-			Online       bool
 		}
 	}
-	if json.Unmarshal(raw, &st) != nil {
-		return nil
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
 	}
 	var out []string
-	for _, p := range st.Peer {
-		if !p.Online {
-			continue
-		}
-		for _, ip := range p.TailscaleIPs {
-			if strings.Contains(ip, ":") {
-				continue // the relay listens on the IPv4 tailnet address
+	add := func(ips []string) {
+		for _, ip := range ips {
+			parsed := net.ParseIP(ip)
+			if parsed == nil || parsed.To4() == nil {
+				continue
 			}
-			host := ip
-			if port != "" {
-				host = net.JoinHostPort(ip, port)
-			}
-			out = append(out, u.Scheme+"://"+host)
-			break
+			out = append(out, parsed.To4().String())
+			return
 		}
 	}
-	return out
+	if st.Self != nil {
+		add(st.Self.TailscaleIPs)
+	}
+	for _, p := range st.Peer {
+		add(p.TailscaleIPs)
+	}
+	return out, nil
 }
 
 func tailscaleBinary() string {
@@ -236,10 +524,51 @@ func tailscaleBinary() string {
 	return ""
 }
 
+// saveRetries and saveRetryEvery bound how long a move whose save failed
+// (another process held the config lock) keeps trying to save; package vars
+// so tests can shorten them.
+var (
+	saveRetries    = 6
+	saveRetryEvery = 5 * time.Second
+)
+
+// retrySave retries a relay move's save with the same rule as the first
+// try (only while the file still names old), and stops once it saves, the
+// client moves again, or the retries run out; any later process whose saved
+// address is dead finds the relay by its own search.
+func (r *Relay) retrySave(old, found string) {
+	for range saveRetries {
+		time.Sleep(saveRetryEvery)
+		if r.Base() != found {
+			return
+		}
+		if err := updateSavedRelay(r.configFile, old, found); err != nil {
+			continue
+		}
+		// updateSavedRelay leaves a file another writer changed meanwhile.
+		if c, err := loadSavedConfig(r.configFile); err == nil && strings.TrimRight(c.Relay, "/") == found {
+			log.Printf("tincan: saved the relay move to %s in %s", found, r.configFile)
+			// The refresh after the move skipped this file while it still
+			// named the old relay; refresh its relay info now.
+			ctx, cancel := context.WithTimeout(context.Background(), refreshFor)
+			learnAfterMove(ctx, r)
+			cancel()
+		} else {
+			log.Printf("tincan: left %s as another writer changed it; the relay move to %s was not saved", r.configFile, found)
+		}
+		return
+	}
+}
+
 // updateSavedRelay rewrites the relay URL in the config file at path, but
 // only while it still says old, so a config someone changed meanwhile is
 // kept.
 func updateSavedRelay(path, old, found string) error {
+	unlock, err := lockConfig(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := loadSavedConfig(path)
 	if err != nil {
 		return err
@@ -290,6 +619,11 @@ func LearnRelayKey(ctx context.Context, r *Relay) {
 	if r.configFile == "" {
 		return
 	}
+	unlock, err := lockConfig(r.configFile)
+	if err != nil {
+		return
+	}
+	defer unlock()
 	c, err := loadSavedConfig(r.configFile)
 	if err != nil || strings.TrimRight(c.Relay, "/") != r.Base() {
 		return
