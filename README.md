@@ -304,7 +304,7 @@ tincan join ABCD-EFGH --relay http://tincan-relay # agent's machine
 
 `invite` prints the code and the join command to run, with the relay URL filled in when it knows it (from `--relay` or a saved config). `--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). The relay checks kinds against its own list, so a relay older than your tincan refuses a newer kind; tincan then says so and offers the fallback: upgrade the relay, or invite without `--kind` and pass `tincan onboard --kind <name>=<kind>`. Inviting a name again retires the earlier code for it if that code was not used yet. `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
 
-An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `search`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
+An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `top`, `trace`, `search`, `audit-verify`, `onboard`) take `--relay <url>`; on the relay host they need no flags (its local admin socket is used; `--socket <state-dir>/admin.sock` names one elsewhere). Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
@@ -442,6 +442,8 @@ An `ask` may return before the answer does, and the asker does not have to hold 
 - `tincan listen`, `tincan wait` and the Claude Code channel also fire for unseen replies.
 
 ### Last seen
+
+`tincan top` watches the mesh live. It refreshes every 2 seconds with agent state, wake method, queued work, oldest wait, claims and versions. Attention flags sort offline queues, stale work, overdue schedules and older builds first. Admin devices also see held requests and recent chains. Use `--relay <url>` or `--socket <path>` as with `tincan agents`, `--interval 5s` to change the cadence (minimum 1s), and `q` or Ctrl-C to quit. A refresh that fails shows the error in the header and tries again on the next tick. `--once`, or redirected output, prints one plain snapshot and exits non-zero if the relay cannot be read. It never polls an inbox, claims, acknowledges or sends work.
 
 `tincan agents` (and `list_agents`) shows each agent's state, wake method, kind, and when it last called the relay by polling or by any send, reply or get ("last seen 12m ago", or "never seen"). A wait or listen loop that died shows up as a growing last seen. It also shows the tincan build each agent last called with (`version=0.5.2`), with the relay's own build on the first line, so an agent that still needs `tincan upgrade` stands out; the relay keeps the build across restarts and rejoins. An agent shows no version until it has called a relay that records them.
 
