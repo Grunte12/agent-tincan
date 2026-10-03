@@ -40,6 +40,9 @@ func HelloProof(key, nonce string) string {
 // findEvery bounds how often one client searches the tailnet for its relay.
 var findEvery = 30 * time.Second
 
+// probeWorkers bounds how many addresses one search probes at a time.
+const probeWorkers = 16
+
 // relocateFor bounds one search for a moved relay. The search runs on its
 // own: a call whose deadline passes returns without waiting for it, so a
 // timed-out inbox check still sets off a look for the relay.
@@ -229,9 +232,16 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	found := make(chan string, len(cands))
+	slots := make(chan struct{}, probeWorkers)
 	var wg sync.WaitGroup
 	for _, c := range cands {
 		wg.Go(func() {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				return
+			}
 			if r.proves(ctx, c, key) {
 				found <- c
 				cancel()
@@ -313,14 +323,6 @@ func netmapIPv4s(ctx context.Context) (ips []string, source string) {
 		return ips, "cli"
 	}
 	return nil, ""
-}
-
-// tailnetCandidates lists relay URLs to try: every IPv4 address on the
-// local netmap, with the scheme and port of base. None when LocalAPI and
-// the Tailscale CLI are both unavailable (a proxy-only sandbox).
-func tailnetCandidates(ctx context.Context, base string) []string {
-	ips, _ := netmapIPv4s(ctx)
-	return peerURLs(base, ips)
 }
 
 // peerURLs builds relay URLs from IPv4s using the scheme and port of base,

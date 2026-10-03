@@ -300,45 +300,33 @@ func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
 	}
 }
 
-func TestTailnetCandidatesPrefersLocalAPIWhenCLIMissing(t *testing.T) {
+func TestNetmapPrefersLocalAPIWhenCLIMissing(t *testing.T) {
 	t.Cleanup(SwapNetmapLookups(
 		func(context.Context) ([]string, error) { return []string{"100.67.11.14"}, nil },
 		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
 	))
-	got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787")
-	if !slices.Equal(got, []string{"http://100.67.11.14:8787"}) {
-		t.Fatalf("got %v, want the LocalAPI address on the saved port", got)
-	}
 	ips, src := netmapIPv4s(t.Context())
 	if src != "localapi" || !slices.Equal(ips, []string{"100.67.11.14"}) {
 		t.Fatalf("netmap %v via %s", ips, src)
 	}
 }
 
-func TestTailnetCandidatesFallsBackToCLI(t *testing.T) {
+func TestNetmapFallsBackToCLI(t *testing.T) {
 	t.Cleanup(SwapNetmapLookups(
 		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
 		func(context.Context) ([]string, error) { return []string{"100.67.11.14", "100.1.2.3"}, nil },
 	))
-	got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787")
-	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	_, src := netmapIPv4s(t.Context())
-	if src != "cli" {
-		t.Fatalf("source %q, want cli", src)
+	ips, src := netmapIPv4s(t.Context())
+	if src != "cli" || !slices.Equal(ips, []string{"100.67.11.14", "100.1.2.3"}) {
+		t.Fatalf("netmap %v via %s", ips, src)
 	}
 }
 
-func TestTailnetCandidatesEmptyWithoutNetmap(t *testing.T) {
+func TestNetmapEmptyWithoutLocalAPIOrCLI(t *testing.T) {
 	t.Cleanup(SwapNetmapLookups(
 		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
 		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
 	))
-	if got := tailnetCandidates(t.Context(), "http://100.96.137.127:8787"); got != nil {
-		t.Fatalf("got %v, want none", got)
-	}
 	ips, src := netmapIPv4s(t.Context())
 	if len(ips) != 0 || src != "" {
 		t.Fatalf("netmap %v via %q", ips, src)
@@ -678,5 +666,32 @@ func TestSlowLiveRelayIsNotAMove(t *testing.T) {
 	}
 	if c, _ := LoadConfig(); c.Relay != slow.URL {
 		t.Fatalf("saved relay rewritten to %s", c.Relay)
+	}
+}
+
+// A large netmap is probed a bounded number of addresses at a time.
+func TestFindRelayBoundsProbes(t *testing.T) {
+	var now, most atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := now.Add(1)
+		defer now.Add(-1)
+		for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+		}
+		time.Sleep(50 * time.Millisecond)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	var peers []string
+	for i := range 3 * probeWorkers {
+		peers = append(peers, ts.URL+"/p"+strconv.Itoa(i))
+	}
+	r := NewRelayHTTP(deadURL(t), ts.Client())
+	r.key = "k-real"
+	r.findRelays = func(context.Context, string) []string { return peers }
+	if got := r.FindRelay(t.Context()); got != "" {
+		t.Fatalf("found %s", got)
+	}
+	if m := most.Load(); m > probeWorkers {
+		t.Fatalf("%d probes at once, want at most %d", m, probeWorkers)
 	}
 }
