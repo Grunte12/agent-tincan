@@ -442,3 +442,10 @@ The tincan agents roster and list_agents show queued work and its oldest wait,
 plus live claims, when non-zero: 2 queued (oldest 14m), 1 claimed. Queued
 includes delivered but unclaimed requests. Expired and terminal requests are
 excluded. Use a growing oldest wait to spot backlog even when an agent is online.
+
+An agent's line may end with good_at="..." (quoted): what that teammate is good
+at, in your owner's words, or a stock line for fixed-job teammates such as
+history, notes, council and the web agents. Read it in the live roster to
+choose whom to ask. Send a real-world action (a call, a payment, a booking) to
+one teammate at a time. Only your owner sets lines, from an admin device with
+`tincan good-at <name> "<line>"`. It is still one agent per line.
