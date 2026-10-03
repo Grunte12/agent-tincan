@@ -63,6 +63,7 @@ func TestRelayMovedIsFoundAndSaved(t *testing.T) {
 	if err != nil || len(agents) != 1 {
 		t.Fatalf("call after the move: %v %v", agents, err)
 	}
+	findIdle(t, r) // the relay info refresh runs after the retry
 	if r.Base() != moved {
 		t.Fatalf("base %s, want %s (the peer that proved the key, not the impostor)", r.Base(), moved)
 	}
@@ -133,6 +134,7 @@ func TestRelayFoundAtItsAdvertisedNameWithoutTailscale(t *testing.T) {
 	if r.Base() != named {
 		t.Fatalf("base %s, want the advertised %s", r.Base(), named)
 	}
+	findIdle(t, r)
 }
 
 func TestProxyGatewayErrorsMeanUnreachable(t *testing.T) {
@@ -212,6 +214,7 @@ func TestNewRelayForFileWritesToItsOwnFile(t *testing.T) {
 	if _, err := r.Agents(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	findIdle(t, r) // the relay info refresh runs after the retry
 	if c := readConfig(t, own); c.Relay != url || c.RelayKey != key {
 		t.Fatalf("own config after the move %+v", c)
 	}
@@ -351,6 +354,7 @@ func TestRelayMovedFromStaleIPFollowsProvingPeer(t *testing.T) {
 	if r.Base() != moved {
 		t.Fatalf("base %s, want the proving peer", r.Base())
 	}
+	findIdle(t, r) // the relay info refresh runs after the retry
 	c, _ := LoadConfig()
 	if c.Relay != moved || slices.Contains(c.RelayURLs, staleName) {
 		t.Fatalf("saved %+v still names the dead advertised URL", c)
@@ -498,6 +502,7 @@ func TestRefreshAfterMoveHasItsOwnDeadline(t *testing.T) {
 	if d := <-left; d < refreshFor-time.Second {
 		t.Fatalf("refresh had %s, want about %s of its own", d, refreshFor)
 	}
+	findIdle(t, r)
 }
 
 func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
@@ -612,6 +617,7 @@ func TestRelayMovedFollowsLocalAPIAddresses(t *testing.T) {
 	if src != "localapi" || listed != 2 {
 		t.Fatalf("LastFind listed=%d source=%s, want 2 via localapi (current host skipped)", listed, src)
 	}
+	findIdle(t, r)
 }
 
 func serveHello(t *testing.T, ln net.Listener, key string) {
@@ -746,6 +752,7 @@ func TestCancelledStarterDoesNotStopSharedSearch(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("second caller never heard back")
 	}
+	findIdle(t, r)
 }
 
 // A search stopped because its callers were cancelled does not count
@@ -775,6 +782,40 @@ func TestCancelledSearchDoesNotThrottle(t *testing.T) {
 	if !r.relocate(t.Context(), refused) || r.Base() != moved {
 		t.Fatalf("after a cancelled search: base %s, %d searches; want a new search to find %s", r.Base(), searches.Load(), moved)
 	}
+	findIdle(t, r)
+}
+
+// Once the relay is found and saved, waiting callers retry at once; a slow
+// whoami refresh runs afterwards and does not hold them.
+func TestSlowRefreshDoesNotDelayRetry(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	r.findRelays = func(context.Context, string) []string { return []string{moved} }
+	oldLearn := learnAfterMove
+	t.Cleanup(func() { learnAfterMove = oldLearn })
+	release := make(chan struct{})
+	refreshed := make(chan struct{})
+	learnAfterMove = func(ctx context.Context, r *Relay) {
+		defer close(refreshed)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, err := r.Agents(ctx); err != nil {
+		t.Fatalf("retry waited on the refresh: %v", err)
+	}
+	if c, _ := LoadConfig(); c.Relay != moved {
+		t.Fatalf("saved relay %s, want %s before the refresh ends", c.Relay, moved)
+	}
+	close(release)
+	<-refreshed
+	findIdle(t, r)
 }
 
 // waitJoined waits until n callers wait on r's running search.

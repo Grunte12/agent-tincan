@@ -48,7 +48,8 @@ const probeWorkers = 16
 // timed-out inbox check still sets off a look for the relay.
 var relocateFor = 15 * time.Second
 
-// refreshFor bounds the whoami that refreshes relay info after a move.
+// refreshFor bounds the whoami that refreshes relay info after a move. The
+// search may have used up most of its time; the refresh gets its own.
 const refreshFor = 5 * time.Second
 
 // learnAfterMove refreshes relay info after a move. Tests replace it.
@@ -107,22 +108,26 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 // relocation is one running search, shared by the callers that joined it.
 // Guarded by Relay.findMu.
 type relocation struct {
-	done      chan struct{}      // closed when the search ends
+	done      chan struct{}      // closed when the search has its answer
 	live      int                // joined callers not cancelled
 	cancel    context.CancelFunc // stops the search
 	cancelled bool               // stopped because every caller was cancelled
-	ended     bool
-	stops     []func() bool // unregister each caller's cancel watch
+	ended     bool               // the search has its answer; a refresh may still run
+	stops     []func() bool      // unregister each caller's cancel watch
 }
 
 // startFind starts a search for the relay, or joins the one running, and
-// returns a channel closed when it ends; nil when the client has no relay
-// key or searched within findEvery. A search stopped by cancellation does
-// not count against findEvery.
+// returns a channel closed when it has its answer; nil when the client has
+// no relay key, searched within findEvery, or is still refreshing relay
+// info after a move. A search stopped by cancellation does not count
+// against findEvery.
 func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 	r.findMu.Lock()
 	defer r.findMu.Unlock()
 	f := r.finding
+	if f != nil && f.ended {
+		return nil
+	}
 	if f == nil {
 		if r.key == "" || time.Since(r.lastFind) < findEvery {
 			return nil
@@ -133,7 +138,7 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 		f = &relocation{done: make(chan struct{}), cancel: cancel}
 		r.finding = f
 		go func() {
-			r.follow(search, old)
+			moved := r.follow(search, old)
 			cancel()
 			r.findMu.Lock()
 			f.ended = true
@@ -143,9 +148,19 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 			if f.cancelled {
 				r.lastFind = prev
 			}
+			r.findMu.Unlock()
+			// Callers retry at the new address now; the relay info
+			// refresh does not hold them. The search stays registered
+			// until the refresh ends, so no other search runs alongside.
+			close(f.done)
+			if moved {
+				refresh, cancel := context.WithTimeout(context.WithoutCancel(search), refreshFor)
+				learnAfterMove(refresh, r)
+				cancel()
+			}
+			r.findMu.Lock()
 			r.finding = nil
 			r.findMu.Unlock()
-			close(f.done)
 		}()
 	}
 	f.live++
@@ -169,8 +184,9 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 }
 
 // follow searches for the relay and, if it is at a new address, switches
-// to it, saves it and refreshes the relay info there.
-func (r *Relay) follow(ctx context.Context, old string) {
+// to it and saves it. It reports whether it moved; the caller then
+// refreshes the relay info there.
+func (r *Relay) follow(ctx context.Context, old string) bool {
 	// A live relay that was only slow (a long poll past the client's
 	// timeout) still proves the key where it is; ask it alongside the
 	// search so a real move does not wait on it.
@@ -188,11 +204,11 @@ func (r *Relay) follow(ctx context.Context, old string) {
 		default:
 			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
 		}
-		return
+		return false
 	}
 	if <-stays {
 		log.Printf("tincan: relay at %s was slow to answer but still proves the relay key; staying", old)
-		return
+		return false
 	}
 	r.baseMu.Lock()
 	r.base = found
@@ -206,11 +222,7 @@ func (r *Relay) follow(ctx context.Context, old string) {
 		}
 	}
 	log.Print(msg)
-	// The search may have used up most of its time; the refresh gets its
-	// own.
-	refresh, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFor)
-	defer cancel()
-	learnAfterMove(refresh, r)
+	return true
 }
 
 // LastFind is what the last relocate search saw: how many IPv4 netmap
