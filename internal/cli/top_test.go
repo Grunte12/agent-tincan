@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -69,7 +68,7 @@ func TestRenderFrame(t *testing.T) {
 	f.held[0].Body = "\x1b[2J\r\n" + strings.Repeat("界", 80)
 	for _, width := range []int{1, 40, 80} {
 		for line := range strings.SplitSeq(renderFrame(f, width), "\n") {
-			if utf8.RuneCountInString(line) > width || strings.ContainsAny(line, "\x1b\r") {
+			if topTestDisplayWidth(line) > width || strings.ContainsAny(line, "\x1b\r") {
 				t.Fatalf("unsafe line %q", line)
 			}
 		}
@@ -154,5 +153,75 @@ func TestTopFetchRoutes(t *testing.T) {
 				t.Fatalf("paths=%v admin=%v", paths, f.admin)
 			}
 		})
+	}
+}
+
+func topTestDisplayWidth(s string) int {
+	cells := 0
+	for _, r := range s {
+		cells += topRuneWidth(r)
+	}
+	return cells
+}
+
+func TestTopTextDisplayWidth(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		cells int
+	}{
+		{"界", 2}, {"Ａ", 2}, {"😀", 2}, {"e\u0301", 1}, {"a", 1}, {"\u200d", 0},
+	} {
+		if got := topTestDisplayWidth(tc.text); got != tc.cells {
+			t.Fatalf("width of %q = %d, want %d", tc.text, got, tc.cells)
+		}
+	}
+	for _, input := range []string{strings.Repeat("界", 60), strings.Repeat("😀", 60), strings.Repeat("e\u0301", 60)} {
+		for _, width := range []int{1, 2, 3, 4, 20} {
+			got := topText(input, width)
+			if topTestDisplayWidth(got) > width {
+				t.Fatalf("width %d: overflowing text %q", width, got)
+			}
+		}
+	}
+	if got := topText("e\u0301界😀", 5); got != "e\u0301界😀" {
+		t.Fatalf("truncated fitting text: %q", got)
+	}
+}
+
+func TestTopLiveFrameHeight(t *testing.T) {
+	f := topFrame{admin: true, roster: client.Roster{Agents: []client.AgentInfo{
+		{Name: "healthy", Online: true}, {Name: "urgent", Queued: 1},
+	}}}
+	for i := range 30 {
+		f.held = append(f.held, envelope.Request{ID: fmt.Sprintf("held-%02d", i)})
+	}
+	f.chains = []envelope.Result{{Request: envelope.Request{Body: "last-chain"}}}
+	plain := renderFrame(f, 120)
+	all := strings.Split(strings.TrimSuffix(plain, "\n"), "\n")
+	for _, height := range []int{1, 4, 8, len(all), len(all) + 1} {
+		got := topLiveFrame(plain, 120, height)
+		lines := strings.Split(got, "\n")
+		if len(lines) > height || strings.HasSuffix(got, "\n") {
+			t.Fatalf("height %d: unbounded frame %q", height, got)
+		}
+		if len(all) > height {
+			want := fmt.Sprintf("... %d more lines (run tincan top --once for all)", len(all)-height+1)
+			if lines[len(lines)-1] != want || strings.Join(lines[:height-1], "\n") != strings.Join(all[:height-1], "\n") {
+				t.Fatalf("height %d: wrong overflow or order: %q", height, got)
+			}
+		} else if got != strings.TrimSuffix(plain, "\n") {
+			t.Fatalf("fitting frame changed: %q", got)
+		}
+	}
+	if !strings.Contains(topLiveFrame(plain, 120, 4), "urgent") || strings.Contains(topLiveFrame(plain, 120, 4), "healthy") {
+		t.Fatal("highest-attention agent not prioritized")
+	}
+	if !strings.Contains(plain, "held-29") || !strings.Contains(plain, "last-chain") || !strings.HasSuffix(plain, "\n") {
+		t.Fatal("plain snapshot incomplete")
+	}
+	for line := range strings.SplitSeq(topLiveFrame(renderFrame(f, 20), 20, 2), "\n") {
+		if topTestDisplayWidth(line) > 20 {
+			t.Fatalf("overflow indicator too wide: %q", line)
+		}
 	}
 }

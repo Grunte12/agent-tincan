@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
+	textwidth "golang.org/x/text/width"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -96,15 +97,15 @@ func topCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				width := 120
+				width, height := 120, 24
 				if live {
-					if w, _, err := term.GetSize(int(out.Fd())); err == nil && w > 0 {
-						width = w
+					if w, h, err := term.GetSize(int(out.Fd())); err == nil && w > 0 && h > 0 {
+						width, height = w, h
 					}
 				}
 				frame := renderFrame(f, width)
 				if live {
-					frame = "\x1b[H\x1b[2J" + strings.ReplaceAll(frame, "\n", "\r\n")
+					frame = "\x1b[H\x1b[2J" + strings.ReplaceAll(topLiveFrame(frame, width, height), "\n", "\r\n")
 				}
 				if _, err := fmt.Fprint(cmd.OutOrStdout(), frame); err != nil {
 					return err
@@ -246,12 +247,51 @@ func topText(s string, width int) string {
 		}
 		return r
 	}, s)
-	rs := []rune(s)
-	if len(rs) > width {
-		if width > 3 {
-			return string(rs[:width-3]) + "..."
+	cells := 0
+	for _, r := range s {
+		cells += topRuneWidth(r)
+	}
+	if cells <= width {
+		return s
+	}
+	limit := max(width, 0)
+	suffix := ""
+	if width > 3 {
+		limit -= 3
+		suffix = "..."
+	}
+	cells = 0
+	for i, r := range s {
+		cells += topRuneWidth(r)
+		if cells > limit {
+			return s[:i] + suffix
 		}
-		return string(rs[:width])
 	}
 	return s
+}
+
+// Bound only interactive frames; snapshots retain every rendered line.
+func topLiveFrame(frame string, width, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSuffix(frame, "\n"), "\n")
+	if len(lines) > height {
+		omitted := len(lines) - height + 1
+		lines = lines[:height]
+		lines[height-1] = topText(fmt.Sprintf("... %d more lines (run tincan top --once for all)", omitted), width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func topRuneWidth(r rune) int {
+	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Cf, r) {
+		return 0
+	}
+	kind := textwidth.LookupRune(r).Kind()
+	if kind == textwidth.EastAsianWide || kind == textwidth.EastAsianFullwidth ||
+		(r >= 0x1f000 && r <= 0x1faff) || (r >= 0x2600 && r <= 0x27bf) {
+		return 2
+	}
+	return 1
 }
