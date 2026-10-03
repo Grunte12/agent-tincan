@@ -46,3 +46,37 @@ func TestUpdateSavedRelayWaitsForConfigLock(t *testing.T) {
 		t.Fatalf("config %+v, want both writes kept", c)
 	}
 }
+
+// A writer that holds the config lock and never lets go cannot stall a
+// relay move: taking the lock gives up after configLockWait, and the
+// moved address stays applied in memory.
+func TestUpdateSavedRelayGivesUpOnAStuckLock(t *testing.T) {
+	old := configLockWait
+	configLockWait = 150 * time.Millisecond
+	t.Cleanup(func() { configLockWait = old })
+	path := filepath.Join(t.TempDir(), "client.json")
+	if err := SaveConfigTo(path, Config{Relay: "http://old:8787", Agent: "muse"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- updateSavedRelay(path, "http://old:8787", "http://new:8787") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("rewrote the config while another writer held its lock")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still waiting on a lock held by a stuck writer")
+	}
+	if c := readConfig(t, path); c.Relay != "http://old:8787" {
+		t.Fatalf("config %+v changed without the lock", c)
+	}
+}
