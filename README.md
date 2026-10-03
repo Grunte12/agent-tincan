@@ -14,7 +14,6 @@ Contents:
 
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
-- [New in v0.11.0](#new-in-v0110)
 - [New in v0.10.0](#new-in-v0100)
 - [Council](#council)
 - [New in v0.9.0](#new-in-v090)
@@ -104,18 +103,6 @@ tincan doctor
 ```
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
-
-## New in v0.11.0
-
-- [Good-at lines](#last-seen): `tincan good-at muse "phone calls"` gives a teammate one line, in your words, saying what it is good at. `tincan agents` and `list_agents` show it as `good_at="..."`, so an agent that needs a call made or a booking done can pick the right teammate without asking you. Fixed-job teammates such as `history`, `notes`, `council` and the web teammates show a stock line until you set your own.
-- Standing instructions tell agents to choose by those lines, and to send a real-world action (a call, a payment, a booking) to one teammate at a time, trying another only after the first declines, fails or hands it back. A line grants nothing: approvals and who may ask whom are unchanged.
-
-Before you upgrade:
-
-- Upgrade the relay first, from an admin device: `tincan relay-upgrade --from-github v0.11.0` (the relay must be started with `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`; without it, put the v0.11.0 files in the relay's `--dist` and run `tincan relay-upgrade`). An older relay refuses the new route, and `tincan good-at` says to upgrade it.
-- Set lines for your general agents in your own words, for example `tincan good-at muse "..."` and `tincan good-at fo "..."`.
-- Run `tincan upgrade` on each agent. MCP agents pick up the new guidance after the reload notice.
-- Paste the standing instructions again (`tincan onboard --section agents`) into muse, fo, grokbot, instinct and hermes, so agents that read only their saved instructions, Fo in particular, get the new guidance.
 
 ## New in v0.10.0
 
