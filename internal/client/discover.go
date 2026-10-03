@@ -285,25 +285,38 @@ func peerURLs(base string, ips []string) []string {
 	return out
 }
 
+// goos is runtime.GOOS; tests replace it to take another platform's path.
+var goos = runtime.GOOS
+
+// localStatus asks LocalAPI for the netmap. Tests replace it.
+var localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status, error) {
+	return lc.Status(ctx)
+}
+
 func localAPINetmap(ctx context.Context) ([]string, error) {
 	lc := &local.Client{}
 	sock := strings.TrimSpace(os.Getenv("TS_SOCKET"))
-	if sock != "" {
+	switch {
+	case sock != "":
 		lc.Socket = sock
 		lc.UseSocketOnly = true
-	} else {
+	case goos == "darwin":
+		// The macOS Tailscale app has no socket file: the local client
+		// finds its LocalAPI port and token itself, and fails fast when
+		// there is neither.
+	default:
 		sock = paths.DefaultTailscaledSocket()
 	}
 	// A missing socket is not a Tailscale node; fail immediately rather
 	// than waiting on LocalAPI's dial timeout, then the CLI can run.
-	if sock != "" && runtime.GOOS != "windows" {
+	if sock != "" && goos != "windows" {
 		if _, err := os.Stat(sock); err != nil {
 			return nil, err
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	st, err := lc.Status(ctx)
+	st, err := localStatus(ctx, lc)
 	if err != nil {
 		return nil, err
 	}

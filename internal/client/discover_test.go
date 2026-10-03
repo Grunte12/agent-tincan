@@ -15,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/paths"
 	"tailscale.com/types/key"
 )
 
@@ -289,6 +291,8 @@ func TestIPv4sFromStatusJSONIncludesOfflineAndSkipsNames(t *testing.T) {
 	}
 }
 
+var _ = time.Second
+
 func TestPeerURLsUseBasePortAndSkipCurrentHost(t *testing.T) {
 	got := peerURLs("http://100.96.137.127:8787", []string{"100.96.137.127", "100.67.11.14", "100.1.2.3", "100.67.11.14"})
 	want := []string{"http://100.67.11.14:8787", "http://100.1.2.3:8787"}
@@ -405,15 +409,54 @@ func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
 	}
 }
 
-func TestLocalAPINetmapFailsFastWithoutSocket(t *testing.T) {
-	t.Setenv("TS_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
-	start := time.Now()
-	_, err := localAPINetmap(t.Context())
-	if err == nil {
-		t.Fatal("missing socket should fail")
+// swapLocalStatus makes localAPINetmap's LocalAPI call report whether it
+// ran instead of dialing tailscaled.
+func swapLocalStatus(t *testing.T, platform string) *bool {
+	t.Helper()
+	asked := new(bool)
+	oldGOOS, oldStatus := goos, localStatus
+	goos = platform
+	localStatus = func(context.Context, *local.Client) (*ipnstate.Status, error) {
+		*asked = true
+		return &ipnstate.Status{}, nil
 	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("took %s, want an immediate miss so a 502 retry is not stalled", d)
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	return asked
+}
+
+// TS_SOCKET naming a missing file means no tailscaled there: fail at once
+// so a proxy 502 retry is not stalled on LocalAPI's dial timeout.
+func TestLocalAPINetmapFailsFastWithMissingTSSocket(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		asked := swapLocalStatus(t, platform)
+		t.Setenv("TS_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+		if _, err := localAPINetmap(t.Context()); err == nil || *asked {
+			t.Fatalf("%s: err %v, asked LocalAPI %v; want an immediate miss", platform, err, *asked)
+		}
+	}
+}
+
+// On Linux the default socket is the only way to tailscaled, so a missing
+// one fails at once too.
+func TestLocalAPINetmapFailsFastWithoutLinuxSocket(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket")
+	}
+	asked := swapLocalStatus(t, "linux")
+	t.Setenv("TS_SOCKET", "")
+	if _, err := localAPINetmap(t.Context()); err == nil || *asked {
+		t.Fatalf("err %v, asked LocalAPI %v; want an immediate miss", err, *asked)
+	}
+}
+
+// The macOS Tailscale app has no socket file; LocalAPI is a localhost TCP
+// port with a token, which the local client finds by itself. A launchd
+// service must still ask it rather than stop at the missing socket.
+func TestLocalAPINetmapOnDarwinDoesNotNeedSocketFile(t *testing.T) {
+	asked := swapLocalStatus(t, "darwin")
+	t.Setenv("TS_SOCKET", "")
+	if _, err := localAPINetmap(t.Context()); err != nil || !*asked {
+		t.Fatalf("err %v, asked LocalAPI %v; want the darwin default to reach LocalAPI", err, *asked)
 	}
 }
 
