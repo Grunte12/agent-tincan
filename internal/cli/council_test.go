@@ -152,20 +152,22 @@ func fakeCouncil(t *testing.T, c *client.Relay, notes []string, body string, sta
 			}
 			req := in.Requests[0]
 			if _, err := c.Claim(ctx, req.ID); err != nil {
-				t.Errorf("claim: %v", err)
+				if ctx.Err() == nil {
+					t.Errorf("claim: %v", err)
+				}
 				return
 			}
 			for _, n := range notes {
-				if err := c.Progress(ctx, req.ID, n); err != nil {
+				if err := c.Progress(ctx, req.ID, n); err != nil && ctx.Err() == nil {
 					t.Errorf("progress: %v", err)
 				}
 				time.Sleep(200 * time.Millisecond)
 			}
 			ups, err := c.UploadFiles(ctx, files)
-			if err != nil {
+			if err != nil && ctx.Err() == nil {
 				t.Errorf("upload: %v", err)
 			}
-			if _, err := c.ReplyAttached(ctx, req.ID, body, status, client.AttachmentIDs(ups)); err != nil {
+			if _, err := c.ReplyAttached(ctx, req.ID, body, status, client.AttachmentIDs(ups)); err != nil && ctx.Err() == nil {
 				t.Errorf("reply: %v", err)
 			}
 			got <- req
@@ -433,7 +435,7 @@ func throughFlaky(t *testing.T, m *testrelay.Mesh, owner string, fail, status in
 func TestCouncilWaitSurvivesTransientErrors(t *testing.T) {
 	m, c := ownerMesh(t, "panel", "owner", true)
 	f := throughFlaky(t, m, "owner", 2, http.StatusBadGateway)
-	fakeCouncil(t, c, []string{"Answers: 5 of 7 in"}, councilReplyBody, envelope.StatusAnswered)
+	took := fakeCouncil(t, c, []string{"Answers: 5 of 7 in"}, councilReplyBody, envelope.StatusAnswered)
 	out, errOut, err := runSplit(t, councilCmd(), "Which database?")
 	if err != nil {
 		t.Fatalf("council: %v\n%s%s", err, out, errOut)
@@ -441,6 +443,11 @@ func TestCouncilWaitSurvivesTransientErrors(t *testing.T) {
 	wantLine(t, out, "Recommendation: use Postgres.")
 	if f.count() <= 2 {
 		t.Fatalf("gets = %d, want the wait to continue past the failures", f.count())
+	}
+	select {
+	case <-took:
+	case <-time.After(2 * time.Second):
+		t.Fatal("council agent did not finish its reply")
 	}
 }
 

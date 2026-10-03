@@ -119,10 +119,8 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		switch {
 		case client.IsNotJoined(err):
 			add(check{"relay", "fail", "the relay does not know this machine: " + err.Error(), "Run tincan rejoin. If it says the machine was never joined, ask the owner for an invite."})
-		case err != nil && cfg.RelayKey == "":
-			add(check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + err.Error(), "Check that this machine is on the tailnet (tailscale status) and the relay is running. If the relay moved to a new address, run tincan rejoin --relay <new URL>; this config has no relay key, so tincan cannot find it by itself."})
 		case err != nil:
-			add(check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ", and no online tailnet peer proved it is this relay: " + err.Error(), "Check that this machine is on the tailnet (tailscale status) and the relay is running. A proxy-only sandbox cannot search the tailnet: run tincan rejoin --relay <new URL>."})
+			add(relayUnreachableCheck(cfg, r, err))
 		default:
 			joined = true
 			add(check{"relay", "ok", fmt.Sprintf("reachable at %s; this machine is agent %q", r.Base(), me.Name), ""})
@@ -189,6 +187,29 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		rep.Fix = hostFix(exe)
 	}
 	return rep
+}
+
+// relayUnreachableCheck explains a failed whoami: no key, an error that
+// set off no search, no local netmap, or a netmap whose peers did not prove
+// they are this relay.
+func relayUnreachableCheck(cfg client.Config, r *client.Relay, reachErr error) check {
+	fixTailnet := "Check that this machine is on the tailnet (tailscale status) and the relay is running."
+	if cfg.RelayKey == "" {
+		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + reachErr.Error(),
+			fixTailnet + " If the relay moved to a new address, run tincan rejoin --relay <new URL>; this config has no relay key, so tincan cannot find it by itself."}
+	}
+	listed, source, searched := r.LastFind()
+	if !searched {
+		// The error was not a dead address (or a search ran moments
+		// ago), so there was no search to report on.
+		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + reachErr.Error(), fixTailnet}
+	}
+	if source == "" {
+		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ", and this client cannot search the tailnet: " + reachErr.Error(),
+			fixTailnet + " A proxy-only sandbox cannot search the tailnet: run tincan rejoin --relay <new URL>."}
+	}
+	return check{"relay", "fail", fmt.Sprintf("cannot reach the relay at %s, and none of %d tailnet peers listed via %s proved they are this relay: %s", cfg.Relay, listed, source, reachErr.Error()),
+		fixTailnet + " If the relay moved, wait until this machine can see the new node, or run tincan rejoin --relay <new URL>."}
 }
 
 // addressCheck asks each address the relay advertises to prove it is this

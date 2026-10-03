@@ -69,6 +69,11 @@ A2. Start the relay once in the foreground to register it on the tailnet:
     the log says "tincan relay serving on", stop it (Ctrl-C). The node's identity
     now lives in the state dir, so its name and address stay stable.
 
+    Do not pass `--listen` unless you mean the relay to share this machine's
+    Tailscale identity. That address changes if the host re-joins Tailscale.
+    Agents that can see the tailnet find the new IP themselves; a proxy-only
+    agent cannot, and needs `tincan rejoin` or this default tsnet node.
+
 A3. Keep it running as a service, so it restarts after crashes and reboots.
     Linux (systemd, user service):
 
