@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -189,39 +191,121 @@ func TestTopTextDisplayWidth(t *testing.T) {
 }
 
 func TestTopLiveFrameHeight(t *testing.T) {
-	f := topFrame{admin: true, roster: client.Roster{Agents: []client.AgentInfo{
-		{Name: "healthy", Online: true}, {Name: "urgent", Queued: 1},
-	}}}
+	f := topFrame{admin: true}
 	for i := range 30 {
+		f.roster.Agents = append(f.roster.Agents, client.AgentInfo{Name: fmt.Sprintf("agent-%02d", i), Online: true})
 		f.held = append(f.held, envelope.Request{ID: fmt.Sprintf("held-%02d", i)})
+		f.chains = append(f.chains, envelope.Result{Request: envelope.Request{Body: fmt.Sprintf("chain-%02d", i)}})
 	}
-	f.chains = []envelope.Result{{Request: envelope.Request{Body: "last-chain"}}}
+	f.roster.Agents = append(f.roster.Agents, client.AgentInfo{Name: "urgent", Queued: 1})
+	got := topLiveFrame(f, 120, 24)
+	if len(strings.Split(got, "\n")) > 24 || strings.HasSuffix(got, "\n") {
+		t.Fatalf("unbounded frame: %q", got)
+	}
+	for _, want := range []string{"tincan top", "AGENT", "urgent", "Held for approval (30):", "held-02", "Recent chains:", "chain-02", "... 27 more", "more agents (tincan top --once for all)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "urgent") > strings.Index(got, "agent-00") {
+		t.Fatal("attention order lost")
+	}
 	plain := renderFrame(f, 120)
-	all := strings.Split(strings.TrimSuffix(plain, "\n"), "\n")
-	for _, height := range []int{1, 4, 8, len(all), len(all) + 1} {
-		got := topLiveFrame(plain, 120, height)
-		lines := strings.Split(got, "\n")
-		if len(lines) > height || strings.HasSuffix(got, "\n") {
-			t.Fatalf("height %d: unbounded frame %q", height, got)
+	for _, want := range []string{"agent-29", "held-29", "chain-29"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("snapshot missing %s", want)
 		}
-		if len(all) > height {
-			want := fmt.Sprintf("... %d more lines (run tincan top --once for all)", len(all)-height+1)
-			if lines[len(lines)-1] != want || strings.Join(lines[:height-1], "\n") != strings.Join(all[:height-1], "\n") {
-				t.Fatalf("height %d: wrong overflow or order: %q", height, got)
+	}
+	for _, height := range []int{1, 4, 8, 24} {
+		got := topLiveFrame(f, 20, height)
+		if height >= 8 && (!strings.Contains(got, "Held for approval") || !strings.Contains(got, "Recent chains:")) {
+			t.Fatalf("lost admin sections: %q", got)
+		}
+		if len(strings.Split(got, "\n")) > height {
+			t.Fatal("height overflow")
+		}
+		for line := range strings.SplitSeq(got, "\n") {
+			if topTestDisplayWidth(line) > 20 {
+				t.Fatalf("width overflow: %q", line)
 			}
-		} else if got != strings.TrimSuffix(plain, "\n") {
-			t.Fatalf("fitting frame changed: %q", got)
 		}
 	}
-	if !strings.Contains(topLiveFrame(plain, 120, 4), "urgent") || strings.Contains(topLiveFrame(plain, 120, 4), "healthy") {
-		t.Fatal("highest-attention agent not prioritized")
+}
+
+func TestTopLoopRefresh(t *testing.T) {
+	failure := errors.New("relay unavailable")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	var frames []string
+	err := topLoop(ctx, true, time.Millisecond, func(context.Context) (topFrame, error) {
+		calls++
+		if calls == 1 || calls == 3 {
+			return topFrame{}, failure
+		}
+		return topFrame{roster: client.Roster{Agents: []client.AgentInfo{{Name: "recovered"}}}}, nil
+	}, func(f topFrame) error {
+		frames = append(frames, topLiveFrame(f, 120, 24))
+		if len(frames) == 4 {
+			cancel()
+		}
+		return nil
+	})
+	if err != nil || len(frames) != 4 {
+		t.Fatalf("frames=%v err=%v", frames, err)
 	}
-	if !strings.Contains(plain, "held-29") || !strings.Contains(plain, "last-chain") || !strings.HasSuffix(plain, "\n") {
-		t.Fatal("plain snapshot incomplete")
+	for i, frame := range frames {
+		if strings.Contains(frame, "refresh failed at") != (i == 0 || i == 2) {
+			t.Fatalf("wrong error state: %q", frame)
+		}
+		if i > 0 && !strings.Contains(frame, "recovered") {
+			t.Fatalf("lost roster: %q", frame)
+		}
 	}
-	for line := range strings.SplitSeq(topLiveFrame(renderFrame(f, 20), 20, 2), "\n") {
-		if topTestDisplayWidth(line) > 20 {
-			t.Fatalf("overflow indicator too wide: %q", line)
+	if !strings.Contains(frames[0], "relay unavailable (retrying)") {
+		t.Fatal(frames[0])
+	}
+	err = topLoop(t.Context(), false, time.Millisecond, func(context.Context) (topFrame, error) {
+		return topFrame{}, failure
+	}, func(topFrame) error { t.Fatal("rendered failed snapshot"); return nil })
+	if !errors.Is(err, failure) {
+		t.Fatalf("once error: %v", err)
+	}
+}
+
+func TestTopTextJoinedEmoji(t *testing.T) {
+	family := "👨‍👩‍👧‍👦"
+	if got := topText(family, 20); got != family {
+		t.Fatalf("broken family: %q", got)
+	}
+	for width := 1; width < 8; width++ {
+		got := topText(family+"abcdef", width)
+		if strings.ContainsAny(got, "👨👩👧👦\u200d") {
+			t.Fatalf("partial family at width %d: %q", width, got)
+		}
+	}
+	if got := topText("\x1b[2J\u202e", 20); got != " [2J " {
+		t.Fatalf("unsafe text: %q", got)
+	}
+	if got := topText("a\u200c\ufe0e\ufe0f", 1); got != "a\u200c\ufe0e\ufe0f" {
+		t.Fatalf("stripped harmless runes: %q", got)
+	}
+}
+
+func TestTopWideColumns(t *testing.T) {
+	f := topFrame{roster: client.Roster{Agents: []client.AgentInfo{
+		{Name: "ascii", Online: true, Wake: "none"},
+		{Name: "界界界界界界界界界", Online: true, Wake: "界界"},
+	}}}
+	lines := strings.Split(renderFrame(f, 120), "\n")
+	stateColumn := strings.Index(lines[1], "STATE")
+	for _, row := range lines[2:4] {
+		prefix, _, found := strings.Cut(row, "online")
+		if !found || topTestDisplayWidth(prefix) != stateColumn {
+			t.Fatalf("misaligned state: %q", row)
+		}
+		if topTestDisplayWidth(row[:strings.LastIndex(row, "0")]) != topTestDisplayWidth(lines[2][:strings.LastIndex(lines[2], "0")]) {
+			t.Fatalf("misaligned wake: %q", row)
 		}
 	}
 }

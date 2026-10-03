@@ -13,7 +13,6 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	textwidth "golang.org/x/text/width"
 
@@ -22,12 +21,13 @@ import (
 )
 
 type topFrame struct {
-	roster client.Roster
-	held   []envelope.Request
-	chains []envelope.Result
-	admin  bool
-	note   string
-	at     time.Time
+	refreshError string
+	roster       client.Roster
+	held         []envelope.Request
+	chains       []envelope.Result
+	admin        bool
+	note         string
+	at           time.Time
 }
 
 func topCmd() *cobra.Command {
@@ -48,55 +48,15 @@ func topCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 			if live {
-				state, err := term.MakeRaw(int(os.Stdin.Fd()))
+				cleanup, err := topInput(ctx, cancel)
 				if err != nil {
 					return err
 				}
-				defer func() { _ = term.Restore(int(os.Stdin.Fd()), state) }()
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					var key [1]byte
-					for {
-						if ctx.Err() != nil {
-							return
-						}
-						fds := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
-						n, err := unix.Poll(fds, 100)
-						if err == unix.EINTR {
-							continue
-						}
-						if err != nil {
-							cancel()
-							return
-						}
-						if n == 0 {
-							continue
-						}
-						n, err = unix.Read(int(os.Stdin.Fd()), key[:])
-						if err == unix.EAGAIN || err == unix.EINTR {
-							continue
-						}
-						if err != nil || n == 0 {
-							cancel()
-							return
-						}
-						if key[0] == 'q' || key[0] == 3 {
-							cancel()
-							return
-						}
-					}
-				}()
-				defer func() { cancel(); <-done }()
+				defer cleanup()
 			}
-			for {
-				f, err := fetchFrame(ctx, r)
-				if ctx.Err() != nil {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
+			return topLoop(ctx, live, interval, func(ctx context.Context) (topFrame, error) {
+				return fetchFrame(ctx, r)
+			}, func(f topFrame) error {
 				width, height := 120, 24
 				if live {
 					if w, h, err := term.GetSize(int(out.Fd())); err == nil && w > 0 && h > 0 {
@@ -105,28 +65,54 @@ func topCmd() *cobra.Command {
 				}
 				frame := renderFrame(f, width)
 				if live {
-					frame = "\x1b[H\x1b[2J" + strings.ReplaceAll(topLiveFrame(frame, width, height), "\n", "\r\n")
+					frame = "\x1b[H\x1b[2J" + strings.ReplaceAll(topLiveFrame(f, width, height), "\n", "\r\n")
 				}
 				if _, err := fmt.Fprint(cmd.OutOrStdout(), frame); err != nil {
 					return err
 				}
-				if !live {
-					return nil
-				}
-				timer := time.NewTimer(interval)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return nil
-				case <-timer.C:
-				}
-			}
+				return nil
+			})
 		}}
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	cmd.Flags().BoolVar(&once, "once", false, "print one plain snapshot and exit")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "refresh interval (minimum 1s)")
 	return cmd
+}
+
+func topLoop(ctx context.Context, live bool, interval time.Duration, fetch func(context.Context) (topFrame, error), render func(topFrame) error) error {
+	var last topFrame
+	for {
+		f, err := fetch(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			if !live {
+				return err
+			}
+			f = last
+			if f.at.IsZero() {
+				f.at = time.Now()
+			}
+			f.refreshError = fmt.Sprintf("refresh failed at %s: %v (retrying)", time.Now().Format("15:04:05"), err)
+		} else {
+			last = f
+		}
+		if err := render(f); err != nil {
+			return err
+		}
+		if !live {
+			return nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
 }
 
 func fetchFrame(ctx context.Context, r *client.Relay) (topFrame, error) {
@@ -188,6 +174,10 @@ func attention(a client.AgentInfo, relayVersion string, now time.Time) (score in
 }
 
 func renderFrame(f topFrame, width int) string {
+	return renderTopFrame(f, width, 0)
+}
+
+func renderTopFrame(f topFrame, width, height int) string {
 	var b strings.Builder
 	line := func(s string) { b.WriteString(topText(s, max(width, 1))); b.WriteByte('\n') }
 	online, queued := 0, 0
@@ -202,6 +192,9 @@ func renderFrame(f topFrame, width int) string {
 		held = fmt.Sprint(len(f.held))
 	}
 	line(fmt.Sprintf("tincan top | relay %s | online %d/%d | queued %d | held %s | %s", f.roster.RelayVersion, online, len(f.roster.Agents), queued, held, f.at.Format("15:04:05")))
+	if f.refreshError != "" {
+		line(f.refreshError)
+	}
 	line("AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS VERSION")
 	agents := slices.Clone(f.roster.Agents)
 	slices.SortStableFunc(agents, func(a, b client.AgentInfo) int {
@@ -212,25 +205,79 @@ func renderFrame(f topFrame, width int) string {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
-	for _, a := range agents {
+	heldLimit, chainLimit := len(f.held), len(f.chains)
+	budget := height - 2
+	if f.refreshError != "" {
+		budget--
+	}
+	if f.note != "" {
+		budget--
+	}
+	if height > 0 && f.admin {
+		heldLimit, chainLimit = min(3, heldLimit), min(3, chainLimit)
+		budget -= 2 + heldLimit + chainLimit
+		if heldLimit < len(f.held) {
+			budget--
+		}
+		if chainLimit < len(f.chains) {
+			budget--
+		}
+		minimum := 0
+		if len(agents) > 0 {
+			minimum = 1
+		}
+		for budget < minimum && (heldLimit > 0 || chainLimit > 0) {
+			if heldLimit >= chainLimit && heldLimit > 0 {
+				if heldLimit < len(f.held) {
+					budget++
+				}
+				heldLimit--
+			} else {
+				if chainLimit < len(f.chains) {
+					budget++
+				}
+				chainLimit--
+			}
+		}
+	}
+	for i, a := range agents {
 		_, flags := attention(a, f.roster.RelayVersion, f.at)
+		rows := 1
+		if len(flags) > 0 {
+			rows++
+		}
+		reserve := 0
+		if i < len(agents)-1 {
+			reserve = 1
+		}
+		if height > 0 && rows+reserve > budget {
+			line(fmt.Sprintf("... %d more agents (tincan top --once for all)", len(agents)-i))
+			break
+		}
+		budget -= rows
 		age := "-"
 		if a.Queued > 0 && !a.OldestQueued.IsZero() {
 			age = client.QueueAge(f.at.Sub(a.OldestQueued))
 		}
-		line(fmt.Sprintf("%-16s %-7s %-12s %6d %6s %6d %s", topText(a.Name, 16), a.State(), topText(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
+		line(fmt.Sprintf("%s %-7s %s %6d %6s %6d %s", topPad(a.Name, 16), a.State(), topPad(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
 		if len(flags) > 0 {
 			line("  " + strings.Join(flags, " | "))
 		}
 	}
 	if f.admin {
 		line(fmt.Sprintf("Held for approval (%d):", len(f.held)))
-		for _, r := range f.held {
+		for _, r := range f.held[:heldLimit] {
 			line(fmt.Sprintf("  %s %s -> %s %s", r.ID, r.From, r.To, topText(r.Body, 60)))
 		}
+		if heldLimit < len(f.held) {
+			line(fmt.Sprintf("  ... %d more", len(f.held)-heldLimit))
+		}
 		line("Recent chains:")
-		for _, r := range f.chains {
+		for _, r := range f.chains[:chainLimit] {
 			line(fmt.Sprintf("  %s %s -> %s [%s] %s", r.Request.CreatedAt.Local().Format("15:04:05"), r.Request.From, r.Request.To, r.Status, topText(r.Request.Body, 60)))
+		}
+		if chainLimit < len(f.chains) {
+			line(fmt.Sprintf("  ... %d more", len(f.chains)-chainLimit))
 		}
 	}
 	if f.note != "" {
@@ -242,7 +289,7 @@ func renderFrame(f topFrame, width int) string {
 // Relay text is data, including when it contains terminal control sequences.
 func topText(s string, width int) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
 			return ' '
 		}
 		return r
@@ -261,27 +308,37 @@ func topText(s string, width int) string {
 		suffix = "..."
 	}
 	cells = 0
+	sequenceStart := 0
+	joined := false
 	for i, r := range s {
+		if r != '\u200d' && topRuneWidth(r) > 0 && !joined {
+			sequenceStart = i
+		}
+		joined = r == '\u200d' || (joined && topRuneWidth(r) == 0)
 		cells += topRuneWidth(r)
 		if cells > limit {
-			return s[:i] + suffix
+			return s[:sequenceStart] + suffix
 		}
 	}
 	return s
 }
 
 // Bound only interactive frames; snapshots retain every rendered line.
-func topLiveFrame(frame string, width, height int) string {
+func topLiveFrame(f topFrame, width, height int) string {
 	if height <= 0 {
 		return ""
 	}
-	lines := strings.Split(strings.TrimSuffix(frame, "\n"), "\n")
-	if len(lines) > height {
-		omitted := len(lines) - height + 1
-		lines = lines[:height]
-		lines[height-1] = topText(fmt.Sprintf("... %d more lines (run tincan top --once for all)", omitted), width)
+	lines := strings.Split(strings.TrimSuffix(renderTopFrame(f, width, height), "\n"), "\n")
+	return strings.Join(lines[:min(height, len(lines))], "\n")
+}
+
+func topPad(s string, width int) string {
+	s = topText(s, width)
+	cells := 0
+	for _, r := range s {
+		cells += topRuneWidth(r)
 	}
-	return strings.Join(lines, "\n")
+	return s + strings.Repeat(" ", max(0, width-cells))
 }
 
 func topRuneWidth(r rune) int {
