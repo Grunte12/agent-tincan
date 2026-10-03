@@ -192,7 +192,7 @@ type Relay struct {
 	configFile string
 	findMu     sync.Mutex
 	lastFind   time.Time
-	finding    chan struct{}                                   // closed when the running search ends; nil when none runs
+	finding    *relocation                                     // the running search; nil when none runs
 	lastListed int                                             // IPv4 netmap addresses in the last FindRelay
 	searched   bool                                            // a FindRelay has listed candidates
 	lastSource string                                          // "localapi", "cli", "netmap", or ""

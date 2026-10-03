@@ -413,6 +413,7 @@ func TestTimedOutCallReturnsAtDeadlineAndSearchStillLands(t *testing.T) {
 		}
 	}
 	waitFor(t, "the background search to move the client", func() bool { return r.Base() == moved })
+	findIdle(t, r) // the refresh after the move writes the config file
 	if n := searches.Load(); n != 1 {
 		t.Fatalf("%d searches, want one shared by both timed-out calls", n)
 	}
@@ -694,4 +695,94 @@ func TestFindRelayBoundsProbes(t *testing.T) {
 	if m := most.Load(); m > probeWorkers {
 		t.Fatalf("%d probes at once, want at most %d", m, probeWorkers)
 	}
+}
+
+// findIdle waits until no search (or post-move refresh) is running on r.
+func findIdle(t *testing.T, r *Relay) {
+	t.Helper()
+	waitFor(t, "the search to end", func() bool {
+		r.findMu.Lock()
+		defer r.findMu.Unlock()
+		return r.finding == nil
+	})
+}
+
+// Cancelling the caller that started a search does not stop it while
+// another caller still waits on it; that caller gets the found relay.
+func TestCancelledStarterDoesNotStopSharedSearch(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	started, release := make(chan struct{}), make(chan struct{})
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil
+		}
+		return []string{moved}
+	}
+	refused := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	ctx, cancel := context.WithCancel(t.Context())
+	first := make(chan bool, 1)
+	go func() { first <- r.relocate(ctx, refused) }()
+	<-started
+	second := make(chan bool, 1)
+	go func() { second <- r.relocate(t.Context(), refused) }()
+	waitJoined(t, r, 2)
+	cancel()
+	if <-first {
+		t.Fatal("the cancelled caller reported a move")
+	}
+	close(release)
+	select {
+	case ok := <-second:
+		if !ok || r.Base() != moved {
+			t.Fatalf("second caller got %v, base %s; want the found relay %s", ok, r.Base(), moved)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second caller never heard back")
+	}
+}
+
+// A search stopped because its callers were cancelled does not count
+// against findEvery: the next caller searches at once.
+func TestCancelledSearchDoesNotThrottle(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	moved := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key})
+	var searches atomic.Int32
+	r.findRelays = func(ctx context.Context, _ string) []string {
+		if searches.Add(1) == 1 {
+			<-ctx.Done()
+			return nil
+		}
+		return []string{moved}
+	}
+	refused := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan bool, 1)
+	go func() { done <- r.relocate(ctx, refused) }()
+	waitFor(t, "the first search", func() bool { return searches.Load() == 1 })
+	cancel()
+	<-done
+	findIdle(t, r)
+	if !r.relocate(t.Context(), refused) || r.Base() != moved {
+		t.Fatalf("after a cancelled search: base %s, %d searches; want a new search to find %s", r.Base(), searches.Load(), moved)
+	}
+}
+
+// waitJoined waits until n callers wait on r's running search.
+func waitJoined(t *testing.T, r *Relay, n int) {
+	t.Helper()
+	waitFor(t, "callers to join the search", func() bool {
+		r.findMu.Lock()
+		defer r.findMu.Unlock()
+		return r.finding != nil && r.finding.live == n
+	})
 }

@@ -85,8 +85,8 @@ func SwapNetmapLookups(local, cli func(context.Context) ([]string, error)) func(
 // relay switches to the new address and saves it to the config file the
 // client was built from; relocate then reports true so the call is retried
 // once. A caller whose deadline passes returns at once and the search goes
-// on for the next call; a cancelled caller does not search, and cancelling
-// the caller that started a search stops it.
+// on for the next call; a cancelled caller does not search, and the search
+// stops once every caller that joined it has been cancelled.
 func (r *Relay) relocate(ctx context.Context, err error) bool {
 	if !unreachable(err) || errors.Is(ctx.Err(), context.Canceled) {
 		return false
@@ -104,37 +104,68 @@ func (r *Relay) relocate(ctx context.Context, err error) bool {
 	}
 }
 
+// relocation is one running search, shared by the callers that joined it.
+// Guarded by Relay.findMu.
+type relocation struct {
+	done      chan struct{}      // closed when the search ends
+	live      int                // joined callers not cancelled
+	cancel    context.CancelFunc // stops the search
+	cancelled bool               // stopped because every caller was cancelled
+	ended     bool
+	stops     []func() bool // unregister each caller's cancel watch
+}
+
 // startFind starts a search for the relay, or joins the one running, and
 // returns a channel closed when it ends; nil when the client has no relay
-// key or searched within findEvery.
+// key or searched within findEvery. A search stopped by cancellation does
+// not count against findEvery.
 func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 	r.findMu.Lock()
 	defer r.findMu.Unlock()
-	if r.finding != nil {
-		return r.finding
-	}
-	if r.key == "" || time.Since(r.lastFind) < findEvery {
-		return nil
-	}
-	r.lastFind = time.Now()
-	search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
-	stop := context.AfterFunc(ctx, func() {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			cancel()
+	f := r.finding
+	if f == nil {
+		if r.key == "" || time.Since(r.lastFind) < findEvery {
+			return nil
 		}
-	})
-	done := make(chan struct{})
-	r.finding = done
-	go func() {
-		defer close(done)
-		r.follow(search, old)
-		stop()
-		cancel()
+		prev := r.lastFind
+		r.lastFind = time.Now()
+		search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
+		f = &relocation{done: make(chan struct{}), cancel: cancel}
+		r.finding = f
+		go func() {
+			r.follow(search, old)
+			cancel()
+			r.findMu.Lock()
+			f.ended = true
+			for _, stop := range f.stops {
+				stop()
+			}
+			if f.cancelled {
+				r.lastFind = prev
+			}
+			r.finding = nil
+			r.findMu.Unlock()
+			close(f.done)
+		}()
+	}
+	f.live++
+	f.stops = append(f.stops, context.AfterFunc(ctx, func() {
+		// A deadline that passes is not a cancellation: the search goes
+		// on for the next call.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
 		r.findMu.Lock()
-		r.finding = nil
-		r.findMu.Unlock()
-	}()
-	return done
+		defer r.findMu.Unlock()
+		if f.ended {
+			return
+		}
+		if f.live--; f.live == 0 {
+			f.cancelled = true
+			f.cancel()
+		}
+	}))
+	return f.done
 }
 
 // follow searches for the relay and, if it is at a new address, switches
