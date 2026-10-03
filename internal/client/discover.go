@@ -137,6 +137,14 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 // follow searches for the relay and, if it is at a new address, switches
 // to it, saves it and refreshes the relay info there.
 func (r *Relay) follow(ctx context.Context, old string) {
+	// A live relay that was only slow (a long poll past the client's
+	// timeout) still proves the key where it is; ask it alongside the
+	// search so a real move does not wait on it.
+	r.findMu.Lock()
+	key := r.key
+	r.findMu.Unlock()
+	stays := make(chan bool, 1)
+	go func() { stays <- r.proves(ctx, old, key) }()
 	found := r.FindRelay(ctx)
 	listed, source := r.LastFind()
 	if found == "" || found == old {
@@ -146,6 +154,10 @@ func (r *Relay) follow(ctx context.Context, old string) {
 		default:
 			log.Printf("tincan: relay at %s did not answer; listed %d tailnet peers via %s, none proved the relay key", old, listed, source)
 		}
+		return
+	}
+	if <-stays {
+		log.Printf("tincan: relay at %s was slow to answer but still proves the relay key; staying", old)
 		return
 	}
 	r.baseMu.Lock()

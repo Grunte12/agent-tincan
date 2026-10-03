@@ -646,3 +646,37 @@ func helloHandler(key string) http.Handler {
 		}
 	})
 }
+
+// A live relay that is slow to answer a call (a long poll that outran the
+// client's timeout) still proves the key at its address. The client stays
+// put rather than moving to another address the same relay advertises.
+func TestSlowLiveRelayIsNotAMove(t *testing.T) {
+	const key = "k-real"
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		helloHandler(key).ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { close(release); slow.Close() })
+	other := fakeRelay(t, key) // the same relay's other advertised address
+	savedConfig(t, Config{Relay: slow.URL, RelayKey: key, RelayURLs: []string{other}})
+	r, _ := NewRelayFor(Config{Relay: slow.URL, RelayKey: key, RelayURLs: []string{other}})
+	r.api = &http.Client{Timeout: 200 * time.Millisecond}
+	r.findRelays = func(context.Context, string) []string { return nil }
+	_, err := r.Agents(t.Context())
+	if r.Base() != slow.URL {
+		t.Fatalf("moved to %s, but the relay at %s still proves the key", r.Base(), slow.URL)
+	}
+	if err == nil {
+		t.Fatal("the slow call answered")
+	}
+	if c, _ := LoadConfig(); c.Relay != slow.URL {
+		t.Fatalf("saved relay rewritten to %s", c.Relay)
+	}
+}
