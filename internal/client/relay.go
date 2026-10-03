@@ -177,10 +177,13 @@ type Relay struct {
 	groups   map[string]cachedGroup
 	baseMu   sync.RWMutex
 	base     string
-	api      *http.Client
-	polls    *http.Client
-	agent    string // sent as AgentHeader when set
-	version  string // sent as VersionHeader when set
+	// movedFrom is the address the last relay move left, so a refresh can
+	// save the move when the move itself could not.
+	movedFrom string
+	api       *http.Client
+	polls     *http.Client
+	agent     string // sent as AgentHeader when set
+	version   string // sent as VersionHeader when set
 
 	// key is the relay key from the saved config. When the relay stops
 	// answering at base, the client looks for the peer that proves it

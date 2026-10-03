@@ -121,6 +121,26 @@ func TestLearnRelayKeySavesIt(t *testing.T) {
 	}
 }
 
+// A move whose save failed (another process held the config lock) is saved
+// by the refresh that follows it, so the next process does not start from
+// the dead address.
+func TestRefreshSavesAMoveTheMoveCouldNotSave(t *testing.T) {
+	old := deadURL(t)
+	moved := fakeRelay(t, "k-learned")
+	savedConfig(t, Config{Relay: old, Agent: "muse"})
+	r, _ := NewRelayFor(Config{Relay: old, Agent: "muse"})
+	r.baseMu.Lock()
+	r.base, r.movedFrom = moved, old
+	r.baseMu.Unlock()
+	LearnRelayKey(t.Context(), r)
+	raw, _ := os.ReadFile(ConfigPath())
+	var c Config
+	_ = json.Unmarshal(raw, &c)
+	if c.Relay != moved || c.RelayKey != "k-learned" {
+		t.Fatalf("config %+v, want the moved relay %s saved", c, moved)
+	}
+}
+
 func TestRelayFoundAtItsAdvertisedNameWithoutTailscale(t *testing.T) {
 	const key = "k-real"
 	old := deadURL(t)

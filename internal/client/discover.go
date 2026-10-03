@@ -211,7 +211,7 @@ func (r *Relay) follow(ctx context.Context, old string) bool {
 		return false
 	}
 	r.baseMu.Lock()
-	r.base = found
+	r.base, r.movedFrom = found, old
 	r.baseMu.Unlock()
 	msg := fmt.Sprintf("tincan: the relay moved from %s to %s (listed %d peers via %s)", old, found, listed, source)
 	if r.configFile != "" {
@@ -588,7 +588,18 @@ func LearnRelayKey(ctx context.Context, r *Relay) {
 	}
 	defer unlock()
 	c, err := loadSavedConfig(r.configFile)
-	if err != nil || strings.TrimRight(c.Relay, "/") != r.Base() {
+	if err != nil {
+		return
+	}
+	r.baseMu.RLock()
+	base, movedFrom := r.base, r.movedFrom
+	r.baseMu.RUnlock()
+	switch saved := strings.TrimRight(c.Relay, "/"); {
+	case saved == base:
+	case movedFrom != "" && saved == movedFrom:
+		// The move could not save itself (the config was locked); save it now.
+		c.Relay = base
+	default:
 		return
 	}
 	c.RelayKey, c.RelayURLs, c.RelayInfoAt = out.RelayKey, out.RelayURLs, time.Now().UTC()
