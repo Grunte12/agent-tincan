@@ -75,3 +75,24 @@ func TestDoctorUnreachableNoneProved(t *testing.T) {
 		t.Fatalf("a netmap search that found no proof is not 'cannot search': %+v", c)
 	}
 }
+
+// A relay that answers with an error was never searched for: doctor
+// reports that error, not a netmap it never looked at.
+func TestDoctorRelayErrorIsNotASearch(t *testing.T) {
+	t.Cleanup(client.SwapNetmapLookups(
+		func(context.Context) ([]string, error) { return nil, errors.New("no localapi") },
+		func(context.Context) ([]string, error) { return nil, errors.New("no cli") },
+	))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"store is read-only"}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+	useConfig(t, client.Config{Relay: ts.URL, Agent: "muse", RelayKey: "k-real"})
+	c := doctorRelayCheck(t)
+	if c.Status != "fail" || !strings.Contains(c.Detail, "store is read-only") {
+		t.Fatalf("got %+v", c)
+	}
+	if strings.Contains(c.Detail, "cannot search") || strings.Contains(c.Fix, "proxy-only") || strings.Contains(c.Detail, "listed") {
+		t.Fatalf("no search ran, so doctor should not talk about one: %+v", c)
+	}
+}

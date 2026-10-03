@@ -149,7 +149,7 @@ func (r *Relay) follow(ctx context.Context, old string) {
 	stays := make(chan bool, 1)
 	go func() { stays <- r.proves(ctx, old, key) }()
 	found := r.FindRelay(ctx)
-	listed, source := r.LastFind()
+	listed, source, _ := r.LastFind()
 	if found == "" || found == old {
 		switch source {
 		case "":
@@ -184,11 +184,12 @@ func (r *Relay) follow(ctx context.Context, old string) {
 
 // LastFind is what the last relocate search saw: how many IPv4 netmap
 // addresses were probed, and which lookup supplied them ("localapi", "cli",
-// or "" if neither LocalAPI nor the Tailscale CLI answered).
-func (r *Relay) LastFind() (listed int, source string) {
+// or "" if neither LocalAPI nor the Tailscale CLI answered). searched is
+// false when no search has run, as when the relay answered with an error.
+func (r *Relay) LastFind() (listed int, source string, searched bool) {
 	r.findMu.Lock()
 	defer r.findMu.Unlock()
-	return r.lastListed, r.lastSource
+	return r.lastListed, r.lastSource, r.searched
 }
 
 // FindRelay asks every IPv4 tailnet address, on the port of the current
@@ -223,7 +224,7 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		peers = peerURLs(base, ips)
 	}
 	r.findMu.Lock()
-	r.lastListed, r.lastSource = len(peers), source
+	r.lastListed, r.lastSource, r.searched = len(peers), source, true
 	r.findMu.Unlock()
 	cands = append(cands, peers...)
 	if len(cands) == 0 {

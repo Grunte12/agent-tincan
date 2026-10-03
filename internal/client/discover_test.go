@@ -607,7 +607,7 @@ func TestRelayMovedFollowsLocalAPIAddresses(t *testing.T) {
 	if r.Base() != want {
 		t.Fatalf("base %s, want the LocalAPI peer that proved the key", r.Base())
 	}
-	listed, src := r.LastFind()
+	listed, src, _ := r.LastFind()
 	if src != "localapi" || listed != 2 {
 		t.Fatalf("LastFind listed=%d source=%s, want 2 via localapi (current host skipped)", listed, src)
 	}

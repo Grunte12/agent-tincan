@@ -189,15 +189,21 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	return rep
 }
 
-// relayUnreachableCheck explains a failed whoami: no key, no local netmap,
-// or a netmap whose peers did not prove they are this relay.
+// relayUnreachableCheck explains a failed whoami: no key, an error that
+// set off no search, no local netmap, or a netmap whose peers did not prove
+// they are this relay.
 func relayUnreachableCheck(cfg client.Config, r *client.Relay, reachErr error) check {
 	fixTailnet := "Check that this machine is on the tailnet (tailscale status) and the relay is running."
 	if cfg.RelayKey == "" {
 		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + reachErr.Error(),
 			fixTailnet + " If the relay moved to a new address, run tincan rejoin --relay <new URL>; this config has no relay key, so tincan cannot find it by itself."}
 	}
-	listed, source := r.LastFind()
+	listed, source, searched := r.LastFind()
+	if !searched {
+		// The error was not a dead address (or a search ran moments
+		// ago), so there was no search to report on.
+		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + reachErr.Error(), fixTailnet}
+	}
 	if source == "" {
 		return check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ", and this client cannot search the tailnet: " + reachErr.Error(),
 			fixTailnet + " A proxy-only sandbox cannot search the tailnet: run tincan rejoin --relay <new URL>."}
