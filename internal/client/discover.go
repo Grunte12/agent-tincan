@@ -542,10 +542,21 @@ func (r *Relay) retrySave(old, found string) {
 		if r.Base() != found {
 			return
 		}
-		if err := updateSavedRelay(r.configFile, old, found); err == nil {
-			log.Printf("tincan: saved the relay move to %s in %s", found, r.configFile)
-			return
+		if err := updateSavedRelay(r.configFile, old, found); err != nil {
+			continue
 		}
+		// updateSavedRelay leaves a file another writer changed meanwhile.
+		if c, err := loadSavedConfig(r.configFile); err == nil && strings.TrimRight(c.Relay, "/") == found {
+			log.Printf("tincan: saved the relay move to %s in %s", found, r.configFile)
+			// The refresh after the move skipped this file while it still
+			// named the old relay; refresh its relay info now.
+			ctx, cancel := context.WithTimeout(context.Background(), refreshFor)
+			learnAfterMove(ctx, r)
+			cancel()
+		} else {
+			log.Printf("tincan: left %s as another writer changed it; the relay move to %s was not saved", r.configFile, found)
+		}
+		return
 	}
 }
 

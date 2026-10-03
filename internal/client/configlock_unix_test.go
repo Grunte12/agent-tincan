@@ -133,3 +133,19 @@ func TestRelayMoveSaveRetryStopsAfterAnotherMove(t *testing.T) {
 		t.Fatalf("config %+v, want it left alone after another move", c)
 	}
 }
+
+// A retry that finds the file changed by another writer leaves it alone.
+func TestRelayMoveSaveRetryLeavesAChangedFile(t *testing.T) {
+	oldEvery := saveRetryEvery
+	saveRetryEvery = 10 * time.Millisecond
+	t.Cleanup(func() { saveRetryEvery = oldEvery })
+	path := filepath.Join(t.TempDir(), "client.json")
+	if err := SaveConfigTo(path, Config{Relay: "http://chosen:8787", Agent: "muse"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewRelayForFile(Config{Relay: "http://new:8787", Agent: "muse"}, path)
+	r.retrySave("http://old:8787", "http://new:8787")
+	if c := readConfig(t, path); c.Relay != "http://chosen:8787" {
+		t.Fatalf("config %+v, want the other writer's relay kept", c)
+	}
+}
