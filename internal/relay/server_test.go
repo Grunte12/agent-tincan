@@ -634,6 +634,46 @@ func TestLocalAdminSocketCanSetKind(t *testing.T) {
 	}
 }
 
+func goodAts(t *testing.T, h *harness) map[string]string {
+	t.Helper()
+	var out struct{ Agents []client.AgentInfo }
+	h.do(grokAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	m := map[string]string{}
+	for _, a := range out.Agents {
+		m[a.Name] = a.GoodAt
+	}
+	return m
+}
+
+// The local admin socket can set a good-at line, and the change is audited
+// with the agent as actor and the new line as detail.
+func TestLocalAdminSocketCanSetGoodAtAndItIsAudited(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := httptest.NewRequest("PUT", "/v1/agents/muse/good-at", strings.NewReader(`{"good_at":"phone calls"}`))
+	req.RemoteAddr = "@"
+	rec := httptest.NewRecorder()
+	h.srv.AdminHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("local set good-at: %d %s", rec.Code, rec.Body.String())
+	}
+	if g := goodAts(t, h); g["muse"] != "phone calls" {
+		t.Fatalf("good-at = %v", g)
+	}
+	events, err := h.st.AuditEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Event == "good-at" {
+			if e.Actor != "muse" || !strings.Contains(e.Detail, "phone calls") {
+				t.Fatalf("good-at audit = %+v", e)
+			}
+			return
+		}
+	}
+	t.Fatalf("no good-at audit in %+v", events)
+}
+
 type queuedRecorder struct {
 	mu sync.Mutex
 	to []string

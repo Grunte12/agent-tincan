@@ -469,3 +469,28 @@ func TestNeverApprovedContentRemainsPrivate(t *testing.T) {
 		})
 	}
 }
+
+// A good-at line grants nothing: an ask to a gated teammate with a line is
+// still held for the owner (R8).
+func TestGoodAtLineDoesNotSkipApproval(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"gate":{"muse":{"from":"*"}},"hold_ttl":"1h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	if err := m.Client(t, "admin").SetGoodAt(t.Context(), "muse", "phone calls; fast pickup"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "call the restaurant", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != envelope.StatusHeld || m.Server.QueuedCount("muse") != 0 {
+		t.Fatalf("send status %s, queued %d; want held", r.Status, m.Server.QueuedCount("muse"))
+	}
+}

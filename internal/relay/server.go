@@ -284,6 +284,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/urls", s.handleAdminURLs)
 	mux.HandleFunc("POST /v1/admin/remove", s.handleRemove)
 	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
+	mux.HandleFunc("PUT /v1/agents/{name}/good-at", s.handleSetGoodAt)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
@@ -1065,7 +1066,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, Version: s.versions[a.Name]}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
+		if info.GoodAt == "" {
+			info.GoodAt = onboard.StockGoodAt(a.Kind)
+		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
 		if s.wake != nil {
@@ -1147,6 +1151,32 @@ func (s *Server) handleSetKind(w http.ResponseWriter, r *http.Request) {
 	}
 	s.record(r.Context(), "kind", "", "", name, store.DetailJSON(map[string]any{"kind": in.Kind}))
 	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": in.Kind})
+}
+
+// handleSetGoodAt records the owner's line saying what a joined agent is good
+// at (admin only). An empty line clears it, so a fixed-job kind shows its
+// stock line again.
+func (s *Server) handleSetGoodAt(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		GoodAt string `json:"good_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	name := r.PathValue("name")
+	if err := s.dir.SetGoodAt(r.Context(), s.remote(r), name, in.GoodAt); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	// The directory stores the line trimmed.
+	line := strings.TrimSpace(in.GoodAt)
+	s.record(r.Context(), "good-at", "", "", name, store.DetailJSON(map[string]any{"good_at": line}))
+	writeJSON(w, http.StatusOK, map[string]string{"name": name, "good_at": line})
 }
 
 // knownKind accepts "" and the kinds onboarding can tailor a block to, so a
