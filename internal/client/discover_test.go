@@ -121,46 +121,6 @@ func TestLearnRelayKeySavesIt(t *testing.T) {
 	}
 }
 
-// A move whose save failed (another process held the config lock) is saved
-// by the refresh that follows it, so the next process does not start from
-// the dead address.
-func TestRefreshSavesAMoveTheMoveCouldNotSave(t *testing.T) {
-	old := deadURL(t)
-	moved := fakeRelay(t, "k-learned")
-	savedConfig(t, Config{Relay: old, Agent: "muse"})
-	r, _ := NewRelayFor(Config{Relay: old, Agent: "muse"})
-	r.baseMu.Lock()
-	r.base, r.unsaved = moved, &unsavedMove{from: old, to: moved, modTime: configModTime(ConfigPath())}
-	r.baseMu.Unlock()
-	LearnRelayKey(t.Context(), r)
-	raw, _ := os.ReadFile(ConfigPath())
-	var c Config
-	_ = json.Unmarshal(raw, &c)
-	if c.Relay != moved || c.RelayKey != "k-learned" {
-		t.Fatalf("config %+v, want the moved relay %s saved", c, moved)
-	}
-}
-
-// An operator who rejoins the old relay after a move whose save failed
-// keeps that choice: the refresh sees the file was rewritten and leaves it.
-func TestRefreshDoesNotUndoARejoin(t *testing.T) {
-	old := deadURL(t)
-	moved := fakeRelay(t, "k-learned")
-	savedConfig(t, Config{Relay: old, Agent: "muse"})
-	r, _ := NewRelayFor(Config{Relay: old, Agent: "muse"})
-	r.baseMu.Lock()
-	r.base, r.unsaved = moved, &unsavedMove{from: old, to: moved, modTime: configModTime(ConfigPath()).Add(-time.Second)}
-	r.baseMu.Unlock()
-	// The rejoin rewrote the file after the move tried to save it.
-	LearnRelayKey(t.Context(), r)
-	raw, _ := os.ReadFile(ConfigPath())
-	var c Config
-	_ = json.Unmarshal(raw, &c)
-	if c.Relay != old || c.RelayKey != "" {
-		t.Fatalf("config %+v, want the rejoined relay %s kept untouched", c, old)
-	}
-}
-
 func TestRelayFoundAtItsAdvertisedNameWithoutTailscale(t *testing.T) {
 	const key = "k-real"
 	old := deadURL(t)

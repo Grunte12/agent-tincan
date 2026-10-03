@@ -80,3 +80,56 @@ func TestUpdateSavedRelayGivesUpOnAStuckLock(t *testing.T) {
 		t.Fatalf("config %+v changed without the lock", c)
 	}
 }
+
+// A move whose save met a held config lock saves once the lock is free,
+// under the same rule as the first try.
+func TestRelayMoveSaveRetriesAfterTheLockFrees(t *testing.T) {
+	oldWait, oldEvery := configLockWait, saveRetryEvery
+	configLockWait, saveRetryEvery = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { configLockWait, saveRetryEvery = oldWait, oldEvery })
+	path := filepath.Join(t.TempDir(), "client.json")
+	if err := SaveConfigTo(path, Config{Relay: "http://old:8787", Agent: "muse"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewRelayForFile(Config{Relay: "http://new:8787", Agent: "muse"}, path)
+	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { r.retrySave("http://old:8787", "http://new:8787"); close(done) }()
+	time.Sleep(120 * time.Millisecond)
+	if c := readConfig(t, path); c.Relay != "http://old:8787" {
+		t.Fatalf("saved %+v while the lock was held", c)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry did not finish after the lock freed")
+	}
+	if c := readConfig(t, path); c.Relay != "http://new:8787" {
+		t.Fatalf("config %+v, want the move saved", c)
+	}
+}
+
+// A retry gives up once the client has moved again, so it never saves a
+// stale address.
+func TestRelayMoveSaveRetryStopsAfterAnotherMove(t *testing.T) {
+	oldEvery := saveRetryEvery
+	saveRetryEvery = 10 * time.Millisecond
+	t.Cleanup(func() { saveRetryEvery = oldEvery })
+	path := filepath.Join(t.TempDir(), "client.json")
+	if err := SaveConfigTo(path, Config{Relay: "http://old:8787", Agent: "muse"}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := NewRelayForFile(Config{Relay: "http://newer:8787", Agent: "muse"}, path)
+	r.retrySave("http://old:8787", "http://new:8787")
+	if c := readConfig(t, path); c.Relay != "http://old:8787" {
+		t.Fatalf("config %+v, want it left alone after another move", c)
+	}
+}

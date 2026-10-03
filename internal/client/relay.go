@@ -177,13 +177,10 @@ type Relay struct {
 	groups   map[string]cachedGroup
 	baseMu   sync.RWMutex
 	base     string
-	// unsaved is a relay move whose save failed (the config was locked),
-	// so the refresh after it can save it while the file is unchanged.
-	unsaved *unsavedMove
-	api     *http.Client
-	polls   *http.Client
-	agent   string // sent as AgentHeader when set
-	version string // sent as VersionHeader when set
+	api      *http.Client
+	polls    *http.Client
+	agent    string // sent as AgentHeader when set
+	version  string // sent as VersionHeader when set
 
 	// key is the relay key from the saved config. When the relay stops
 	// answering at base, the client looks for the peer that proves it

@@ -211,16 +211,13 @@ func (r *Relay) follow(ctx context.Context, old string) bool {
 		return false
 	}
 	r.baseMu.Lock()
-	r.base, r.unsaved = found, nil
+	r.base = found
 	r.baseMu.Unlock()
 	msg := fmt.Sprintf("tincan: the relay moved from %s to %s (listed %d peers via %s)", old, found, listed, source)
 	if r.configFile != "" {
-		before := configModTime(r.configFile)
 		if err := updateSavedRelay(r.configFile, old, found); err != nil {
-			msg += fmt.Sprintf("; could not update %s: %v", r.configFile, err)
-			r.baseMu.Lock()
-			r.unsaved = &unsavedMove{from: old, to: found, modTime: before}
-			r.baseMu.Unlock()
+			msg += fmt.Sprintf("; could not update %s yet: %v", r.configFile, err)
+			go r.retrySave(old, found)
 		} else {
 			msg += "; updated " + r.configFile
 		}
@@ -527,21 +524,29 @@ func tailscaleBinary() string {
 	return ""
 }
 
-// unsavedMove is a relay move that could not be saved to the config file,
-// and the file's modification time when the move tried.
-type unsavedMove struct {
-	from, to string
-	modTime  time.Time
-}
+// saveRetries and saveRetryEvery bound how long a move whose save failed
+// (another process held the config lock) keeps trying to save; package vars
+// so tests can shorten them.
+var (
+	saveRetries    = 6
+	saveRetryEvery = 5 * time.Second
+)
 
-// configModTime is the config file's modification time, zero if it cannot
-// be read.
-func configModTime(path string) time.Time {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
+// retrySave retries a relay move's save with the same rule as the first
+// try (only while the file still names old), and stops once it saves, the
+// client moves again, or the retries run out; any later process whose saved
+// address is dead finds the relay by its own search.
+func (r *Relay) retrySave(old, found string) {
+	for range saveRetries {
+		time.Sleep(saveRetryEvery)
+		if r.Base() != found {
+			return
+		}
+		if err := updateSavedRelay(r.configFile, old, found); err == nil {
+			log.Printf("tincan: saved the relay move to %s in %s", found, r.configFile)
+			return
+		}
 	}
-	return fi.ModTime()
 }
 
 // updateSavedRelay rewrites the relay URL in the config file at path, but
@@ -609,20 +614,7 @@ func LearnRelayKey(ctx context.Context, r *Relay) {
 	}
 	defer unlock()
 	c, err := loadSavedConfig(r.configFile)
-	if err != nil {
-		return
-	}
-	r.baseMu.Lock()
-	base, unsaved := r.base, r.unsaved
-	r.unsaved = nil
-	r.baseMu.Unlock()
-	switch saved := strings.TrimRight(c.Relay, "/"); {
-	case saved == base:
-	case unsaved != nil && unsaved.to == base && saved == unsaved.from && configModTime(r.configFile).Equal(unsaved.modTime):
-		// The move could not save itself (the config was locked) and nothing
-		// has rewritten the file since, so a rejoin is never undone; save it.
-		c.Relay = base
-	default:
+	if err != nil || strings.TrimRight(c.Relay, "/") != r.Base() {
 		return
 	}
 	c.RelayKey, c.RelayURLs, c.RelayInfoAt = out.RelayKey, out.RelayURLs, time.Now().UTC()
