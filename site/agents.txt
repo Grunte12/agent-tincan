@@ -213,6 +213,9 @@ B5. Check everything:
     Fix anything that is not OK. If your app asks before each new site, choose
     "Always allow" for the relay's name and address when doctor touches them.
 
+Agents can run `tincan top --once` for a read-only mesh snapshot. Admin devices
+also see held approvals and recent chains; other agents see the roster only.
+
 B6. Say hello: `tincan agents` lists the team, one agent per line. A first line
     starting with "# " names the relay's build and is not an agent. Ask one
     teammate something small:
