@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // InviteTTL is how long an invite code stays valid.
@@ -53,6 +55,26 @@ func checkKind(kind string) error {
 	return nil
 }
 
+// MaxGoodAtRunes caps an agent's good-at line so the roster stays scannable.
+const MaxGoodAtRunes = 120
+
+// checkGoodAt trims line and reports the line to store ("" clears it). A line
+// is one printable line: valid UTF-8, at most MaxGoodAtRunes runes, and no
+// control or format characters, newlines and tabs included.
+func checkGoodAt(line string) (string, error) {
+	line = strings.TrimSpace(line)
+	if !utf8.ValidString(line) {
+		return "", errors.New("the good-at line is not valid UTF-8")
+	}
+	if utf8.RuneCountInString(line) > MaxGoodAtRunes {
+		return "", fmt.Errorf("the good-at line is over %d characters", MaxGoodAtRunes)
+	}
+	if strings.IndexFunc(line, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
+		return "", errors.New("the good-at line contains a line break or other control character")
+	}
+	return line, nil
+}
+
 // Agent is a joined agent.
 type Agent struct {
 	Name     string    `json:"name"`
@@ -64,6 +86,9 @@ type Agent struct {
 	// NodeUser is the Tailscale login that owned the node at join, empty for
 	// agents joined before it was recorded.
 	NodeUser string `json:"node_user,omitempty"`
+	// GoodAt is the owner-written line saying what the agent is good at,
+	// empty when unset. Only SetAgentGoodAt writes it; PutAgent keeps it.
+	GoodAt string `json:"good_at,omitempty"`
 }
 
 // Invite is a pending one-time code.
@@ -87,6 +112,10 @@ type Store interface {
 	// SetAgentKind records an agent's runtime kind ("" clears it) and reports
 	// whether the agent exists.
 	SetAgentKind(ctx context.Context, name, kind string) (bool, error)
+	// SetAgentGoodAt records an agent's owner-written good-at line ("" clears
+	// it) and reports whether the agent exists. PutAgent keeps the line an
+	// existing agent already has.
+	SetAgentGoodAt(ctx context.Context, name, line string) (bool, error)
 	// PutInvite stores inv and retires any earlier unredeemed code for the
 	// same name, so re-inviting a name leaves only the newest code valid.
 	PutInvite(ctx context.Context, inv Invite) error
@@ -322,6 +351,29 @@ func (d *Directory) SetKind(ctx context.Context, remoteAddr, name, kind string) 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	ok, err := d.store.SetAgentKind(ctx, name, kind)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	}
+	return nil
+}
+
+// SetGoodAt records the owner's line saying what an agent is good at (""
+// clears it). Only admin devices may set it.
+func (d *Directory) SetGoodAt(ctx context.Context, remoteAddr, name, line string) error {
+	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
+		return err
+	}
+	line, err := checkGoodAt(line)
+	if err != nil {
+		return err
+	}
+	// Serialize with Join, as SetKind does.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ok, err := d.store.SetAgentGoodAt(ctx, name, line)
 	if err != nil {
 		return err
 	}

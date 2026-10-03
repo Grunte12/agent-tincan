@@ -462,3 +462,115 @@ func agentNamed(t *testing.T, d *identity.Directory, name string) identity.Agent
 	}
 	return a
 }
+
+// Only an admin device sets a teammate's good-at line; a refused attempt
+// leaves the stored line as it was, and an unknown agent is reported.
+func TestSetGoodAtIsAdminOnly(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "codex"))
+	if err := f.dir.SetGoodAt(ctx, "100.0.0.1:1", "codex", "refactors Go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dir.SetGoodAt(ctx, "100.0.0.2:1", "codex", "phone calls"); !errors.Is(err, identity.ErrNotAdmin) {
+		t.Fatalf("non-admin set good-at: %v", err)
+	}
+	if a := agentNamed(t, f.dir, "codex"); a.GoodAt != "refactors Go" {
+		t.Fatalf("good-at after refused set = %q", a.GoodAt)
+	}
+	if err := f.dir.SetGoodAt(ctx, identity.LocalAdmin, "nobody", "phone calls"); !errors.Is(err, identity.ErrUnknownAgent) {
+		t.Fatalf("unknown agent: %v", err)
+	}
+}
+
+// Lines are trimmed, capped at 120 runes, and kept to one printable line;
+// an empty or whitespace-only line clears it.
+func TestSetGoodAtValidates(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "codex"))
+	set := func(line string) error { return f.dir.SetGoodAt(ctx, identity.LocalAdmin, "codex", line) }
+	get := func() string { return agentNamed(t, f.dir, "codex").GoodAt }
+
+	max := strings.Repeat("é", 120)
+	if err := set(max); err != nil || get() != max {
+		t.Fatalf("120-rune line: %v, stored %q", err, get())
+	}
+	for _, bad := range []string{strings.Repeat("é", 121), "calls\nbookings", "calls\x07", "calls​"} {
+		if err := set(bad); err == nil {
+			t.Errorf("line %q should be rejected", bad)
+		}
+	}
+	if get() != max {
+		t.Fatalf("rejected lines changed the stored line to %q", get())
+	}
+	if err := set("  phone calls  "); err != nil || get() != "phone calls" {
+		t.Fatalf("trimmed line: %v, stored %q", err, get())
+	}
+	if err := set(" \t "); err != nil || get() != "" {
+		t.Fatalf("whitespace-only line: %v, stored %q", err, get())
+	}
+}
+
+// A line set while a Join for the same agent is in flight is not lost.
+func TestSetGoodAtDuringJoinIsNotLost(t *testing.T) {
+	ctx := context.Background()
+	st := &pausingStore{MemoryStore: identity.NewMemoryStore()}
+	who := identitytest.New(map[string]identity.Node{"100.0.0.1:1": macNode, "100.0.0.2:1": grokNode})
+	dir := identity.NewDirectory(st, who, identity.Config{Admins: []string{"macbook-pro-44"}})
+	st.PutAgent(ctx, identity.Agent{Name: "grokbot", NodeID: "nOLD", NodeName: "old"})
+	code, err := dir.Invite(ctx, identity.LocalAdmin, "grokbot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	st.pause = func() {
+		go func() { done <- dir.SetGoodAt(ctx, identity.LocalAdmin, "grokbot", "phone calls") }()
+		select {
+		case err := <-done:
+			done <- err
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if _, err := dir.Join(ctx, "100.0.0.2:1", code); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if a := agentNamed(t, dir, "grokbot"); a.GoodAt != "phone calls" || a.NodeID != "nGROK" {
+		t.Fatalf("after join and set good-at = %+v", a)
+	}
+}
+
+// An owner's line survives a move to a new machine and a virtual rebind,
+// both of which rewrite the agent's row.
+func TestGoodAtSurvivesMoveAndVirtualRebind(t *testing.T) {
+	store := identity.NewMemoryStore()
+	who := identitytest.New(map[string]identity.Node{"100.0.0.3:1": instinctNode, "100.0.0.4:1": museNode})
+	dir := identity.NewDirectory(store, who, identity.Config{})
+	ctx := context.Background()
+	code, _ := dir.Invite(ctx, identity.LocalAdmin, "hermes")
+	dir.Join(ctx, "100.0.0.3:1", code)
+	if err := dir.SetGoodAt(ctx, identity.LocalAdmin, "hermes", "phone calls"); err != nil {
+		t.Fatal(err)
+	}
+	code, _ = dir.Invite(ctx, identity.LocalAdmin, "hermes")
+	dir.Join(ctx, "100.0.0.4:1", code)
+	if a, _, _ := store.AgentByName(ctx, "hermes"); a.NodeID != museNode.ID || a.GoodAt != "phone calls" {
+		t.Fatalf("after move: %+v", a)
+	}
+
+	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.SetGoodAt(ctx, identity.LocalAdmin, "chatgpt", "web research"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {
+		t.Fatal(err)
+	}
+	if a, _, _ := store.AgentByName(ctx, "chatgpt"); a.GoodAt != "web research" {
+		t.Fatalf("after virtual rebind: %+v", a)
+	}
+}
