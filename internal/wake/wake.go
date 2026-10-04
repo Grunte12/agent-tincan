@@ -735,11 +735,15 @@ func transportReason(req *http.Request, err error) string {
 // auditTimeout bounds one wake audit write.
 const auditTimeout = 10 * time.Second
 
-// remember keeps wk as agent's last wake, in memory and in the store. The
-// time is when the send that decided the result started, so a poll the wake
-// itself set off never predates it.
+// remember keeps wk as agent's last wake, in memory and in the store, unless
+// a newer wake is already kept. The time is when the send that decided the
+// result started, so a poll the wake itself set off never predates it.
 func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
 	w.mu.Lock()
+	if old, ok := w.last[agent]; ok && !wk.At.After(old.At) {
+		w.mu.Unlock()
+		return
+	}
 	w.last[agent] = wk
 	w.mu.Unlock()
 	if w.audit == nil {

@@ -21,10 +21,12 @@ func (s *Store) migrateWakes() error {
 	return err
 }
 
-// SetLastWake records w as agent's last wake, replacing the one before.
+// SetLastWake records w as agent's last wake, replacing the one before only
+// when w is newer, so a slow send that finishes late cannot hide a newer one.
 func (s *Store) SetLastWake(ctx context.Context, agent string, w Wake) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO wakes (agent, woken_at, result) VALUES (?, ?, ?)
-ON CONFLICT(agent) DO UPDATE SET woken_at = excluded.woken_at, result = excluded.result`, agent, w.At.UnixMilli(), w.Result)
+ON CONFLICT(agent) DO UPDATE SET woken_at = excluded.woken_at, result = excluded.result
+WHERE excluded.woken_at > wakes.woken_at`, agent, w.At.UnixMilli(), w.Result)
 	return err
 }
 

@@ -97,3 +97,25 @@ func TestAgentLastPoll(t *testing.T) {
 		t.Fatalf("unknown agent = %v, %v", p, err)
 	}
 }
+
+// A wake recorded late (a slow send finishing after a newer one) never
+// replaces a newer wake.
+func TestSetLastWakeKeepsNewer(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	t1 := time.UnixMilli(1_790_000_000_000)
+	t2 := t1.Add(time.Minute)
+	if err := s.SetLastWake(ctx, "grokbot", Wake{At: t2, Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLastWake(ctx, "grokbot", Wake{At: t1, Result: "hooks.example returned 502 Bad Gateway"}); err != nil {
+		t.Fatal(err)
+	}
+	if ws, err := s.LastWakes(ctx); err != nil || !ws["grokbot"].At.Equal(t2) || ws["grokbot"].Result != "ok" {
+		t.Fatalf("wakes = %+v, %v", ws, err)
+	}
+}

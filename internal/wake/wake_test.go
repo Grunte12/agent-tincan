@@ -597,3 +597,20 @@ func TestLastWakeTransportErrorHidesURL(t *testing.T) {
 		}
 	}
 }
+
+// The waker keeps the newer of two wakes whichever is recorded last, in
+// memory and in the store.
+func TestRememberKeepsNewerWake(t *testing.T) {
+	st := auditStore(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: "http://127.0.0.1:1/hook"}}, st, Options{})
+	t1 := time.UnixMilli(1_790_000_000_000)
+	t2 := t1.Add(time.Minute)
+	w.remember(context.Background(), "grokbot", store.Wake{At: t2, Result: "ok"})
+	w.remember(context.Background(), "grokbot", store.Wake{At: t1, Result: "boom"})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(t2) || got.Result != "ok" {
+		t.Fatalf("in memory = %+v %v", got, ok)
+	}
+	if stored, err := st.LastWakes(context.Background()); err != nil || !stored["grokbot"].At.Equal(t2) {
+		t.Fatalf("stored = %+v, %v", stored, err)
+	}
+}
