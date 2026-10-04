@@ -134,10 +134,6 @@ type Server struct {
 	// persistEvery per agent.
 	lastSeen  map[string]time.Time
 	persisted map[string]time.Time
-	// pollPersisted is when each agent's last poll was last written to
-	// the store: at most once per persistEvery, and at once for the first
-	// poll after a wake, which is what proves the agent checked in.
-	pollPersisted map[string]time.Time
 	// versions is the tincan build each agent last called with, from the
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
@@ -183,7 +179,7 @@ type pollFeatures struct {
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
-		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, pollPersisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}, stopping: make(chan struct{}), started: cfg.Now()}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
@@ -1334,7 +1330,6 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastPoll, in.Name)
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
-	delete(s.pollPersisted, in.Name)
 	delete(s.versions, in.Name)
 	delete(s.pollFeatures, in.Name)
 	delete(s.storedVersion, in.Name)
@@ -1406,30 +1401,20 @@ func (s *Server) UnseenReplies(agent string) int {
 	return n
 }
 
-// touch records a poll by agent. The store copy, which tells a restarted
-// relay that a woken agent checked in, is written at most once per
-// persistEvery, except that the first poll after a wake is always written.
+// touch records a poll by agent. The store copy tells a restarted relay
+// that a woken agent checked in, so it is written on every poll by an agent
+// the relay wakes (webhook and email agents poll about once per wake) and
+// never for one it does not, which polls constantly and is never judged
+// unanswered.
 func (s *Server) touch(ctx context.Context, agent string) {
-	var wokeAt time.Time
-	if wr, ok := s.wake.(WakeReporter); ok {
-		// Read the waker before taking s.mu, which it need not wait on.
-		if wk, ok := wr.LastWake(agent); ok {
-			wokeAt = wk.At
-		}
-	}
 	now := s.cfg.Now()
 	s.mu.Lock()
 	s.lastPoll[agent] = now
 	if now.After(s.lastSeen[agent]) {
 		s.lastSeen[agent] = now
 	}
-	written, ok := s.pollPersisted[agent]
-	write := !ok || now.Sub(written) >= persistEvery || wokeAt.After(written)
-	if write {
-		s.pollPersisted[agent] = now
-	}
 	s.mu.Unlock()
-	if !write {
+	if s.wake == nil || !relayWoken(s.wake.WakeMethod(agent)) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

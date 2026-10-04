@@ -185,24 +185,46 @@ func TestRosterUnansweredAcrossRestart(t *testing.T) {
 	}
 }
 
-// A poll soon after an earlier one is not written to the store again unless
-// a wake came in between, so a restart cannot lose the check-in that
-// answered the wake.
-func TestPollAfterWakePersistsDespiteThrottle(t *testing.T) {
-	h, clk, fw := wakeHarness(t)
-	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
-	clk.advance(5 * time.Second)
-	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
-	clk.advance(5 * time.Second)
-	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
-	polled := clk.Now().Truncate(time.Millisecond)
-	if p, err := h.st.AgentLastPoll(t.Context(), "grokbot"); err != nil || !p.Equal(polled) {
-		t.Fatalf("persisted poll = %v, %v; want %v", p, err, polled)
+// Every poll by a relay-woken agent is written to the store, so a restart
+// cannot lose the check-in that answered a wake. An agent the relay does not
+// wake polls constantly and is never judged unanswered, so its polls are not
+// written at all.
+func TestPollPersistence(t *testing.T) {
+	h, clk, _ := wakeHarness(t)
+	for range 3 {
+		h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+		h.do(museAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+		polled := clk.Now().Truncate(time.Millisecond)
+		if p, err := h.st.AgentLastPoll(t.Context(), "grokbot"); err != nil || !p.Equal(polled) {
+			t.Fatalf("persisted webhook poll = %v, %v; want %v", p, err, polled)
+		}
+		if p, err := h.st.AgentLastPoll(t.Context(), "muse"); err != nil || !p.IsZero() {
+			t.Fatalf("persisted wait poll = %v, %v; want none", p, err)
+		}
+		clk.advance(5 * time.Second)
 	}
+}
+
+// A poll that lands while a wake is still being sent (the waker records the
+// wake, stamped with when its attempt started, only after the send returns)
+// is persisted, so after a restart the agent reads as answered.
+func TestPollDuringWakeSurvivesRestart(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	clk.advance(5 * time.Second)
+	attempt := clk.Now() // a second wake starts sending
 	clk.advance(5 * time.Second)
 	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
-	if p, _ := h.st.AgentLastPoll(t.Context(), "grokbot"); !p.Equal(polled) {
-		t.Fatalf("throttled poll was written: %v", p)
+	clk.advance(time.Second)
+	fw.set("grokbot", store.Wake{At: attempt, Result: envelope.WakeOK}) // the send returns
+
+	srv := New(identity.NewDirectory(h.st, h.who, identity.Config{Admins: []string{"macbook-pro-44"}}), h.st, Config{Now: clk.Now})
+	srv.SetWakeNamer(fw)
+	h2 := &harness{t: t, srv: srv, h: srv.Handler(), st: h.st, who: h.who}
+	clk.advance(DefaultWakeGrace + time.Minute)
+	if g := agentInfo(t, h2, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("polled while the wake was sending, then restarted: %+v", g)
 	}
 }
 
