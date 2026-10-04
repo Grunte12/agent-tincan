@@ -713,8 +713,7 @@ func (e *sendError) Unwrap() error { return e.err }
 // carry a token in its query or userinfo, so a raw error never leaves the
 // relay's log.
 func publicReason(err error) string {
-	var se *sendError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*sendError](err); ok {
 		return se.reason
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -729,12 +728,11 @@ func publicReason(err error) string {
 // host and port.
 func transportReason(req *http.Request, err error) string {
 	cause := err
-	var ue *url.Error
-	if errors.As(err, &ue) {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
 		cause = ue.Err
 		// A redirect can leave a *url.Error for the target inside.
-		if errors.As(cause, &ue) {
-			cause = ue.Err
+		if inner, ok := errors.AsType[*url.Error](cause); ok {
+			cause = inner.Err
 		}
 	}
 	return fmt.Sprintf("%s to %s failed: %v", req.Method, req.URL.Host, cause)

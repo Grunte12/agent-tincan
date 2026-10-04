@@ -135,7 +135,7 @@ func TestActivityIsNotACheckIn(t *testing.T) {
 	clk.advance(time.Minute)
 	var sent envelope.SendResponse
 	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"hi"}`, http.StatusCreated, &sent)
-	h.do(grokAddr, "GET", "/v1/requests/"+sent.Request.ID, "", http.StatusOK, nil)
+	h.do(grokAddr, "GET", "/v1/requests/"+sent.ID, "", http.StatusOK, nil)
 	h.do(grokAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
 	clk.advance(DefaultWakeGrace)
 	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
