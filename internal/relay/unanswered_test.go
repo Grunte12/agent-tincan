@@ -208,6 +208,22 @@ func TestPollPersistence(t *testing.T) {
 	}
 }
 
+// An empty long poll by a relay-woken agent writes its last poll once, at
+// the start that proves it checked in, not again when the hold runs out.
+func TestEmptyLongPollPersistsOnce(t *testing.T) {
+	h := newHarness(t, Config{PollHold: 50 * time.Millisecond})
+	h.srv.SetWakeNamer(&fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}})
+	if _, err := h.st.DB().Exec(`CREATE TABLE poll_writes (n INTEGER);
+CREATE TRIGGER count_poll_writes AFTER UPDATE OF last_poll_at ON agents BEGIN INSERT INTO poll_writes VALUES (1); END`); err != nil {
+		t.Fatal(err)
+	}
+	h.do(grokAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+	var n int
+	if err := h.st.DB().QueryRow(`SELECT COUNT(*) FROM poll_writes`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("last poll writes = %d, %v; want 1", n, err)
+	}
+}
+
 // A poll that lands while a wake is still being sent (the waker records the
 // wake, stamped with when its attempt started, only after the send returns)
 // is persisted, so after a restart the agent reads as answered.

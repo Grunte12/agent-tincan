@@ -670,8 +670,10 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}()
 	deadline := time.NewTimer(hold)
 	defer deadline.Stop()
+	persist := true // the store copy is written once, when the poll starts
 	for {
-		s.touch(r.Context(), name)
+		s.touch(r.Context(), name, persist)
+		persist = false
 		wake := s.hub.wait(inboxKey(name))
 		var reps []envelope.Result
 		var more int
@@ -774,7 +776,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
-		s.touch(r.Context(), name)
+		s.touch(r.Context(), name, false)
 		if v := s.upgradeFor(r); v != "" {
 			out := map[string]any{"upgrade_available": v}
 			out["requests"] = []envelope.Request{}
@@ -1426,11 +1428,12 @@ func (s *Server) UnseenReplies(agent string) int {
 }
 
 // touch records a poll by agent. The store copy tells a restarted relay
-// that a woken agent checked in, so it is written on every poll by an agent
+// that a woken agent checked in, so with persist it is written for an agent
 // the relay wakes (webhook and email agents poll about once per wake) and
 // never for one it does not, which polls constantly and is never judged
-// unanswered.
-func (s *Server) touch(ctx context.Context, agent string) {
+// unanswered. A poll persists once, at its start; later touches in the same
+// poll only update memory.
+func (s *Server) touch(ctx context.Context, agent string, persist bool) {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	s.lastPoll[agent] = now
@@ -1438,7 +1441,7 @@ func (s *Server) touch(ctx context.Context, agent string) {
 		s.lastSeen[agent] = now
 	}
 	s.mu.Unlock()
-	if s.wake == nil || !relayWoken(s.wake.WakeMethod(agent)) {
+	if !persist || s.wake == nil || !relayWoken(s.wake.WakeMethod(agent)) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
