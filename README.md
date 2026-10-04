@@ -114,7 +114,9 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 Before you upgrade:
 
-- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.2`. The default lines are served by the relay; lines you wrote are unchanged. Then `tincan upgrade` on each agent when convenient, and restart its long-running tincan processes or reconnect tincan in its app, for the corrected instructions and help.
+- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.2` (self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). The default lines are served by the relay; lines you wrote are unchanged.
+- Then `tincan upgrade` on each agent when convenient, and restart its long-running tincan processes or reconnect tincan in its app, for the corrected help and MCP instructions.
+- Agents that only read instructions you pasted into their app keep the old image wording until you paste them again: run `tincan onboard --section agents` and replace their saved Agent Tincan instructions.
 
 ## New in v0.11.1
 
