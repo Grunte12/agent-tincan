@@ -239,7 +239,11 @@ type Waker struct {
 	// meanwhile, since that reply restarted the schedule. It lives on the
 	// Waker, not the nudge, because fire removes the nudge it sends.
 	replyGen map[string]uint64
-	wg       sync.WaitGroup
+	// last is each relay-woken agent's last real wake send, kept in the
+	// store too so a restarted relay can still tell a woken agent that
+	// never checked in. Skipped wakes leave it alone.
+	last map[string]store.Wake
+	wg   sync.WaitGroup
 	// stopped is set by Stop; no nudge is scheduled after it. ctx ends
 	// the nudges in flight when Stop is called.
 	stopped bool
@@ -273,9 +277,28 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	last := map[string]store.Wake{}
+	if audit != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		if stored, err := audit.LastWakes(ctx); err != nil {
+			log.Printf("load last wakes: %v", err)
+		} else {
+			last = stored
+		}
+		cancel()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		ctx: ctx, cancel: cancel}
+		last: last, ctx: ctx, cancel: cancel}
+}
+
+// LastWake implements relay.WakeReporter: the last wake the relay sent
+// agent, and whether there was one.
+func (w *Waker) LastWake(agent string) (store.Wake, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	l, ok := w.last[agent]
+	return l, ok
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -486,10 +509,12 @@ func (w *Waker) fire(agent string) {
 	}
 	msg := WaitingMessage(p.requests, replies)
 	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
+	at := w.opts.Now()
 	err := w.send(ctx, agent, msg, key)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
+			at = w.opts.Now()
 			err = w.send(ctx, agent, msg, key)
 		case <-ctx.Done():
 		}
@@ -497,8 +522,10 @@ func (w *Waker) fire(agent string) {
 	if err != nil {
 		log.Printf("wake %s: %v", agent, err)
 		w.record(ctx, "wake_failed", agent, err.Error())
+		w.remember(ctx, agent, store.Wake{At: at, Result: err.Error()})
 		return
 	}
+	w.remember(ctx, agent, store.Wake{At: at, Result: store.WakeOK})
 	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
@@ -661,6 +688,23 @@ func (w *Waker) do(req *http.Request) error {
 
 // auditTimeout bounds one wake audit write.
 const auditTimeout = 10 * time.Second
+
+// remember keeps wk as agent's last wake, in memory and in the store. The
+// time is when the send that decided the result started, so a poll the wake
+// itself set off never predates it.
+func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
+	w.mu.Lock()
+	w.last[agent] = wk
+	w.mu.Unlock()
+	if w.audit == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := w.audit.SetLastWake(ctx, agent, wk); err != nil {
+		log.Printf("last wake %s: %v", agent, err)
+	}
+}
 
 func (w *Waker) record(ctx context.Context, event, agent, detail string) {
 	if w.audit == nil {

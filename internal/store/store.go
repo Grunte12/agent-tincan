@@ -196,6 +196,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate approval: %w", err)
 	}
+	if err := s.migrateWakes(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate wakes: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
