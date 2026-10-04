@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 )
 
 // The last wake per agent is one row that each send replaces, and it
@@ -45,5 +47,53 @@ func TestLastWakeSurvivesReopen(t *testing.T) {
 	}
 	if i := ws["instinct"]; !i.At.Equal(at) || i.Result != "ok" || len(ws) != 2 {
 		t.Fatalf("wakes = %+v", ws)
+	}
+}
+
+// An agent's last poll is its own column: only TouchAgentPoll moves it, only
+// forward, it survives a reopen and a re-join, and it reads back per agent.
+func TestAgentLastPoll(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	at := time.UnixMilli(1_790_000_000_000)
+	if err := s.PutAgent(ctx, identity.Agent{Name: "grokbot", NodeID: "nG", NodeName: "grok", JoinedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.AgentLastPoll(ctx, "grokbot"); err != nil || !p.IsZero() {
+		t.Fatalf("never polled = %v, %v", p, err)
+	}
+	if err := s.TouchAgent(ctx, "grokbot", at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.AgentLastPoll(ctx, "grokbot"); err != nil || !p.IsZero() {
+		t.Fatalf("other activity moved the poll: %v, %v", p, err)
+	}
+	if err := s.TouchAgentPoll(ctx, "grokbot", at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TouchAgentPoll(ctx, "grokbot", at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutAgent(ctx, identity.Agent{Name: "grokbot", NodeID: "nG2", NodeName: "grok-2", JoinedAt: at.Add(3 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if p, err := s.AgentLastPoll(ctx, "grokbot"); err != nil || !p.Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("last poll = %v, %v", p, err)
+	}
+	if ps, err := s.AgentsLastPoll(ctx); err != nil || len(ps) != 1 || !ps["grokbot"].Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("all last polls = %v, %v", ps, err)
+	}
+	if p, err := s.AgentLastPoll(ctx, "nobody"); err != nil || !p.IsZero() {
+		t.Fatalf("unknown agent = %v, %v", p, err)
 	}
 }

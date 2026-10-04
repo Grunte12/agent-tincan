@@ -121,15 +121,42 @@ func TestRosterAgentSideMethodsHaveNoWakeFields(t *testing.T) {
 	}
 }
 
-// The relay keeps polls in memory. After a restart, a wake from before it
-// counts once the grace has passed since the restart, unless the agent's
-// persisted activity shows it called after the wake.
+// Only a poll is a check-in: a send or a get from the woken agent after the
+// wake leaves it unanswered, in the roster and in a send response.
+func TestActivityIsNotACheckIn(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
+	clk.advance(time.Minute)
+	var sent envelope.SendResponse
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"hi"}`, http.StatusCreated, &sent)
+	h.do(grokAddr, "GET", "/v1/requests/"+sent.Request.ID, "", http.StatusOK, nil)
+	h.do(grokAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
+	clk.advance(DefaultWakeGrace)
+	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
+		t.Fatalf("send and get after the wake, no poll: want unanswered: %+v", g)
+	}
+	var out envelope.SendResponse
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target == nil || !out.Target.Unanswered {
+		t.Fatalf("send target: %+v", out.Target)
+	}
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("after a poll: %+v", g)
+	}
+}
+
+// The relay keeps its last poll per agent in the store. After a restart, a
+// poll persisted after the wake keeps the agent answered; without one (other
+// activity does not count) it is unanswered once the grace has passed since
+// the later of the wake and the restart.
 func TestRosterUnansweredAcrossRestart(t *testing.T) {
 	h, clk, fw := wakeHarness(t)
 	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
 	fw.set("instinct", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
 	clk.advance(time.Minute)
 	h.do(instinctAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"hi"}`, http.StatusCreated, nil)
 
 	clk.advance(time.Hour)
 	srv := New(identity.NewDirectory(h.st, h.who, identity.Config{Admins: []string{"macbook-pro-44"}}), h.st, Config{Now: clk.Now})
@@ -140,10 +167,36 @@ func TestRosterUnansweredAcrossRestart(t *testing.T) {
 	}
 	clk.advance(DefaultWakeGrace + time.Minute)
 	if g := agentInfo(t, h2, macAddr, "grokbot"); !g.Unanswered {
-		t.Fatalf("grace past the restart, no call since the wake: %+v", g)
+		t.Fatalf("grace past the restart, no poll since the wake: %+v", g)
 	}
 	if in := agentInfo(t, h2, macAddr, "instinct"); in.Unanswered {
 		t.Fatalf("polled after the wake, before the restart: %+v", in)
+	}
+	var out envelope.SendResponse
+	h2.do(museAddr, "POST", "/v1/send", `{"to":"instinct","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target == nil || out.Target.Unanswered {
+		t.Fatalf("send to instinct after the restart: %+v", out.Target)
+	}
+}
+
+// A poll soon after an earlier one is not written to the store again unless
+// a wake came in between, so a restart cannot lose the check-in that
+// answered the wake.
+func TestPollAfterWakePersistsDespiteThrottle(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	clk.advance(5 * time.Second)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
+	clk.advance(5 * time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	polled := clk.Now().Truncate(time.Millisecond)
+	if p, err := h.st.AgentLastPoll(t.Context(), "grokbot"); err != nil || !p.Equal(polled) {
+		t.Fatalf("persisted poll = %v, %v; want %v", p, err, polled)
+	}
+	clk.advance(5 * time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	if p, _ := h.st.AgentLastPoll(t.Context(), "grokbot"); !p.Equal(polled) {
+		t.Fatalf("throttled poll was written: %v", p)
 	}
 }
 

@@ -134,6 +134,10 @@ type Server struct {
 	// persistEvery per agent.
 	lastSeen  map[string]time.Time
 	persisted map[string]time.Time
+	// pollPersisted is when each agent's last poll was last written to
+	// the store: at most once per persistEvery, and at once for the first
+	// poll after a wake, which is what proves the agent checked in.
+	pollPersisted map[string]time.Time
 	// versions is the tincan build each agent last called with, from the
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
@@ -179,7 +183,7 @@ type pollFeatures struct {
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
-		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, pollPersisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
 		versionWritten: map[string]time.Time{}, stopping: make(chan struct{}), started: cfg.Now()}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
@@ -621,16 +625,16 @@ func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Targ
 		return nil // sent to an earlier agent of the same name
 	}
 	s.mu.Lock()
-	last, active := s.lastPoll[agent], s.lastSeen[agent]
+	last := s.lastPoll[agent]
 	s.mu.Unlock()
-	if last.IsZero() {
-		// No poll since the relay started: the persisted activity may
-		// still show a call after the wake.
-		if persisted, err := s.store.AgentsLastSeen(ctx); err == nil && persisted[agent].After(active) {
-			active = persisted[agent]
+	if last.Before(wk.At) {
+		// No poll since the wake in this run of the relay: one persisted
+		// before a restart may still have answered it.
+		if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {
+			last = p
 		}
 	}
-	t := s.wakeTarget(wk, last, active, s.cfg.Now())
+	t := s.wakeTarget(wk, last, s.cfg.Now())
 	return &t
 }
 
@@ -671,7 +675,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	deadline := time.NewTimer(hold)
 	defer deadline.Stop()
 	for {
-		s.touch(name)
+		s.touch(r.Context(), name)
 		wake := s.hub.wait(inboxKey(name))
 		var reps []envelope.Result
 		var more int
@@ -774,7 +778,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
-		s.touch(name)
+		s.touch(r.Context(), name)
 		if v := s.upgradeFor(r); v != "" {
 			out := map[string]any{"upgrade_available": v}
 			out["requests"] = []envelope.Request{}
@@ -1055,17 +1059,12 @@ func relayWoken(method string) bool { return method == "webhook" || method == "e
 
 // wakeTarget is a relay-woken agent's last wake and whether it is
 // unanswered: the send failed, or more than the wake grace has passed with
-// no poll since it. The relay keeps polls in memory, so an agent that has
-// not polled since the relay started is judged by its last call of any
-// kind, kept across restarts, and the grace runs from the later of the wake
-// and the relay's start.
-func (s *Server) wakeTarget(wk store.Wake, lastPoll, active, now time.Time) envelope.Target {
+// no poll since it. Only a poll counts as a check-in; lastPoll is the later
+// of the one in memory and the one persisted. The grace runs from the later
+// of the wake and the relay's start, so a restart does not flag at once.
+func (s *Server) wakeTarget(wk store.Wake, lastPoll, now time.Time) envelope.Target {
 	t := envelope.Target{WokenAt: wk.At, WakeResult: wk.Result}
-	checked := lastPoll
-	if checked.IsZero() {
-		checked = active
-	}
-	if !checked.IsZero() && !checked.Before(wk.At) {
+	if !lastPoll.IsZero() && !lastPoll.Before(wk.At) {
 		return t
 	}
 	since := wk.At
@@ -1139,6 +1138,13 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	var polls map[string]time.Time
+	if len(wakes) > 0 {
+		// A poll persisted before a restart may have answered a wake.
+		if polls, err = s.store.AgentsLastPoll(r.Context()); err != nil {
+			log.Printf("agents last poll: %v", err)
+		}
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -1159,7 +1165,11 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 				info.Target = *t
 			}
 			if wk, ok := wakes[a.Name]; ok {
-				info.Target = s.wakeTarget(wk, last, active, now)
+				polled := last
+				if p := polls[a.Name]; p.After(polled) {
+					polled = p
+				}
+				info.Target = s.wakeTarget(wk, polled, now)
 			}
 		}
 		out = append(out, info)
@@ -1390,14 +1400,37 @@ func (s *Server) UnseenReplies(agent string) int {
 	return n
 }
 
-func (s *Server) touch(agent string) {
+// touch records a poll by agent. The store copy, which tells a restarted
+// relay that a woken agent checked in, is written at most once per
+// persistEvery, except that the first poll after a wake is always written.
+func (s *Server) touch(ctx context.Context, agent string) {
+	var wokeAt time.Time
+	if wr, ok := s.wake.(WakeReporter); ok {
+		// Read the waker before taking s.mu, which it need not wait on.
+		if wk, ok := wr.LastWake(agent); ok {
+			wokeAt = wk.At
+		}
+	}
 	now := s.cfg.Now()
 	s.mu.Lock()
 	s.lastPoll[agent] = now
 	if now.After(s.lastSeen[agent]) {
 		s.lastSeen[agent] = now
 	}
+	written, ok := s.pollPersisted[agent]
+	write := !ok || now.Sub(written) >= persistEvery || wokeAt.After(written)
+	if write {
+		s.pollPersisted[agent] = now
+	}
 	s.mu.Unlock()
+	if !write {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.store.TouchAgentPoll(ctx, agent, now); err != nil {
+		log.Printf("last poll for %s: %v", agent, err)
+	}
 }
 
 func durationParam(r *http.Request, key string, def, max time.Duration) time.Duration {

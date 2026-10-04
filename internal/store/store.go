@@ -143,6 +143,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent features: %w", err)
 	}
+	if err := s.migrateAgentLastPoll(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent last poll: %w", err)
+	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
@@ -426,19 +430,19 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	defer tx.Rollback()
 	// A name moving to a new machine replaces its old binding. Other agents
 	// on either machine are untouched: a node may carry several names. The
-	// name's last activity, the build it last reported and the owner's
-	// good-at line carry over; only SetAgentGoodAt writes the line.
-	var lastSeen sql.NullInt64
+	// name's last activity and poll, the build it last reported and the
+	// owner's good-at line carry over; only SetAgentGoodAt writes the line.
+	var lastSeen, lastPoll sql.NullInt64
 	var version, features, pollFeatures, goodAt sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, version, features, poll_features, good_at FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &version, &features, &pollFeatures, &goodAt)
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, last_poll_at, version, features, poll_features, good_at FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &lastPoll, &version, &features, &pollFeatures, &goodAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, version, features, poll_features, good_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, version, features, pollFeatures, goodAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt); err != nil {
 		return err
 	}
 	return tx.Commit()
