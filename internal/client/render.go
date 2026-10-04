@@ -51,7 +51,7 @@ func FormatResult(r Result) string {
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
-		return scheduleHint(r.Request.To, r.Target) + fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
+		return scheduleHint(r.Request.To, r.Target) + wakeHint(r.Request.To, r.Target) + fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
 			r.Request.To, r.Request.ID, r.Status, r.Request.ID)
 	}
 }
@@ -73,6 +73,56 @@ func scheduleHint(to string, t *envelope.Target) string {
 		hint += fmt.Sprintf(" %s has missed its recent checks, so its schedule may have stopped; the owner may need to restart it.", to)
 	}
 	return hint + "\n"
+}
+
+// wakeHint tells a sender that a relay-woken target was woken and has not
+// checked in, from the facts the relay sent with the request. It is empty
+// without them: an old relay, a target the relay does not wake, or one that
+// checked in after its last wake.
+func wakeHint(to string, t *envelope.Target) string {
+	if t == nil || !t.Unanswered || t.WokenAt.IsZero() {
+		return ""
+	}
+	at := clockTime(t.WokenAt, time.Now())
+	if t.WakeResult != envelope.WakeOK {
+		return fmt.Sprintf("%s's wake at %s failed (%s) and it has not checked in yet; the request is queued.\n", to, at, t.WakeResult)
+	}
+	return fmt.Sprintf("%s was woken at %s and has not checked in yet; the request is queued.\n", to, at)
+}
+
+// clockTime is t on the local clock, "16:40", with the date when it is not
+// today: "Oct 2 16:40".
+func clockTime(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.YearDay() == now.YearDay() && t.Year() == now.Year() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2 15:04")
+}
+
+// UnansweredNote is "woken 12m ago, no check-in (webhook ok)" for an agent
+// the relay woke that has not checked in since, with the error in place of
+// ok when the wake failed, and empty otherwise.
+func (a AgentInfo) UnansweredNote(now time.Time) string {
+	if !a.Unanswered || a.WokenAt.IsZero() {
+		return ""
+	}
+	result := a.Wake + " ok"
+	if a.WakeResult != envelope.WakeOK {
+		result = a.Wake + " failed: " + a.WakeResult
+	}
+	return fmt.Sprintf("woken %s, no check-in (%s)", ageAgo(now.Sub(a.WokenAt)), result)
+}
+
+// UnansweredField is UnansweredNote as a quoted roster field,
+// unanswered="...", since a wake error may hold commas. It is empty for an
+// agent that is not unanswered.
+func (a AgentInfo) UnansweredField(now time.Time) string {
+	note := a.UnansweredNote(now)
+	if note == "" {
+		return ""
+	}
+	return "unanswered=" + strconv.Quote(note)
 }
 
 // WakeLabel is the agent's wake method, with its check interval for an

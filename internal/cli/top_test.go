@@ -40,6 +40,9 @@ func TestAttention(t *testing.T) {
 		{"old", client.AgentInfo{Version: "1.1.0"}, 1, "OLD BUILD"},
 		{"new", client.AgentInfo{Version: "1.3.0"}, 0, ""},
 		{"claims", client.AgentInfo{Claimed: 2}, 0, "CLAIMED"},
+		{"unanswered webhook", client.AgentInfo{Queued: 1, Wake: "webhook", Target: envelope.Target{Unanswered: true}}, 6, "UNANSWERED"},
+		{"unanswered email, stale", client.AgentInfo{Queued: 1, Wake: "email", OldestQueued: now.Add(-2 * time.Hour), Target: envelope.Target{Unanswered: true}}, 10, "UNANSWERED|STALE"},
+		{"unanswered, nothing queued", client.AgentInfo{Wake: "webhook", Target: envelope.Target{Unanswered: true}}, 6, "UNANSWERED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			score, flags := attention(tc.agent, "1.2.0", now)
@@ -339,5 +342,28 @@ func TestQueueAge(t *testing.T) {
 		if got := client.QueueAge(d); got != want {
 			t.Errorf("QueueAge(%v) = %q, want %q", d, got, want)
 		}
+	}
+}
+
+// AE1 in top: an unanswered webhook agent sorts above an ordinary offline
+// webhook agent and below a queued agent that nothing will wake.
+func TestTopUnansweredOrder(t *testing.T) {
+	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := topFrame{at: at, roster: client.Roster{Agents: []client.AgentInfo{
+		{Name: "alpha", Wake: "webhook", Queued: 1},
+		{Name: "grokbot", Wake: "webhook", Queued: 1, Target: envelope.Target{WokenAt: at.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
+		{Name: "muse", Wake: "wait", Queued: 1},
+	}}}
+	var order []string
+	for line := range strings.SplitSeq(renderFrame(f, 120), "\n") {
+		if name, _, ok := strings.Cut(line, " "); ok && (name == "alpha" || name == "grokbot" || name == "muse") {
+			order = append(order, name)
+		}
+	}
+	if got := strings.Join(order, ","); got != "muse,grokbot,alpha" {
+		t.Fatalf("order = %s\n%s", got, renderFrame(f, 120))
+	}
+	if !strings.Contains(renderFrame(f, 120), "  UNANSWERED\n") {
+		t.Fatal(renderFrame(f, 120))
 	}
 }

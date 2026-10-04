@@ -20,7 +20,9 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // session connects a real MCP client to a tincan MCP server acting as agent.
@@ -1080,5 +1082,31 @@ func TestListAgentsShowsGoodAt(t *testing.T) {
 	}
 	if want := `muse: offline, wake=none, never seen, good_at="phone calls, texts; fast pickup"`; muse != want {
 		t.Fatalf("list_agents muse = %q, want %q", muse, want)
+	}
+}
+
+// list_agents shows an unanswered agent's last wake on its line, before its
+// good-at line.
+func TestListAgentsShowsUnanswered(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m.Backdate(t, "muse", time.Hour)
+	if err := st.SetLastWake(t.Context(), "muse", store.Wake{At: time.Now().Add(-12 * time.Minute), Result: "hooks.example returned 502 Bad Gateway"}); err != nil {
+		t.Fatal(err)
+	}
+	w := wake.New(wake.Config{"muse": {Method: wake.Webhook, URL: "http://127.0.0.1:1/hook"}}, st, wake.Options{})
+	t.Cleanup(w.Stop)
+	m.Server.SetWakeNamer(w)
+	if _, err := m.Client(t, "admin").SetGoodAt(context.Background(), "muse", "phone calls"); err != nil {
+		t.Fatal(err)
+	}
+	out := call(t, session(t, m, "grokbot"), "list_agents", nil)
+	want := `muse: offline, wake=webhook, never seen, unanswered="woken 12m ago, no check-in (webhook failed: hooks.example returned 502 Bad Gateway)", good_at="phone calls"`
+	if !strings.Contains(out, want+"\n") && !strings.HasSuffix(out, want) {
+		t.Fatalf("list_agents = %q, want a line %q", out, want)
 	}
 }

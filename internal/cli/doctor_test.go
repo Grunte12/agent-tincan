@@ -3,12 +3,15 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 )
 
@@ -237,6 +240,67 @@ func TestVersionCheck(t *testing.T) {
 				if strings.Contains(text, w) {
 					t.Errorf("unexpected %q in %q", w, text)
 				}
+			}
+		})
+	}
+}
+
+// The unanswered-wakes check lists every unanswered agent with its last wake
+// result on an admin device, says all is well when none is, and is skipped
+// on a device that is not an admin.
+func TestUnansweredWakeCheck(t *testing.T) {
+	now := time.Now()
+	roster := fmt.Sprintf(`{"agents":[
+{"name":"grokbot","wake":"webhook","woken_at":%q,"wake_result":"ok","unanswered":true},
+{"name":"hermes","wake":"webhook","woken_at":%q,"wake_result":"ok"},
+{"name":"instinct","wake":"email","woken_at":%q,"wake_result":"api.agentmail.to returned 502 Bad Gateway","unanswered":true}]}`,
+		now.Add(-12*time.Minute).Format(time.RFC3339), now.Format(time.RFC3339), now.Add(-3*time.Minute).Format(time.RFC3339))
+	for _, tc := range []struct {
+		name, roster string
+		admin        int
+		status       string
+		want         []string
+	}{
+		{"unanswered", roster, 200, "warn", []string{
+			"grokbot woken 12m ago, no check-in (webhook ok); instinct woken 3m ago, no check-in (email failed: api.agentmail.to returned 502 Bad Gateway)",
+			"next check-in"}},
+		{"none", `{"agents":[{"name":"hermes","wake":"webhook"}]}`, 200, "ok", []string{"no webhook or email agent is waiting on an unanswered wake"}},
+		{"not admin", roster, 403, "ok", []string{"skipped", "admin device"}},
+		{"old relay", roster, 404, "ok", []string{"skipped"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/agents":
+					fmt.Fprint(w, tc.roster)
+				case "/v1/admin/held":
+					w.WriteHeader(tc.admin)
+					if tc.admin == 200 {
+						fmt.Fprint(w, `[]`)
+					} else {
+						fmt.Fprint(w, `{"error":"no"}`)
+					}
+				default:
+					t.Errorf("unexpected route %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+			r, err := client.NewRelayFor(client.Config{Relay: srv.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := unansweredCheck(t.Context(), r, now)
+			text := c.Detail + "\n" + c.Fix
+			if c.Name != "unanswered wakes" || c.Status != tc.status {
+				t.Fatalf("check = %+v", c)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(text, w) {
+					t.Errorf("missing %q in %q", w, text)
+				}
+			}
+			if tc.admin != 200 && strings.Contains(text, "grokbot") {
+				t.Errorf("non-admin check names agents: %q", text)
 			}
 		})
 	}

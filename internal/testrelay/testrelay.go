@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
@@ -140,4 +141,18 @@ func (m *Mesh) Client(t *testing.T, name string) *client.Relay {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// Backdate moves agent's join time d into the past, for tests about state
+// recorded before now (a wake must not predate the agent's join).
+func (m *Mesh) Backdate(t testing.TB, agent string, d time.Duration) {
+	t.Helper()
+	a, ok, err := m.Dir.Agent(t.Context(), agent)
+	if err != nil || !ok {
+		t.Fatalf("backdate %s: %v (found %v)", agent, err, ok)
+	}
+	a.JoinedAt = a.JoinedAt.Add(-d)
+	if err := m.Store.PutAgent(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
 }

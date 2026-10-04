@@ -1,12 +1,14 @@
 package wake
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -478,5 +480,147 @@ func TestScheduleAgentGetsNoRelayWake(t *testing.T) {
 		if got := w.CheckEvery(a); got != 0 {
 			t.Errorf("%s check every = %v, want 0", a, got)
 		}
+	}
+}
+
+// The waker remembers each agent's last real wake send: its time and "ok",
+// or the error once the send and its retry both failed.
+func TestLastWakeRecordsSendResult(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	now := time.Unix(1_790_000_000, 0)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}, "muse": {Method: Wait}}, st,
+		Options{Debounce: time.Millisecond, RetryDelay: time.Millisecond, Now: func() time.Time { return now }})
+	if _, ok := w.LastWake("grokbot"); ok {
+		t.Fatal("last wake before any send")
+	}
+	queued(w, "grokbot", 1)
+	w.Flush()
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(now) || got.Result != "ok" {
+		t.Fatalf("after ok send: %+v %v", got, ok)
+	}
+	now = now.Add(time.Minute)
+	rc.fail.Store(2)
+	queued(w, "grokbot", 1)
+	w.Flush()
+	got, ok := w.LastWake("grokbot")
+	if !ok || !got.At.Equal(now) || !strings.Contains(got.Result, "502") {
+		t.Fatalf("after failed send: %+v %v", got, ok)
+	}
+	if stored, err := st.LastWakes(context.Background()); err != nil || stored["grokbot"] != got {
+		t.Fatalf("stored = %+v, %v", stored, err)
+	}
+	queued(w, "muse", 1)
+	w.Flush()
+	if _, ok := w.LastWake("muse"); ok {
+		t.Fatal("agent-side method has a last wake")
+	}
+}
+
+// A waker over a reopened store still knows the last wake.
+func TestLastWakeLoadsFromStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.UnixMilli(1_790_000_000_000)
+	if err := st.SetLastWake(context.Background(), "grokbot", store.Wake{At: at, Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	w := New(Config{"grokbot": {Method: Webhook, URL: "http://127.0.0.1:1/hook"}}, st, Options{})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(at) || got.Result != "ok" {
+		t.Fatalf("loaded = %+v %v", got, ok)
+	}
+}
+
+// A wake the hourly cap skips is not a send, so it leaves the last real
+// send in place; a debounced burst records one send.
+func TestLastWakeIgnoresSkippedWakes(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	start := time.Unix(1_790_000_000, 0)
+	now := start
+	w := New(Config{"instinct": {Method: Webhook, URL: ts.URL, MaxPerHour: 1}}, st, Options{Debounce: 20 * time.Millisecond, Now: func() time.Time { return now }})
+	queued(w, "instinct", 3)
+	w.Flush()
+	now = now.Add(time.Minute)
+	queued(w, "instinct", 1)
+	w.Flush()
+	if got := strings.Join(events(t, st), ","); got != "woke,wake_skipped" {
+		t.Fatalf("audit = %s", got)
+	}
+	if got, ok := w.LastWake("instinct"); !ok || !got.At.Equal(start) || got.Result != "ok" {
+		t.Fatalf("last wake = %+v %v, want the first send", got, ok)
+	}
+}
+
+// A wake that fails before any response (connection refused here) keeps a
+// result that names the host but never the URL's userinfo, path or query,
+// nor the AgentMail key: wake_result reaches every joined agent.
+func TestLastWakeTransportErrorHidesURL(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	st := auditStore(t)
+	secrets := []string{"hunter2", "tok-secret", "path-secret", "am-key-secret", "from-secret", "user:"}
+	w := New(Config{
+		"grokbot":  {Method: Webhook, URL: "http://user:hunter2@127.0.0.1:1/hook/path-secret?token=tok-secret"},
+		"instinct": {Method: Email, EmailTo: "i@example.com", AgentMailFrom: "from-secret", AgentMailKey: "am-key-secret"},
+	}, st, Options{Debounce: time.Millisecond, RetryDelay: time.Millisecond, AgentMailAPI: "http://127.0.0.1:1/v0?api_key=am-key-secret"})
+	queued(w, "grokbot", 1)
+	queued(w, "instinct", 1)
+	w.Flush()
+	for _, agent := range []string{"grokbot", "instinct"} {
+		got, ok := w.LastWake(agent)
+		if !ok || got.Result == envelope.WakeOK || !strings.Contains(got.Result, "127.0.0.1:1") {
+			t.Fatalf("%s last wake = %+v %v, want a failure naming the host", agent, got, ok)
+		}
+		for _, s := range secrets {
+			if strings.Contains(got.Result, s) {
+				t.Errorf("%s wake result %q leaks %q", agent, got.Result, s)
+			}
+		}
+	}
+	evs, err := st.AuditEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		for _, s := range secrets {
+			if strings.Contains(e.Detail, s) {
+				t.Errorf("audit %s detail %q leaks %q", e.Event, e.Detail, s)
+			}
+		}
+	}
+	for _, s := range secrets {
+		if strings.Contains(logged.String(), s) {
+			t.Errorf("relay log %q leaks %q", logged.String(), s)
+		}
+	}
+}
+
+// The waker keeps the newer of two wakes whichever is recorded last, in
+// memory and in the store.
+func TestRememberKeepsNewerWake(t *testing.T) {
+	st := auditStore(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: "http://127.0.0.1:1/hook"}}, st, Options{})
+	t1 := time.UnixMilli(1_790_000_000_000)
+	t2 := t1.Add(time.Minute)
+	w.remember(context.Background(), "grokbot", store.Wake{At: t2, Result: "ok"})
+	w.remember(context.Background(), "grokbot", store.Wake{At: t1, Result: "boom"})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(t2) || got.Result != "ok" {
+		t.Fatalf("in memory = %+v %v", got, ok)
+	}
+	if stored, err := st.LastWakes(context.Background()); err != nil || !stored["grokbot"].At.Equal(t2) {
+		t.Fatalf("stored = %+v, %v", stored, err)
 	}
 }

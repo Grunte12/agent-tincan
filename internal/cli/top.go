@@ -154,11 +154,16 @@ func attention(a client.AgentInfo, relayVersion string, now time.Time) (score in
 	// Only webhook and email wakes come from the relay. An offline agent on
 	// an agent-side method (command, channel, wait) has lost the process
 	// that would notice its queue, and a scheduled one counts only once it
-	// misses its checks.
+	// misses its checks. A relay-woken one counts once the relay says its
+	// last wake went unanswered.
 	relayWakes := a.Wake == "webhook" || a.Wake == "email" || (a.Wake == "schedule" && !overdue)
 	if !a.Online && a.Queued > 0 && !relayWakes {
 		score += 8
 		flags = append(flags, "QUEUED-OFFLINE")
+	}
+	if a.Unanswered {
+		score += 6
+		flags = append(flags, "UNANSWERED")
 	}
 	if a.Queued > 0 && !a.OldestQueued.IsZero() && now.Sub(a.OldestQueued) > time.Hour {
 		score += 4

@@ -224,8 +224,8 @@ type nudge struct {
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 }
 
-// Waker implements relay.Events, relay.Requeuer, relay.Replier and
-// relay.WakeNamer.
+// Waker implements relay.Events, relay.Requeuer, relay.Replier,
+// relay.WakeNamer and relay.WakeReporter.
 type Waker struct {
 	cfg   Config
 	opts  Options
@@ -239,7 +239,18 @@ type Waker struct {
 	// meanwhile, since that reply restarted the schedule. It lives on the
 	// Waker, not the nudge, because fire removes the nudge it sends.
 	replyGen map[string]uint64
-	wg       sync.WaitGroup
+	// last is each relay-woken agent's last real wake send, kept in the
+	// store too so a restarted relay can still tell a woken agent that
+	// never checked in. Skipped wakes leave it alone.
+	last map[string]store.Wake
+	// removed is when each agent was last removed (Forget). A wake whose
+	// send started before then belonged to the removed agent and is not
+	// remembered when it finishes.
+	removed map[string]time.Time
+	// rememberMu makes keeping a last wake, store write included, atomic
+	// with Forget, so a removal cannot slip between the check and the write.
+	rememberMu sync.Mutex
+	wg         sync.WaitGroup
 	// stopped is set by Stop; no nudge is scheduled after it. ctx ends
 	// the nudges in flight when Stop is called.
 	stopped bool
@@ -273,9 +284,73 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	last := map[string]store.Wake{}
+	if audit != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		if stored, err := audit.LastWakes(ctx); err != nil {
+			log.Printf("load last wakes: %v", err)
+		} else {
+			last = stored
+		}
+		cancel()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		ctx: ctx, cancel: cancel}
+		last: last, removed: map[string]time.Time{}, ctx: ctx, cancel: cancel}
+}
+
+// LastWake implements relay.WakeReporter: the last wake the relay sent
+// agent, and whether there was one.
+func (w *Waker) LastWake(agent string) (store.Wake, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	l, ok := w.last[agent]
+	return l, ok
+}
+
+// Forget implements relay.WakeReporter: it drops agent's last wake, for an
+// agent the owner removed, and the nudge still waiting for its timer. A wake
+// already being sent is not remembered when it finishes. The relay calls it
+// before deleting the agent, whose store row takes the wake row with it.
+func (w *Waker) Forget(agent string) {
+	w.rememberMu.Lock() // a last wake being written finishes first
+	defer w.rememberMu.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.removed[agent] = w.opts.Now()
+	delete(w.last, agent)
+	if p := w.pending[agent]; p != nil {
+		if p.timer != nil && p.timer.Stop() {
+			w.wg.Done() // the stopped timer's callback will never run
+		}
+		delete(w.pending, agent)
+	}
+	w.replyGen[agent]++ // a follow-up of a nudge in flight is dropped too
+}
+
+// Unforget implements relay.WakeReporter: it undoes Forget for an agent
+// whose removal failed and so is still joined. Wakes are recorded for it
+// again, and its last wake is reloaded from the store, which still holds it.
+func (w *Waker) Unforget(agent string) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
+	var wk store.Wake
+	var found bool
+	if w.audit != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		if stored, err := w.audit.LastWakes(ctx); err != nil {
+			log.Printf("load last wake %s: %v", agent, err)
+		} else {
+			wk, found = stored[agent]
+		}
+		cancel()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.removed, agent)
+	if old, ok := w.last[agent]; found && (!ok || wk.At.After(old.At)) {
+		w.last[agent] = wk
+	}
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -486,19 +561,26 @@ func (w *Waker) fire(agent string) {
 	}
 	msg := WaitingMessage(p.requests, replies)
 	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
+	at := w.opts.Now()
 	err := w.send(ctx, agent, msg, key)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
+			at = w.opts.Now()
 			err = w.send(ctx, agent, msg, key)
 		case <-ctx.Done():
 		}
 	}
 	if err != nil {
-		log.Printf("wake %s: %v", agent, err)
-		w.record(ctx, "wake_failed", agent, err.Error())
+		// The log, the audit row and the last wake (which joined agents can
+		// read) all get the safe reason: the raw error can carry the URL.
+		reason := publicReason(err)
+		log.Printf("wake %s: %s", agent, reason)
+		w.record(ctx, "wake_failed", agent, reason)
+		w.remember(ctx, agent, store.Wake{At: at, Result: reason})
 		return
 	}
+	w.remember(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK})
 	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
@@ -615,7 +697,7 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
@@ -637,7 +719,7 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return &sendError{reason: "invalid AgentMail URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
@@ -649,18 +731,87 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 func (w *Waker) do(req *http.Request) error {
 	resp, err := w.opts.HTTP.Do(req)
 	if err != nil {
-		return err
+		return &sendError{reason: transportReason(req, err), err: err}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned %s", req.URL.Host, resp.Status)
+		msg := fmt.Sprintf("%s returned %s", req.URL.Host, resp.Status)
+		return &sendError{reason: msg, err: errors.New(msg)}
 	}
 	return nil
 }
 
+// sendError is a failed wake send: err in full for the relay's log, and
+// reason, which names the host and the failure but never the URL's path,
+// query or userinfo, for what agents and the audit log can see.
+type sendError struct {
+	reason string
+	err    error
+}
+
+func (e *sendError) Error() string { return e.err.Error() }
+func (e *sendError) Unwrap() error { return e.err }
+
+// publicReason is the safe reason for a failed send: a webhook URL can
+// carry a token in its query or userinfo, so a raw error never leaves the
+// relay's log.
+func publicReason(err error) string {
+	if se, ok := errors.AsType[*sendError](err); ok {
+		return se.reason
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err.Error()
+	}
+	return "wake send failed"
+}
+
+// transportReason is "POST to host failed: <cause>" for a send that got no
+// response. The cause is the error inside the *url.Error, which holds the
+// whole URL; what is left (a dial or TLS error, a timeout) names at most the
+// host and port.
+func transportReason(req *http.Request, err error) string {
+	cause := err
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		cause = ue.Err
+		// A redirect can leave a *url.Error for the target inside.
+		if inner, ok := errors.AsType[*url.Error](cause); ok {
+			cause = inner.Err
+		}
+	}
+	return fmt.Sprintf("%s to %s failed: %v", req.Method, req.URL.Host, cause)
+}
+
 // auditTimeout bounds one wake audit write.
 const auditTimeout = 10 * time.Second
+
+// remember keeps wk as agent's last wake, in memory and in the store, unless
+// a newer wake is already kept or the agent was removed after the send
+// started. The time is when the send that decided the result started, so a
+// poll the wake itself set off never predates it.
+func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
+	w.mu.Lock()
+	if old, ok := w.last[agent]; ok && !wk.At.After(old.At) {
+		w.mu.Unlock()
+		return
+	}
+	if gone, ok := w.removed[agent]; ok && !wk.At.After(gone) {
+		w.mu.Unlock()
+		return
+	}
+	w.last[agent] = wk
+	w.mu.Unlock()
+	if w.audit == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := w.audit.SetLastWake(ctx, agent, wk); err != nil {
+		log.Printf("last wake %s: %v", agent, err)
+	}
+}
 
 func (w *Waker) record(ctx context.Context, event, agent, detail string) {
 	if w.audit == nil {

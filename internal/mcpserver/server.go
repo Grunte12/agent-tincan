@@ -412,7 +412,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, schedule with its check interval and an overdue marker when it has missed its checks, or none), when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, queued work with its oldest wait and live claims, and the good_at line the owner wrote for each, which you use to choose whom to ask for a job."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, schedule with its check interval and an overdue marker when it has missed its checks, or none), an unanswered marker when a webhook or email agent was woken and has not checked in, when each last called the relay (any send, reply, get, or poll), which tincan build each last called with, queued work with its oldest wait and live claims, and the good_at line the owner wrote for each, which you use to choose whom to ask for a job."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {
@@ -433,6 +433,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				}
 				if backlog := a.Backlog(now); backlog != "" {
 					fmt.Fprintf(&out, ", %s", backlog)
+				}
+				if unanswered := a.UnansweredField(now); unanswered != "" {
+					fmt.Fprintf(&out, ", %s", unanswered)
 				}
 				if goodAt := a.GoodAtField(); goodAt != "" {
 					fmt.Fprintf(&out, ", %s", goodAt)

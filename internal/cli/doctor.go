@@ -52,7 +52,8 @@ tools, or stop answering. It works without MCP, so an agent whose app lost
 the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
-relay's current release, a self-test of tincan mcp in both stdio framings,
+relay's current release, on an admin device any webhook or email agent that
+was woken and has not checked in, a self-test of tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
 and whether a running tincan mcp is on a different build than this
@@ -151,6 +152,11 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		add(versionCheck(ctx, r, exe))
 	}
 
+	// 2b. Relay-woken agents that did not check in after a wake.
+	if joined {
+		add(unansweredCheck(ctx, r, time.Now()))
+	}
+
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {
 		for _, framed := range []bool{false, true} {
@@ -187,6 +193,37 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		rep.Fix = hostFix(exe)
 	}
 	return rep
+}
+
+// unansweredCheck lists the webhook and email agents whose last wake went
+// unanswered, with each wake's result, so the owner knows whose platform to
+// look at. Naming other agents' wake results is for the owner, so the check
+// runs only on an admin device and is skipped elsewhere.
+func unansweredCheck(ctx context.Context, r *client.Relay, now time.Time) check {
+	const name = "unanswered wakes"
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := r.Raw(ctx, "GET", "/v1/admin/held", nil, &[]json.RawMessage{}); err != nil {
+		if e, ok := errors.AsType[*client.APIError](err); ok && (e.Code == 403 || e.Code == 404) {
+			return check{name, "ok", "skipped: listing unanswered wakes needs an admin device", ""}
+		}
+		return check{name, "warn", "could not tell whether this is an admin device: " + err.Error(), ""}
+	}
+	roster, err := r.Roster(ctx)
+	if err != nil {
+		return check{name, "warn", "could not read the roster: " + err.Error(), ""}
+	}
+	var stuck []string
+	for _, a := range roster.Agents {
+		if note := a.UnansweredNote(now); note != "" {
+			stuck = append(stuck, a.Name+" "+note)
+		}
+	}
+	if len(stuck) == 0 {
+		return check{name, "ok", "no webhook or email agent is waiting on an unanswered wake", ""}
+	}
+	return check{name, "warn", strings.Join(stuck, "; "),
+		"Check each named agent's own platform: its webhook receiver, routine or email loop may have stopped. The mark clears on the agent's next check-in."}
 }
 
 // relayUnreachableCheck explains a failed whoami: no key, an error that
