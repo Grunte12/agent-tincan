@@ -560,3 +560,40 @@ func TestLastWakeIgnoresSkippedWakes(t *testing.T) {
 		t.Fatalf("last wake = %+v %v, want the first send", got, ok)
 	}
 }
+
+// A wake that fails before any response (connection refused here) keeps a
+// result that names the host but never the URL's userinfo, path or query,
+// nor the AgentMail key: wake_result reaches every joined agent.
+func TestLastWakeTransportErrorHidesURL(t *testing.T) {
+	st := auditStore(t)
+	secrets := []string{"hunter2", "tok-secret", "path-secret", "am-key-secret", "from-secret", "user:"}
+	w := New(Config{
+		"grokbot":  {Method: Webhook, URL: "http://user:hunter2@127.0.0.1:1/hook/path-secret?token=tok-secret"},
+		"instinct": {Method: Email, EmailTo: "i@example.com", AgentMailFrom: "from-secret", AgentMailKey: "am-key-secret"},
+	}, st, Options{Debounce: time.Millisecond, RetryDelay: time.Millisecond, AgentMailAPI: "http://127.0.0.1:1/v0?api_key=am-key-secret"})
+	queued(w, "grokbot", 1)
+	queued(w, "instinct", 1)
+	w.Flush()
+	for _, agent := range []string{"grokbot", "instinct"} {
+		got, ok := w.LastWake(agent)
+		if !ok || got.Result == envelope.WakeOK || !strings.Contains(got.Result, "127.0.0.1:1") {
+			t.Fatalf("%s last wake = %+v %v, want a failure naming the host", agent, got, ok)
+		}
+		for _, s := range secrets {
+			if strings.Contains(got.Result, s) {
+				t.Errorf("%s wake result %q leaks %q", agent, got.Result, s)
+			}
+		}
+	}
+	evs, err := st.AuditEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		for _, s := range secrets {
+			if strings.Contains(e.Detail, s) {
+				t.Errorf("audit %s detail %q leaks %q", e.Event, e.Detail, s)
+			}
+		}
+	}
+}

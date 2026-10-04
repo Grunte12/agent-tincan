@@ -520,9 +520,12 @@ func (w *Waker) fire(agent string) {
 		}
 	}
 	if err != nil {
+		// The full error stays in the relay's log; the audit row and the
+		// last wake, which joined agents can read, get the safe reason.
 		log.Printf("wake %s: %v", agent, err)
-		w.record(ctx, "wake_failed", agent, err.Error())
-		w.remember(ctx, agent, store.Wake{At: at, Result: err.Error()})
+		reason := publicReason(err)
+		w.record(ctx, "wake_failed", agent, reason)
+		w.remember(ctx, agent, store.Wake{At: at, Result: reason})
 		return
 	}
 	w.remember(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK})
@@ -642,7 +645,7 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
@@ -664,7 +667,7 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return &sendError{reason: "invalid AgentMail URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
@@ -676,14 +679,57 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 func (w *Waker) do(req *http.Request) error {
 	resp, err := w.opts.HTTP.Do(req)
 	if err != nil {
-		return err
+		return &sendError{reason: transportReason(req, err), err: err}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned %s", req.URL.Host, resp.Status)
+		msg := fmt.Sprintf("%s returned %s", req.URL.Host, resp.Status)
+		return &sendError{reason: msg, err: errors.New(msg)}
 	}
 	return nil
+}
+
+// sendError is a failed wake send: err in full for the relay's log, and
+// reason, which names the host and the failure but never the URL's path,
+// query or userinfo, for what agents and the audit log can see.
+type sendError struct {
+	reason string
+	err    error
+}
+
+func (e *sendError) Error() string { return e.err.Error() }
+func (e *sendError) Unwrap() error { return e.err }
+
+// publicReason is the safe reason for a failed send: a webhook URL can
+// carry a token in its query or userinfo, so a raw error never leaves the
+// relay's log.
+func publicReason(err error) string {
+	var se *sendError
+	if errors.As(err, &se) {
+		return se.reason
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err.Error()
+	}
+	return "wake send failed"
+}
+
+// transportReason is "POST to host failed: <cause>" for a send that got no
+// response. The cause is the error inside the *url.Error, which holds the
+// whole URL; what is left (a dial or TLS error, a timeout) names at most the
+// host and port.
+func transportReason(req *http.Request, err error) string {
+	cause := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cause = ue.Err
+		// A redirect can leave a *url.Error for the target inside.
+		if errors.As(cause, &ue) {
+			cause = ue.Err
+		}
+	}
+	return fmt.Sprintf("%s to %s failed: %v", req.Method, req.URL.Host, cause)
 }
 
 // auditTimeout bounds one wake audit write.
