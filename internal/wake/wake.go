@@ -243,7 +243,14 @@ type Waker struct {
 	// store too so a restarted relay can still tell a woken agent that
 	// never checked in. Skipped wakes leave it alone.
 	last map[string]store.Wake
-	wg   sync.WaitGroup
+	// removed is when each agent was last removed (Forget). A wake whose
+	// send started before then belonged to the removed agent and is not
+	// remembered when it finishes.
+	removed map[string]time.Time
+	// rememberMu makes keeping a last wake, store write included, atomic
+	// with Forget, so a removal cannot slip between the check and the write.
+	rememberMu sync.Mutex
+	wg         sync.WaitGroup
 	// stopped is set by Stop; no nudge is scheduled after it. ctx ends
 	// the nudges in flight when Stop is called.
 	stopped bool
@@ -289,7 +296,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, ctx: ctx, cancel: cancel}
+		last: last, removed: map[string]time.Time{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -302,11 +309,23 @@ func (w *Waker) LastWake(agent string) (store.Wake, bool) {
 }
 
 // Forget implements relay.WakeReporter: it drops agent's last wake, for an
-// agent the owner removed. The store row goes with the agent's own row.
+// agent the owner removed, and the nudge still waiting for its timer. A wake
+// already being sent is not remembered when it finishes. The relay calls it
+// before deleting the agent, whose store row takes the wake row with it.
 func (w *Waker) Forget(agent string) {
+	w.rememberMu.Lock() // a last wake being written finishes first
+	defer w.rememberMu.Unlock()
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.removed[agent] = w.opts.Now()
 	delete(w.last, agent)
-	w.mu.Unlock()
+	if p := w.pending[agent]; p != nil {
+		if p.timer != nil && p.timer.Stop() {
+			w.wg.Done() // the stopped timer's callback will never run
+		}
+		delete(w.pending, agent)
+	}
+	w.replyGen[agent]++ // a follow-up of a nudge in flight is dropped too
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -742,11 +761,18 @@ func transportReason(req *http.Request, err error) string {
 const auditTimeout = 10 * time.Second
 
 // remember keeps wk as agent's last wake, in memory and in the store, unless
-// a newer wake is already kept. The time is when the send that decided the
-// result started, so a poll the wake itself set off never predates it.
+// a newer wake is already kept or the agent was removed after the send
+// started. The time is when the send that decided the result started, so a
+// poll the wake itself set off never predates it.
 func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
 	w.mu.Lock()
 	if old, ok := w.last[agent]; ok && !wk.At.After(old.At) {
+		w.mu.Unlock()
+		return
+	}
+	if gone, ok := w.removed[agent]; ok && !wk.At.After(gone) {
 		w.mu.Unlock()
 		return
 	}

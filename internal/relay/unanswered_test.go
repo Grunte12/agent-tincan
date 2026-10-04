@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -289,5 +290,55 @@ func TestRemoveForgetsLastWake(t *testing.T) {
 	}
 	if ws, err := h.st.LastWakes(t.Context()); err != nil || len(ws) != 0 {
 		t.Fatalf("stored wakes = %+v, %v", ws, err)
+	}
+}
+
+// A wake still being sent when its agent is removed does not bring the
+// agent's last wake back when it finishes, and a nudge still waiting for its
+// debounce is dropped. A wake that starts after the removal, for an agent
+// invited again under the same name, is kept as usual.
+func TestRemoveDuringWakeKeepsItForgotten(t *testing.T) {
+	h := newHarness(t, Config{})
+	arrived := make(chan struct{}, 4)
+	release := make(chan struct{})
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		<-release
+	}))
+	defer hook.Close()
+	w := wake.New(wake.Config{
+		"grokbot":  {Method: wake.Webhook, URL: hook.URL},
+		"instinct": {Method: wake.Webhook, URL: hook.URL},
+	}, h.st, wake.Options{HTTP: hook.Client(), Debounce: time.Second})
+	defer w.Stop()
+	h.srv.SetWakeNamer(w)
+
+	w.Queued(t.Context(), envelope.Request{To: "grokbot", Urgent: true})
+	<-arrived // grokbot's wake is in flight
+	// instinct's nudge waits out its debounce.
+	w.Queued(t.Context(), envelope.Request{To: "instinct"})
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"instinct"}`, http.StatusOK, nil)
+	close(release)
+	w.Flush()
+	select {
+	case <-arrived:
+		t.Fatal("the debounced nudge for a removed agent was sent")
+	default:
+	}
+	for _, a := range []string{"grokbot", "instinct"} {
+		if wk, ok := w.LastWake(a); ok {
+			t.Fatalf("%s: waker has a last wake after the remove: %+v", a, wk)
+		}
+	}
+	if ws, err := h.st.LastWakes(t.Context()); err != nil || len(ws) != 0 {
+		t.Fatalf("stored wakes = %+v, %v", ws, err)
+	}
+
+	time.Sleep(time.Millisecond) // the next wake starts after the removal
+	w.Queued(t.Context(), envelope.Request{To: "grokbot", Urgent: true})
+	w.Flush()
+	if wk, ok := w.LastWake("grokbot"); !ok || wk.Result != envelope.WakeOK {
+		t.Fatalf("wake after the removal: %+v, %v", wk, ok)
 	}
 }

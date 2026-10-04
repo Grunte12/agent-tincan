@@ -1320,6 +1320,11 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		s.hub.notify(requestKey(id))
 	}
+	if wr, ok := s.wake.(WakeReporter); ok {
+		// Before the delete, so a wake that finishes meanwhile cannot
+		// write the wake row back after the agent's row took it.
+		wr.Forget(in.Name)
+	}
 	if err := s.dir.Remove(r.Context(), s.remote(r), in.Name); err != nil {
 		writeErr(w, statusFor(err), err)
 		return
@@ -1335,9 +1340,6 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()
-	if wr, ok := s.wake.(WakeReporter); ok {
-		wr.Forget(in.Name) // the store row went with the agent
-	}
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": in.Name, "cancelled": len(ids)})
 }
