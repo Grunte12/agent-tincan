@@ -14,6 +14,7 @@ Contents:
 
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
+- [New in v0.11.2](#new-in-v0112)
 - [New in v0.11.1](#new-in-v0111)
 - [New in v0.11.0](#new-in-v0110)
 - [New in v0.10.0](#new-in-v0100)
@@ -105,6 +106,17 @@ tincan doctor
 ```
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
+
+## New in v0.11.2
+
+- [Good-at lines](#last-seen) that are true by default. The lines teammates show until you write your own now match what each one can do: claude-web says Claude makes no images, history names all eight sources it reads, council and dot-web say asks are held for your approval by default, and grok-web attaches no videos. Claude Code, Codex, Gemini CLI, Grok CLI and the ChatGPT connector get a default line too, even when they joined without `--kind`. Agents on a VM, sandbox or schedule, Hermes and OpenClaw still show none until you set one.
+- The agent instructions, `tincan web` help, docs and site no longer say Claude or Copilot web answers carry generated images.
+
+Before you upgrade:
+
+- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.2` (self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). The default lines are served by the relay; lines you wrote are unchanged.
+- Then `tincan upgrade` on each agent when convenient, and restart its long-running tincan processes or reconnect tincan in its app, for the corrected help and MCP instructions.
+- Agents that only read instructions you pasted into their app keep the old image wording until you paste them again: run `tincan onboard --section agents` and replace their saved Agent Tincan instructions.
 
 ## New in v0.11.1
 
