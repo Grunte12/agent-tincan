@@ -120,7 +120,7 @@ var stockGoodAt = map[string]string{
 	KindNotes:         "saves, searches and reads the owner's Agent Notes on their Mac; never edits or deletes one",
 	KindCouncil:       "puts one question to every model on the team, has them rank the answers blind, and returns a verdict",
 	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any generated images",
-	KindClaudeWeb:     "asks Claude (claude.ai) in the owner's browser and replies with the answer and any generated images",
+	KindClaudeWeb:     "asks Claude (claude.ai) in the owner's browser and replies with the answer; Claude makes no images",
 	KindGrokWeb:       "asks Grok (grok.com) in the owner's browser and replies with the answer and any generated images",
 	KindGeminiWeb:     "asks Gemini (gemini.google.com) in the owner's browser and replies with the answer and any generated images",
 	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
