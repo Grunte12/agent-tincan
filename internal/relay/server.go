@@ -1041,11 +1041,19 @@ type Scheduler interface {
 const ScheduleGrace = 5 * time.Minute
 
 // WakeReporter reports the last wake the relay sent an agent, and whether
-// there was one, and forgets it when the agent is removed. Set by package
-// wake through SetWakeNamer.
+// there was one, and forgets it when the agent is removed. Unforget undoes
+// Forget when the removal fails. Set by package wake through SetWakeNamer.
 type WakeReporter interface {
 	LastWake(agent string) (store.Wake, bool)
 	Forget(agent string)
+	Unforget(agent string)
+}
+
+// WakeResumer schedules the wakes an agent's waiting work calls for, as a
+// restarted relay does. Set by package wake through SetWakeNamer.
+type WakeResumer interface {
+	RequestsWaiting(agent string)
+	ReplyWaiting(agent string)
 }
 
 // DefaultWakeGrace is how long a woken agent has to poll before the roster
@@ -1320,12 +1328,26 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		s.hub.notify(requestKey(id))
 	}
-	if wr, ok := s.wake.(WakeReporter); ok {
+	wr, forgot := s.wake.(WakeReporter)
+	if forgot {
 		// Before the delete, so a wake that finishes meanwhile cannot
 		// write the wake row back after the agent's row took it.
 		wr.Forget(in.Name)
 	}
 	if err := s.dir.Remove(r.Context(), s.remote(r), in.Name); err != nil {
+		if forgot {
+			// The agent is still joined: give it back its wake state and
+			// the nudge Forget cancelled.
+			wr.Unforget(in.Name)
+			if rs, ok := s.wake.(WakeResumer); ok {
+				if s.QueuedCount(in.Name) > 0 {
+					rs.RequestsWaiting(in.Name)
+				}
+				if s.UnseenReplies(in.Name) > 0 {
+					rs.ReplyWaiting(in.Name)
+				}
+			}
+		}
 		writeErr(w, statusFor(err), err)
 		return
 	}

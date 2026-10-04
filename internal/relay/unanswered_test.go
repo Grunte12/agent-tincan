@@ -42,6 +42,8 @@ func (f *fakeWaker) Forget(agent string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeWaker) Unforget(string) {}
+
 func (f *fakeWaker) set(agent string, w store.Wake) {
 	f.mu.Lock()
 	f.wakes[agent] = w
@@ -340,5 +342,46 @@ func TestRemoveDuringWakeKeepsItForgotten(t *testing.T) {
 	w.Flush()
 	if wk, ok := w.LastWake("grokbot"); !ok || wk.Result != envelope.WakeOK {
 		t.Fatalf("wake after the removal: %+v, %v", wk, ok)
+	}
+}
+
+// A removal whose directory delete fails leaves the agent joined, so the
+// waker gets back what Forget dropped: its last wake from the store, wakes
+// recorded again, and a wake for the replies it has not read.
+func TestFailedRemoveKeepsWakeState(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.answer(museAddr, h.send(grokAddr, "muse", "call the garage"), "Tue 3pm") // grokbot has an unseen reply
+	stored := store.Wake{At: time.UnixMilli(time.Now().Add(-time.Minute).UnixMilli()), Result: "ok"}
+	if err := h.st.SetLastWake(t.Context(), "grokbot", stored); err != nil {
+		t.Fatal(err)
+	}
+	hits := make(chan struct{}, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits <- struct{}{} }))
+	defer hook.Close()
+	// A frozen clock: a wake sent after the removal is stamped with the
+	// removal's own time, so only a cleared marker lets it be recorded.
+	now := time.Now()
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP: hook.Client(), ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{},
+		UnseenReplies: h.srv.UnseenReplies, Queued: h.srv.QueuedCount, Now: func() time.Time { return now },
+	})
+	defer w.Stop()
+	h.srv.SetWakeNamer(w)
+	if _, err := h.st.DB().Exec(`CREATE TRIGGER fail_remove BEFORE DELETE ON agents BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusBadRequest, nil)
+	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(stored.At) || wk.Result != stored.Result {
+		t.Fatalf("last wake after a failed remove = %+v, %v; want %+v", wk, ok, stored)
+	}
+	w.Flush()
+	select {
+	case <-hits:
+	default:
+		t.Fatal("no wake re-armed for the unseen reply")
+	}
+	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(now) || wk.Result != envelope.WakeOK {
+		t.Fatalf("wake after a failed remove not recorded: %+v, %v", wk, ok)
 	}
 }

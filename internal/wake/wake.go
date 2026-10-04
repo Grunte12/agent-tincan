@@ -328,6 +328,31 @@ func (w *Waker) Forget(agent string) {
 	w.replyGen[agent]++ // a follow-up of a nudge in flight is dropped too
 }
 
+// Unforget implements relay.WakeReporter: it undoes Forget for an agent
+// whose removal failed and so is still joined. Wakes are recorded for it
+// again, and its last wake is reloaded from the store, which still holds it.
+func (w *Waker) Unforget(agent string) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
+	var wk store.Wake
+	var found bool
+	if w.audit != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
+		if stored, err := w.audit.LastWakes(ctx); err != nil {
+			log.Printf("load last wake %s: %v", agent, err)
+		} else {
+			wk, found = stored[agent]
+		}
+		cancel()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.removed, agent)
+	if old, ok := w.last[agent]; found && (!ok || wk.At.After(old.At)) {
+		w.last[agent] = wk
+	}
+}
+
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
 func (w *Waker) WakeMethod(agent string) string {
 	if t, ok := w.cfg[agent]; ok && t.Method != "" {
