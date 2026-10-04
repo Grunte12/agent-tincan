@@ -40,6 +40,9 @@ type Config struct {
 	// Version is this relay's tincan build, reported to agents in the
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
+	// WakeGrace is how long a relay-woken agent may go without polling
+	// after a wake before it shows as unanswered; default DefaultWakeGrace.
+	WakeGrace time.Duration
 }
 
 func (c *Config) defaults() {
@@ -66,6 +69,9 @@ func (c *Config) defaults() {
 	}
 	if c.Now == nil {
 		c.Now = time.Now
+	}
+	if c.WakeGrace == 0 {
+		c.WakeGrace = DefaultWakeGrace
 	}
 	c.Attachments.defaults()
 }
@@ -579,13 +585,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
 }
 
-// recipientTarget is the schedule facts for agent, nil unless it is on
-// wake method schedule. A failed join-time lookup measures from the
-// relay's start.
+// recipientTarget is the schedule facts for agent on wake method schedule,
+// its last wake for an agent the relay wakes, and nil otherwise. A failed
+// join-time lookup measures from the relay's start.
 func (s *Server) recipientTarget(ctx context.Context, agent string) *envelope.Target {
 	every := s.checkEvery(agent)
 	if every <= 0 {
-		return nil
+		return s.recipientWake(ctx, agent)
 	}
 	s.mu.Lock()
 	last := s.lastPoll[agent]
@@ -598,6 +604,31 @@ func (s *Server) recipientTarget(ctx context.Context, agent string) *envelope.Ta
 		}
 	}
 	return s.scheduleTarget(every, last, joined, s.cfg.Now())
+}
+
+// recipientWake is the last wake of a relay-woken agent for a send
+// response, nil when the relay has not woken it.
+func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Target {
+	wr, ok := s.wake.(WakeReporter)
+	if !ok || !relayWoken(s.wake.WakeMethod(agent)) {
+		return nil
+	}
+	wk, ok := wr.LastWake(agent)
+	if !ok {
+		return nil
+	}
+	s.mu.Lock()
+	last, active := s.lastPoll[agent], s.lastSeen[agent]
+	s.mu.Unlock()
+	if last.IsZero() {
+		// No poll since the relay started: the persisted activity may
+		// still show a call after the wake.
+		if persisted, err := s.store.AgentsLastSeen(ctx); err == nil && persisted[agent].After(active) {
+			active = persisted[agent]
+		}
+	}
+	t := s.wakeTarget(wk, last, active, s.cfg.Now())
+	return &t
 }
 
 // handlePoll holds a long-poll until requests for the caller, or unseen
@@ -1006,6 +1037,42 @@ type Scheduler interface {
 // overdue after two intervals plus it without polling.
 const ScheduleGrace = 5 * time.Minute
 
+// WakeReporter reports the last wake the relay sent an agent, and whether
+// there was one. Set by package wake through SetWakeNamer.
+type WakeReporter interface {
+	LastWake(agent string) (store.Wake, bool)
+}
+
+// DefaultWakeGrace is how long a woken agent has to poll before the roster
+// shows it as unanswered.
+const DefaultWakeGrace = 10 * time.Minute
+
+// relayWoken reports whether the relay itself wakes agents on method.
+func relayWoken(method string) bool { return method == "webhook" || method == "email" }
+
+// wakeTarget is a relay-woken agent's last wake and whether it is
+// unanswered: the send failed, or more than the wake grace has passed with
+// no poll since it. The relay keeps polls in memory, so an agent that has
+// not polled since the relay started is judged by its last call of any
+// kind, kept across restarts, and the grace runs from the later of the wake
+// and the relay's start.
+func (s *Server) wakeTarget(wk store.Wake, lastPoll, active, now time.Time) envelope.Target {
+	t := envelope.Target{WokenAt: wk.At, WakeResult: wk.Result}
+	checked := lastPoll
+	if checked.IsZero() {
+		checked = active
+	}
+	if !checked.IsZero() && !checked.Before(wk.At) {
+		return t
+	}
+	since := wk.At
+	if s.started.After(since) {
+		since = s.started
+	}
+	t.Unanswered = wk.Result != store.WakeOK || now.Sub(since) > s.cfg.WakeGrace
+	return t
+}
+
 // checkEvery is agent's schedule interval, 0 when it is not on schedule.
 func (s *Server) checkEvery(agent string) time.Duration {
 	if sc, ok := s.wake.(Scheduler); ok {
@@ -1058,6 +1125,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		log.Printf("agents queue stats: %v", err)
 	}
 	now := s.cfg.Now()
+	// Read the waker before taking s.mu, which it need not wait on.
+	wakes := map[string]store.Wake{}
+	if wr, ok := s.wake.(WakeReporter); ok {
+		for _, a := range agents {
+			if wk, ok := wr.LastWake(a.Name); ok && relayWoken(s.wake.WakeMethod(a.Name)) {
+				wakes[a.Name] = wk
+			}
+		}
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -1076,6 +1152,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 			info.Wake = s.wake.WakeMethod(a.Name)
 			if t := s.scheduleTarget(s.checkEvery(a.Name), last, a.JoinedAt, now); t != nil {
 				info.Target = *t
+			}
+			if wk, ok := wakes[a.Name]; ok {
+				info.Target = s.wakeTarget(wk, last, active, now)
 			}
 		}
 		out = append(out, info)

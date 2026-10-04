@@ -71,9 +71,10 @@ type AgentInfo struct {
 	Queued       int       `json:"queued,omitempty"`
 	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
 	Claimed      int       `json:"claimed,omitempty"`
-	// Target carries the relay's schedule facts, set only for an agent on
-	// wake method schedule and left out otherwise and by older relays. Its
-	// fields sit at the top level of each roster entry.
+	// Target carries the relay's schedule facts for an agent on wake method
+	// schedule, or its last wake for a webhook or email agent the relay has
+	// woken, and is left out otherwise and by older relays. Its fields sit
+	// at the top level of each roster entry.
 	envelope.Target
 }
 

@@ -181,15 +181,17 @@ type Result struct {
 }
 
 // SendResponse is the relay's reply to a send: the queued request and, for
-// a recipient on a schedule, its schedule facts. Older relays send only the
-// request and older clients ignore Target.
+// a recipient on a schedule, its schedule facts, or for a recipient the relay
+// wakes, its last wake. Older relays send only the request and older clients
+// ignore Target.
 type SendResponse struct {
 	Request
 	Target *Target `json:"target,omitempty"`
 }
 
-// Target is the relay's schedule facts about a recipient that checks its
-// inbox on its own interval instead of being woken.
+// Target is the relay's facts about a recipient: its schedule when it
+// checks its inbox on its own interval, or its last wake when the relay
+// wakes it (webhook or email). Every field is optional.
 type Target struct {
 	// CheckEverySeconds is how often the recipient checks its inbox.
 	CheckEverySeconds int `json:"check_every_seconds,omitempty"`
@@ -200,6 +202,16 @@ type Target struct {
 	// inbox poll (its join, if it never polled) is more than two intervals
 	// plus the grace ago.
 	Overdue bool `json:"overdue,omitempty"`
+
+	// WokenAt is when the relay last sent the recipient a wake, set only
+	// for a relay-woken recipient it has woken.
+	WokenAt time.Time `json:"woken_at,omitzero"`
+	// WakeResult is that wake's result: "ok", or the error that made the
+	// send and its retry fail.
+	WakeResult string `json:"wake_result,omitempty"`
+	// Unanswered is set when the recipient has not checked in since that
+	// wake: the send failed, or the wake grace has passed without a poll.
+	Unanswered bool `json:"unanswered,omitempty"`
 }
 
 // Exchange is one clarification round; At is when the question was asked.

@@ -224,8 +224,8 @@ type nudge struct {
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 }
 
-// Waker implements relay.Events, relay.Requeuer, relay.Replier and
-// relay.WakeNamer.
+// Waker implements relay.Events, relay.Requeuer, relay.Replier,
+// relay.WakeNamer and relay.WakeReporter.
 type Waker struct {
 	cfg   Config
 	opts  Options

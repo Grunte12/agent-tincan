@@ -1,0 +1,174 @@
+package relay
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
+)
+
+// fakeWaker names wake methods and reports last wakes set by the test.
+type fakeWaker struct {
+	mu      sync.Mutex
+	methods map[string]string
+	wakes   map[string]store.Wake
+}
+
+func (f *fakeWaker) WakeMethod(agent string) string {
+	if m := f.methods[agent]; m != "" {
+		return m
+	}
+	return "none"
+}
+
+func (f *fakeWaker) LastWake(agent string) (store.Wake, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w, ok := f.wakes[agent]
+	return w, ok
+}
+
+func (f *fakeWaker) set(agent string, w store.Wake) {
+	f.mu.Lock()
+	f.wakes[agent] = w
+	f.mu.Unlock()
+}
+
+// wakeHarness has grokbot on a webhook, instinct on email and muse on wait,
+// on a fake clock one second past the joins.
+func wakeHarness(t *testing.T) (*harness, *fakeClock, *fakeWaker) {
+	t.Helper()
+	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	h := newHarness(t, Config{Now: clk.Now})
+	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook", "instinct": "email", "muse": "wait"}, wakes: map[string]store.Wake{}}
+	h.srv.SetWakeNamer(fw)
+	clk.advance(time.Second)
+	return h, clk, fw
+}
+
+// AE1, AE2: a webhook agent woken and silent for longer than the grace is
+// unanswered; its first poll after the wake clears it.
+func TestRosterUnansweredAfterGrace(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: store.WakeOK})
+	g := agentInfo(t, h, macAddr, "grokbot")
+	if !g.WokenAt.Equal(woke) || g.WakeResult != "ok" || g.Unanswered {
+		t.Fatalf("just woken: %+v", g)
+	}
+	clk.advance(DefaultWakeGrace)
+	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("exactly the grace later: want not unanswered yet: %+v", g)
+	}
+	clk.advance(2 * time.Minute)
+	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
+		t.Fatalf("12m without a poll: want unanswered: %+v", g)
+	}
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered || !g.WokenAt.Equal(woke) {
+		t.Fatalf("after a poll: %+v", g)
+	}
+}
+
+// A shorter --wake-grace flags sooner.
+func TestRosterWakeGraceConfigurable(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	h := newHarness(t, Config{Now: clk.Now, WakeGrace: time.Minute})
+	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}}
+	h.srv.SetWakeNamer(fw)
+	clk.advance(time.Second)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: store.WakeOK})
+	clk.advance(2 * time.Minute)
+	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
+		t.Fatalf("2m with a 1m grace: %+v", g)
+	}
+}
+
+// AE3: a failed send is unanswered at once, with the error.
+func TestRosterFailedWakeUnansweredAtOnce(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("instinct", store.Wake{At: clk.Now(), Result: "api.agentmail.to returned 502 Bad Gateway"})
+	in := agentInfo(t, h, macAddr, "instinct")
+	if !in.Unanswered || in.WakeResult != "api.agentmail.to returned 502 Bad Gateway" {
+		t.Fatalf("failed wake: %+v", in)
+	}
+}
+
+// AE5: an agent the relay does not wake never carries the wake fields, even
+// with a stale record from an earlier webhook config.
+func TestRosterAgentSideMethodsHaveNoWakeFields(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("muse", store.Wake{At: clk.Now(), Result: "boom"})
+	clk.advance(time.Hour)
+	rec := h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
+	var raw struct{ Agents []map[string]any }
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range raw.Agents {
+		for _, k := range []string{"woken_at", "wake_result", "unanswered"} {
+			if _, ok := a[k]; ok {
+				t.Errorf("%s roster entry has %s: %v", a["name"], k, a)
+			}
+		}
+	}
+}
+
+// The relay keeps polls in memory. After a restart, a wake from before it
+// counts once the grace has passed since the restart, unless the agent's
+// persisted activity shows it called after the wake.
+func TestRosterUnansweredAcrossRestart(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: store.WakeOK})
+	fw.set("instinct", store.Wake{At: clk.Now(), Result: store.WakeOK})
+	clk.advance(time.Minute)
+	h.do(instinctAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+
+	clk.advance(time.Hour)
+	srv := New(identity.NewDirectory(h.st, h.who, identity.Config{Admins: []string{"macbook-pro-44"}}), h.st, Config{Now: clk.Now})
+	srv.SetWakeNamer(fw)
+	h2 := &harness{t: t, srv: srv, h: srv.Handler(), st: h.st, who: h.who}
+	if g := agentInfo(t, h2, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("just restarted: %+v", g)
+	}
+	clk.advance(DefaultWakeGrace + time.Minute)
+	if g := agentInfo(t, h2, macAddr, "grokbot"); !g.Unanswered {
+		t.Fatalf("grace past the restart, no call since the wake: %+v", g)
+	}
+	if in := agentInfo(t, h2, macAddr, "instinct"); in.Unanswered {
+		t.Fatalf("polled after the wake, before the restart: %+v", in)
+	}
+}
+
+// AE4: a send to an unanswered relay-woken agent returns the wake facts in
+// target, so the asker can be told.
+func TestSendResponseCarriesUnansweredWake(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	var out envelope.SendResponse
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target != nil {
+		t.Fatalf("never woken: target %+v", out.Target)
+	}
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: store.WakeOK})
+	clk.advance(12 * time.Minute)
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi again"}`, http.StatusCreated, &out)
+	if out.Target == nil || !out.Target.Unanswered || !out.Target.WokenAt.Equal(woke) || out.Target.WakeResult != "ok" || out.Target.CheckEverySeconds != 0 {
+		t.Fatalf("unanswered grokbot: target %+v", out.Target)
+	}
+	fw.set("muse", store.Wake{At: woke, Result: "boom"})
+	rec := h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"hi"}`, http.StatusCreated, nil)
+	if strings.Contains(rec.Body.String(), `"target"`) {
+		t.Fatalf("send to a wait agent has a target: %s", rec.Body.String())
+	}
+}
+
+// The real waker satisfies WakeReporter, so SetWakeNamer picks it up.
+var _ WakeReporter = (*wake.Waker)(nil)
