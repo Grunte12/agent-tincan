@@ -216,19 +216,30 @@ listing may assign its own id; pass it with
 ## Image input transport (gated)
 
 Version 0.6.2 advertises `image_input: {version: 1, sites: []}` in the loaded
-worker hello. No input site is enabled until live acceptance is recorded in
+worker hello. The compiled per-site gate is off for every site in both Go and
+the extension. No input site is enabled until live acceptance is recorded in
 `docs/adapters/web-agents.md`. Output downloads retain their separate operations.
-The fixed ChatGPT candidate operations are `input_begin`, `input_chunk`,
-`input_abort` and `send_images`, under the `chatgpt.` prefix. They accept a dedicated
+The fixed ChatGPT candidate operations registered in `OPS` are
+`chatgpt.input_begin`, `chatgpt.input_chunk`, `chatgpt.input_abort` and
+`chatgpt.send_images`. They accept a dedicated
 `input` payload of metadata, opaque token, sequence and base64 bytes; no URLs,
 paths, selectors, scripts or browser credentials. The host assigns connection
 identity and rejects service-supplied identities. The worker also binds site and
 connection, verifies hashes and consumes tokens once.
 
-Chunks carry at most 96 KiB decoded. Limits are four files, 10 MiB/file, 20 MiB/ask,
+Begin reserves file metadata, chunk supplies ordered bytes, abort cancels the
+transfer, and send_images consumes the token with the usual send arguments
+(message capped at 32 KiB of UTF-8, optional validated conversation id and boolean).
+Files must be nonempty PNG/JPEG. Go validates decoded pixels and MIME agreement,
+rejects animated PNG and caps each image at 40 million pixels. Names are nonempty
+UTF-8, at most 255 bytes, without control characters or path separators. The worker
+checks complete byte counts and SHA-256 checksums before sending.
+
+Chunks carry at most 96 KiB decoded. Limits are one to four files, 10 MiB/file, 20 MiB/ask,
 four concurrent reservations and 40 MiB reserved decoded bytes, including queued
 sends. Pending transfers expire after two idle minutes or ten total minutes.
-Disconnect aborts unconsumed uploads, invalidates queued work and clears worker
+Failure or disconnect aborts the connection's transfers; abort cannot delete
+vendor uploads. Disconnect aborts unconsumed uploads, invalidates queued work and clears worker
 unconsumed buffers on host reconnect. Cancelled active sends retain their
 reservation until their cleanup finishes, preventing reconnects from bypassing
 the memory bound. Reload waits for transfers only until the existing
