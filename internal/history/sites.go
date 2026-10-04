@@ -15,7 +15,10 @@ import (
 
 // webSite is one live site the extension reads and a web agent fronts.
 type webSite struct {
-	source Source
+	// imageInput requires live upload, readiness and submitted-image proof.
+	// All sites remain disabled pending the acceptance checks in the guide.
+	imageInput bool
+	source     Source
 	// label names the site in replies and logs ("ChatGPT").
 	label string
 	// dm, when set, names the site's one conversation in replies ("your

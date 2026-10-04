@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.list', 'chatgpt.send', 'chatgpt.send_images', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -381,7 +381,7 @@ test('worker code has no dynamic code execution', () => {
   const injected = [...send.matchAll(/await inject\((?:tab\.id|tabId|entry\[0\]), (\w+),/g)].map((m) => m[1]);
   assert.equal(injected.length, [...send.matchAll(/await inject\(/g)].length, 'every injection is listed');
   for (const f of injected) {
-    assert.ok(['pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage', 'pageCopilotList'].includes(f), f);
+    assert.ok(['pageInputImages', 'pageProbe', 'pageDismiss', 'pageFill', 'pageSubmit', 'pageFetchImage', 'pageCopilotList'].includes(f), f);
   }
 });
 
@@ -495,7 +495,7 @@ test('the hello lists the granted sites', async () => {
   const files = { 'manifest.json': 'x' };
   const perms = fakePermissions(['https://claude.ai/*']);
   const h = await helloMessage({ manifest: { version: '1.0.0' }, files, permissions: perms });
-  assert.deepEqual(h, { id: 0, hello: { version: '1.0.0', unpacked: true, files, granted: ['claudeai'] } });
+  assert.deepEqual(h, { id: 0, hello: { version: '1.0.0', unpacked: true, files, granted: ['claudeai'], image_input: { version: 1, sites: [] } } });
   perms.granted = new Set(ALL_ORIGINS);
   assert.deepEqual((await grantedSites(perms)).sort(), Object.keys(SITE_ACCESS).sort());
 });

@@ -1326,3 +1326,14 @@ Always upload the `checksums.txt` written after signing; `make release` and `mak
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+### Web-agent image input
+
+All seven web-agent kinds currently reject attachment asks before download or
+submission, pending live acceptance. Send text alone. Generated-image output
+support is unchanged. The gated input candidate supports static PNG/JPEG only,
+four files, 10 MiB each, 20 MiB total and 40 million pixels per image.
+See [the web-agent input guide](docs/adapters/web-agents.md#image-input-acceptance-gate)
+for CLI `--attach` and local MCP `attach` examples, vendor exposure, failure
+behavior and the exact owner acceptance checks. Remote MCP cannot attach local
+paths. Upgrade both tincan and the Chrome extension when input becomes enabled.

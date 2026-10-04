@@ -243,3 +243,20 @@ Clients advertise `X-Tincan-Features: ping` on every call, but only polls (`GET 
 A ping has no parent or attachments; its body is empty (up to four bytes are accepted and ignored). Policy still enforces the send rate limit and refuses inferred request parents. The target claims it and replies with status `answered` and body `pong (answered by <surface>, tincan <version>)`. Clients suppress pings from model inboxes. Peek pending entries add optional `kind`, and a peek adds optional `"pings": <n>`, the count of all queued pings (left out when zero), so a listener knows exactly how much ordinary work waits even when more pings are queued than `pending` lists. Queued pings are listed first in `pending` and have their own limit of 50, so a backlog of 50 or more other requests never hides a ping from a peek-based responder. Pong replies are marked seen when stored and never trigger a reply wake; get-reply and trace still return them.
 
 Polling surfaces are `check_inbox`, the MCP channel loop (`channel`), `inbox`, `wait`, `listen`, `history-serve`, and `web-serve`. The channel loop answers pings without a channel notice, so a Claude Code session pongs without a model turn. Wait and listen loops continue after automatic replies. A pong that fails is retried after the ordinary requests from the same poll have been handed on, never before. A listener answers without invoking its exec command. Such responses demonstrate the client loop is alive, not model execution. `GET /v1/trace?exclude_pings=true` filters before applying the limit; the optional parameter defaults to including all kinds. CLI trace listings omit pings unless `--pings` is supplied; stored traces retain their `ping` kind.
+
+### Web-agent image input
+
+Relay attachment endpoints and envelopes are unchanged. Web agents reject
+attachments explicitly when input is disabled; none of the seven web kinds is
+enabled in this build pending live acceptance. Accepted input is designed for
+four static PNG/JPEG images, 10 MiB each and 20 MiB total, with 40 million pixels
+per image. Claim and chain authorization precede recipient downloads; approval
+holds are unchanged. Remote MCP still cannot read client-local attachment paths.
+
+The local native protocol negotiates `image_input` version 1 and enabled site
+prefixes via the loaded extension hello and `host.status`. Fixed image operations
+use a request-scoped persistent Unix connection, opaque single-use tokens and
+acknowledged 96 KiB decoded chunks. The host rejects unknown fields and assigns
+connection identity itself. Image send intent is journaled before submission;
+unknown outcomes are never automatically replayed. See the web-agent guide for
+vendor exposure, gate reasons and live acceptance requirements.
