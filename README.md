@@ -14,6 +14,7 @@ Contents:
 
 - [Why it matters](#why-it-matters)
 - [Getting started](#getting-started)
+- [New in v0.11.1](#new-in-v0111)
 - [New in v0.11.0](#new-in-v0110)
 - [New in v0.10.0](#new-in-v0100)
 - [Council](#council)
@@ -104,6 +105,15 @@ tincan doctor
 ```
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
+
+## New in v0.11.1
+
+- [Unanswered wakes](#wake-methods): when the relay wakes a webhook or email agent and it does not check in within `--wake-grace` (default 10 minutes), `tincan agents`, `list_agents` and `tincan top` mark it `unanswered`, anyone who asks it is told it was woken and has not checked in, and `tincan doctor` on an admin device lists it with the last wake result. A failed send counts at once. Wake sending itself is unchanged.
+- The relay log, the audit log and the roster now show only a safe reason for a failed wake. Before, a failed webhook or AgentMail send could print the webhook URL's path and query token, or the AgentMail key, into the relay log.
+
+Before you upgrade:
+
+- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.1` (self-upgrade needs `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). Detection and the log fix are relay-side. Then `tincan upgrade` on each agent when convenient, for the new roster and ask text.
 
 ## New in v0.11.0
 
