@@ -277,7 +277,10 @@ func TestUnansweredField(t *testing.T) {
 func TestFormatResultUnansweredWake(t *testing.T) {
 	base := client.Result{Request: envelope.Request{ID: "r1", To: "grokbot"}, Status: envelope.StatusQueued}
 	plain := client.FormatResult(base)
-	woke := time.Date(2026, 10, 3, 16, 40, 0, 0, time.Local)
+	// Woken today, so the hint shows the clock time alone; the date form
+	// for other days is covered by TestClockTime.
+	woke := time.Now()
+	at := woke.Format("15:04")
 	quiet := base
 	quiet.Target = &envelope.Target{WokenAt: woke, WakeResult: "ok"}
 	if got := client.FormatResult(quiet); got != plain {
@@ -285,13 +288,13 @@ func TestFormatResultUnansweredWake(t *testing.T) {
 	}
 	stuck := base
 	stuck.Target = &envelope.Target{WokenAt: woke, WakeResult: "ok", Unanswered: true}
-	want := "grokbot was woken at 16:40 and has not checked in yet; the request is queued.\n" + plain
+	want := "grokbot was woken at " + at + " and has not checked in yet; the request is queued.\n" + plain
 	if got := client.FormatResult(stuck); got != want {
 		t.Fatalf("unanswered = %q, want %q", got, want)
 	}
 	failed := base
 	failed.Target = &envelope.Target{WokenAt: woke, WakeResult: "hooks.example returned 502 Bad Gateway", Unanswered: true}
-	want = "grokbot's wake at 16:40 failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\n" + plain
+	want = "grokbot's wake at " + at + " failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\n" + plain
 	if got := client.FormatResult(failed); got != want {
 		t.Fatalf("failed = %q, want %q", got, want)
 	}
