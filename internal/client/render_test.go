@@ -247,3 +247,52 @@ func TestGoodAtField(t *testing.T) {
 		t.Fatalf("field = %s, want %s", got, want)
 	}
 }
+
+// An unanswered relay-woken agent gets a quoted roster field naming its last
+// wake and that wake's result; any other agent gets none.
+func TestUnansweredField(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		info client.AgentInfo
+		want string
+	}{
+		{"answered", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok"}}, ""},
+		{"old relay", client.AgentInfo{Wake: "webhook"}, ""},
+		{"ok", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
+			`unanswered="woken 12m ago, no check-in (webhook ok)"`},
+		{"failed", client.AgentInfo{Wake: "email", Target: envelope.Target{WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway", Unanswered: true}},
+			`unanswered="woken just now, no check-in (email failed: api.agentmail.to returned 502 Bad Gateway)"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.UnansweredField(now); got != tc.want {
+				t.Fatalf("field = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// AE4: an ask to an unanswered agent says when it was woken and that the
+// request is queued; an answered wake adds nothing.
+func TestFormatResultUnansweredWake(t *testing.T) {
+	base := client.Result{Request: envelope.Request{ID: "r1", To: "grokbot"}, Status: envelope.StatusQueued}
+	plain := client.FormatResult(base)
+	woke := time.Date(2026, 10, 3, 16, 40, 0, 0, time.Local)
+	quiet := base
+	quiet.Target = &envelope.Target{WokenAt: woke, WakeResult: "ok"}
+	if got := client.FormatResult(quiet); got != plain {
+		t.Fatalf("answered wake = %q", got)
+	}
+	stuck := base
+	stuck.Target = &envelope.Target{WokenAt: woke, WakeResult: "ok", Unanswered: true}
+	want := "grokbot was woken at 16:40 and has not checked in yet; the request is queued.\n" + plain
+	if got := client.FormatResult(stuck); got != want {
+		t.Fatalf("unanswered = %q, want %q", got, want)
+	}
+	failed := base
+	failed.Target = &envelope.Target{WokenAt: woke, WakeResult: "hooks.example returned 502 Bad Gateway", Unanswered: true}
+	want = "grokbot's wake at 16:40 failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\n" + plain
+	if got := client.FormatResult(failed); got != want {
+		t.Fatalf("failed = %q, want %q", got, want)
+	}
+}

@@ -316,6 +316,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if backlog := a.Backlog(now); backlog != "" {
 			fmt.Fprintf(&b, " %s", backlog)
 		}
+		if unanswered := a.UnansweredField(now); unanswered != "" {
+			fmt.Fprintf(&b, " %s", unanswered)
+		}
 		if goodAt := a.GoodAtField(); goodAt != "" {
 			fmt.Fprintf(&b, " %s", goodAt)
 		}

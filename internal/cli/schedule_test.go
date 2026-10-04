@@ -8,6 +8,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
@@ -46,6 +47,46 @@ func TestAskScheduleTargetDefaultWait(t *testing.T) {
 	}
 	out, _, err = runSplit(t, askCmd(), "grokbot", "status")
 	if err != nil || !strings.HasPrefix(out, "No reply yet from grokbot.") {
+		t.Fatalf("ask grokbot = %q, %v", out, err)
+	}
+}
+
+// An unanswered webhook agent shows when it was last woken and the result on
+// its own line, just before its good-at line, which stays last.
+func TestFormatAgentsUnanswered(t *testing.T) {
+	now := time.Now()
+	got := formatAgents([]client.AgentInfo{
+		{Name: "grokbot", Wake: "webhook", LastPoll: now.Add(-3 * time.Hour), Kind: "openclaw", GoodAt: "phone calls",
+			Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
+		{Name: "hermes", Wake: "webhook", LastPoll: now, Target: envelope.Target{WokenAt: now.Add(-time.Minute), WakeResult: "ok"}},
+	}, now)
+	want := `grokbot        offline  wake=webhook last seen 3h ago kind=openclaw unanswered="woken 12m ago, no check-in (webhook ok)" good_at="phone calls"` + "\n" +
+		"hermes         offline  wake=webhook last seen just now\n"
+	if got != want {
+		t.Fatalf("agents =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// AE4 through the CLI: an ask to an agent whose last wake failed says so and
+// that the request is queued.
+func TestAskUnansweredTarget(t *testing.T) {
+	m := testrelay.New(t, relay.Config{MaxWait: 200 * time.Millisecond})
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	woke := time.Now().Add(-12 * time.Minute)
+	if err := st.SetLastWake(t.Context(), "grokbot", store.Wake{At: woke, Result: "hooks.example returned 502 Bad Gateway"}); err != nil {
+		t.Fatal(err)
+	}
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: "http://127.0.0.1:1/hook"}}, st, wake.Options{Debounce: time.Hour})
+	t.Cleanup(w.Stop)
+	m.Server.SetWakeNamer(w)
+	useConfig(t, client.Config{Relay: m.URL("instinct"), Agent: "instinct"})
+	out, _, err := runSplit(t, askCmd(), "grokbot", "status")
+	want := "grokbot's wake at " + woke.Format("15:04") + " failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\nNo reply yet from grokbot."
+	if err != nil || !strings.HasPrefix(out, want) {
 		t.Fatalf("ask grokbot = %q, %v", out, err)
 	}
 }
