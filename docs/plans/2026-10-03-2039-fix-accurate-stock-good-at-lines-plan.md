@@ -36,7 +36,7 @@ Stock lines ship to every install and are the main input agents use to pick a te
 Line content
 
 - R1. Each stock line states only capabilities the Tincan adapter delivers and the product reliably has today, in plain prose of at most 120 runes with no em dash, en dash or bold.
-- R2. A line names a limit only when an asker would otherwise wrongly assume the capability: claude-web makes no images, grok-web attaches no videos, dot-web and council asks wait for the owner's approval, claude-code answers only while a session is open, and the ChatGPT connector cannot pick up asks later.
+- R2. A line names a limit only when an asker would otherwise wrongly assume the capability: claude-web makes no images, grok-web attaches no videos, dot-web and council asks are held for the owner's approval by default, claude-code answers only while a session is open, and the ChatGPT connector cannot pick up asks later.
 - R3. The history line names all eight sources it reads (ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Grok CLI), keeps the word "ChatGPT", and keeps its images claim (seven of the eight sources return images; Copilot does not).
 
 Which kinds get a line
@@ -82,14 +82,14 @@ Consistency
 |---|---|
 | history | finds the owner's past ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats and images |
 | notes | saves, searches and reads the owner's Agent Notes on their Mac; never edits or deletes one (unchanged) |
-| council | asks the team's wakeable models one question, has them rank the answers blind, returns a verdict; owner-approved, slow |
+| council | asks web, CLI and webhook agents (not Claude Code) one question, ranks answers blind; slow, held for approval by default |
 | chatgpt-web | asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any images ChatGPT made |
 | claude-web | asks Claude (claude.ai) in the owner's browser and replies with the answer as text; Claude makes no images |
 | grok-web | asks Grok (grok.com) in the owner's browser and replies with the answer and any images Grok made; no videos |
 | gemini-web | asks Gemini (gemini.google.com) in the owner's browser; it can draw on their connected Gmail, Drive and Calendar |
 | perplexity-web | unchanged |
 | copilot-web | unchanged |
-| dot-web | asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; each ask waits for owner approval |
+| dot-web | asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; held for approval by default |
 | claude-code | Claude Code in a terminal on the owner's machine: reads, edits and runs code; answers only while a session is open |
 | codex | OpenAI Codex run unattended on the owner's machine: reads code anywhere, edits and runs it in its own work folder |
 | gemini-cli | a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code |
