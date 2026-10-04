@@ -77,6 +77,7 @@ func TestAskUnansweredTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	woke := time.Now().Add(-12 * time.Minute)
+	m.Backdate(t, "grokbot", time.Hour)
 	if err := st.SetLastWake(t.Context(), "grokbot", store.Wake{At: woke, Result: "hooks.example returned 502 Bad Gateway"}); err != nil {
 		t.Fatal(err)
 	}

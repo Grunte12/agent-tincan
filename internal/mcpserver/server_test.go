@@ -1094,6 +1094,7 @@ func TestListAgentsShowsUnanswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	m.Backdate(t, "muse", time.Hour)
 	if err := st.SetLastWake(t.Context(), "muse", store.Wake{At: time.Now().Add(-12 * time.Minute), Result: "hooks.example returned 502 Bad Gateway"}); err != nil {
 		t.Fatal(err)
 	}
