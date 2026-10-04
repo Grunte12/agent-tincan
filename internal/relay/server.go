@@ -1163,7 +1163,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
-			info.GoodAt = onboard.StockGoodAt(a.Kind)
+			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
