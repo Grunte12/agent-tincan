@@ -113,7 +113,7 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 Before you upgrade:
 
-- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.1` (self-upgrade needs `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). Detection and the log fix are relay-side. Then `tincan upgrade` on each agent when convenient, for the new roster and ask text.
+- Upgrade the relay: `tincan relay-upgrade --from-github v0.11.1` (self-upgrade needs `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). Detection and the log fix are relay-side. Then `tincan upgrade` on each agent when convenient, and restart its long-running tincan processes (`tincan mcp` servers, `wait` and `listen` loops) or reconnect tincan in its app, for the new roster and ask text.
 
 ## New in v0.11.0
 
