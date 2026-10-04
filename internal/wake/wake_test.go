@@ -1,12 +1,14 @@
 package wake
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -565,6 +567,9 @@ func TestLastWakeIgnoresSkippedWakes(t *testing.T) {
 // result that names the host but never the URL's userinfo, path or query,
 // nor the AgentMail key: wake_result reaches every joined agent.
 func TestLastWakeTransportErrorHidesURL(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	st := auditStore(t)
 	secrets := []string{"hunter2", "tok-secret", "path-secret", "am-key-secret", "from-secret", "user:"}
 	w := New(Config{
@@ -594,6 +599,11 @@ func TestLastWakeTransportErrorHidesURL(t *testing.T) {
 			if strings.Contains(e.Detail, s) {
 				t.Errorf("audit %s detail %q leaks %q", e.Event, e.Detail, s)
 			}
+		}
+	}
+	for _, s := range secrets {
+		if strings.Contains(logged.String(), s) {
+			t.Errorf("relay log %q leaks %q", logged.String(), s)
 		}
 	}
 }

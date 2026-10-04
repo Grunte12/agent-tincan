@@ -572,10 +572,10 @@ func (w *Waker) fire(agent string) {
 		}
 	}
 	if err != nil {
-		// The full error stays in the relay's log; the audit row and the
-		// last wake, which joined agents can read, get the safe reason.
-		log.Printf("wake %s: %v", agent, err)
+		// The log, the audit row and the last wake (which joined agents can
+		// read) all get the safe reason: the raw error can carry the URL.
 		reason := publicReason(err)
+		log.Printf("wake %s: %s", agent, reason)
 		w.record(ctx, "wake_failed", agent, reason)
 		w.remember(ctx, agent, store.Wake{At: at, Result: reason})
 		return
