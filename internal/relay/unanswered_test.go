@@ -401,3 +401,33 @@ func TestFailedRemoveKeepsWakeState(t *testing.T) {
 		t.Fatalf("wake after a failed remove not recorded: %+v, %v", wk, ok)
 	}
 }
+
+// A long poll that is open when a wake is recorded and ends after it counts
+// as the check-in both in memory and in the store, so a restart agrees.
+func TestWakeDuringOpenPollSurvivesRestart(t *testing.T) {
+	clk := &fakeClock{t: time.Now()}
+	h := newHarness(t, Config{Now: clk.Now, PollHold: 300 * time.Millisecond})
+	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}}
+	h.srv.SetWakeNamer(fw)
+	clk.advance(time.Second)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.do(grokAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	clk.advance(time.Second)
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK}) // woken while the poll waits
+	clk.advance(time.Second)
+	<-done
+	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("before restart: %+v", g)
+	}
+	srv := New(identity.NewDirectory(h.st, h.who, identity.Config{Admins: []string{"macbook-pro-44"}}), h.st, Config{Now: clk.Now})
+	srv.SetWakeNamer(fw)
+	h2 := &harness{t: t, srv: srv, h: srv.Handler(), st: h.st, who: h.who}
+	clk.advance(DefaultWakeGrace + time.Minute)
+	if g := agentInfo(t, h2, macAddr, "grokbot"); g.Unanswered {
+		t.Fatalf("after restart, the poll that outlived the wake is lost: %+v", g)
+	}
+}

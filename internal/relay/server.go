@@ -776,7 +776,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
-		s.touch(r.Context(), name, false)
+		s.touch(r.Context(), name, s.wokenDuringPoll(name))
 		if v := s.upgradeFor(r); v != "" {
 			out := map[string]any{"upgrade_available": v}
 			out["requests"] = []envelope.Request{}
@@ -1433,6 +1433,24 @@ func (s *Server) UnseenReplies(agent string) int {
 // never for one it does not, which polls constantly and is never judged
 // unanswered. A poll persists once, at its start; later touches in the same
 // poll only update memory.
+// wokenDuringPoll reports whether the relay recorded a wake for agent after
+// its open poll started (lastPoll still holds that start), so the poll's end
+// is the check-in for that wake and must be stored as well as kept in memory.
+func (s *Server) wokenDuringPoll(agent string) bool {
+	wr, ok := s.wake.(WakeReporter)
+	if !ok {
+		return false
+	}
+	wk, ok := wr.LastWake(agent)
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	start := s.lastPoll[agent]
+	s.mu.Unlock()
+	return wk.At.After(start)
+}
+
 func (s *Server) touch(ctx context.Context, agent string, persist bool) {
 	now := s.cfg.Now()
 	s.mu.Lock()
