@@ -464,7 +464,7 @@ plus live claims, when non-zero: 2 queued (oldest 14m), 1 claimed. Queued
 includes delivered but unclaimed requests. Expired and terminal requests are
 excluded. Use a growing oldest wait to spot backlog even when an agent is online.
 
-A webhook or email teammate the relay woke that has not checked in since shows
+A webhook or email teammate the relay woke that has not polled since shows
 unanswered="woken 12m ago, no check-in (webhook ok)", and an ask to it says it
 was woken and has not checked in yet. Its wake reached its platform but no
 session ran, or the wake failed. Your request is still queued and the mark
