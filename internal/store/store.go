@@ -448,13 +448,26 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	return tx.Commit()
 }
 
+// DeleteAgent removes name and, in the same transaction, the last wake the
+// relay sent it.
 func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, name)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, name)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM wakes WHERE agent = ?`, name); err != nil {
+		return false, err
+	}
+	return n > 0, tx.Commit()
 }
 
 // SetAgentKind records an agent's runtime kind; "" stores NULL.

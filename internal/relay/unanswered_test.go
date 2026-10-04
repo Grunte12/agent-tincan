@@ -35,6 +35,12 @@ func (f *fakeWaker) LastWake(agent string) (store.Wake, bool) {
 	return w, ok
 }
 
+func (f *fakeWaker) Forget(agent string) {
+	f.mu.Lock()
+	delete(f.wakes, agent)
+	f.mu.Unlock()
+}
+
 func (f *fakeWaker) set(agent string, w store.Wake) {
 	f.mu.Lock()
 	f.wakes[agent] = w
@@ -240,5 +246,26 @@ func TestWakeBeforeJoinIsIgnored(t *testing.T) {
 	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
 	if out.Target != nil {
 		t.Fatalf("send target for a wake before the join: %+v", out.Target)
+	}
+}
+
+// Removing an agent drops its last wake from the store and from the waker,
+// so nothing about it outlives the agent.
+func TestRemoveForgetsLastWake(t *testing.T) {
+	h := newHarness(t, Config{})
+	if err := h.st.SetLastWake(t.Context(), "grokbot", store.Wake{At: time.Now(), Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: "http://127.0.0.1:1/hook"}}, h.st, wake.Options{})
+	h.srv.SetWakeNamer(w)
+	if _, ok := w.LastWake("grokbot"); !ok {
+		t.Fatal("no last wake before the remove")
+	}
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	if wk, ok := w.LastWake("grokbot"); ok {
+		t.Fatalf("waker still has a last wake: %+v", wk)
+	}
+	if ws, err := h.st.LastWakes(t.Context()); err != nil || len(ws) != 0 {
+		t.Fatalf("stored wakes = %+v, %v", ws, err)
 	}
 }

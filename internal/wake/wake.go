@@ -301,6 +301,14 @@ func (w *Waker) LastWake(agent string) (store.Wake, bool) {
 	return l, ok
 }
 
+// Forget implements relay.WakeReporter: it drops agent's last wake, for an
+// agent the owner removed. The store row goes with the agent's own row.
+func (w *Waker) Forget(agent string) {
+	w.mu.Lock()
+	delete(w.last, agent)
+	w.mu.Unlock()
+}
+
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
 func (w *Waker) WakeMethod(agent string) string {
 	if t, ok := w.cfg[agent]; ok && t.Method != "" {

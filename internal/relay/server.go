@@ -1045,9 +1045,11 @@ type Scheduler interface {
 const ScheduleGrace = 5 * time.Minute
 
 // WakeReporter reports the last wake the relay sent an agent, and whether
-// there was one. Set by package wake through SetWakeNamer.
+// there was one, and forgets it when the agent is removed. Set by package
+// wake through SetWakeNamer.
 type WakeReporter interface {
 	LastWake(agent string) (store.Wake, bool)
+	Forget(agent string)
 }
 
 // DefaultWakeGrace is how long a woken agent has to poll before the roster
@@ -1332,11 +1334,15 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastPoll, in.Name)
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
+	delete(s.pollPersisted, in.Name)
 	delete(s.versions, in.Name)
 	delete(s.pollFeatures, in.Name)
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()
+	if wr, ok := s.wake.(WakeReporter); ok {
+		wr.Forget(in.Name) // the store row went with the agent
+	}
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": in.Name, "cancelled": len(ids)})
 }

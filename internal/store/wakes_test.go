@@ -119,3 +119,28 @@ func TestSetLastWakeKeepsNewer(t *testing.T) {
 		t.Fatalf("wakes = %+v, %v", ws, err)
 	}
 }
+
+// Deleting an agent deletes its last wake with it.
+func TestDeleteAgentDropsLastWake(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	at := time.UnixMilli(1_790_000_000_000)
+	for _, name := range []string{"grokbot", "instinct"} {
+		if err := s.PutAgent(ctx, identity.Agent{Name: name, NodeID: "n" + name, NodeName: name, JoinedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetLastWake(ctx, name, Wake{At: at, Result: "ok"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := s.DeleteAgent(ctx, "grokbot"); err != nil || !ok {
+		t.Fatalf("delete = %v, %v", ok, err)
+	}
+	if ws, err := s.LastWakes(ctx); err != nil || len(ws) != 1 || ws["instinct"].Result != "ok" {
+		t.Fatalf("wakes after delete = %+v, %v", ws, err)
+	}
+}
