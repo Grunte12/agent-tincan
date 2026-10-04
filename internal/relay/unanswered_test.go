@@ -42,10 +42,10 @@ func (f *fakeWaker) set(agent string, w store.Wake) {
 }
 
 // wakeHarness has grokbot on a webhook, instinct on email and muse on wait,
-// on a fake clock one second past the joins.
+// on a fake clock that starts now, one second past the joins.
 func wakeHarness(t *testing.T) (*harness, *fakeClock, *fakeWaker) {
 	t.Helper()
-	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	clk := &fakeClock{t: time.Now()}
 	h := newHarness(t, Config{Now: clk.Now})
 	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook", "instinct": "email", "muse": "wait"}, wakes: map[string]store.Wake{}}
 	h.srv.SetWakeNamer(fw)
@@ -79,7 +79,7 @@ func TestRosterUnansweredAfterGrace(t *testing.T) {
 
 // A shorter --wake-grace flags sooner.
 func TestRosterWakeGraceConfigurable(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	clk := &fakeClock{t: time.Now()}
 	h := newHarness(t, Config{Now: clk.Now, WakeGrace: time.Minute})
 	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}}
 	h.srv.SetWakeNamer(fw)
@@ -172,3 +172,20 @@ func TestSendResponseCarriesUnansweredWake(t *testing.T) {
 
 // The real waker satisfies WakeReporter, so SetWakeNamer picks it up.
 var _ WakeReporter = (*wake.Waker)(nil)
+
+// A wake from before the agent joined (an agent removed and invited again
+// under the same name) is not the current agent's: no wake fields until the
+// relay wakes it again.
+func TestWakeBeforeJoinIsIgnored(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	fw.set("grokbot", store.Wake{At: clk.Now().Add(-time.Hour), Result: "hooks.example returned 502 Bad Gateway"})
+	clk.advance(DefaultWakeGrace + time.Minute)
+	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered || !g.WokenAt.IsZero() || g.WakeResult != "" {
+		t.Fatalf("wake before the join: %+v", g)
+	}
+	var out envelope.SendResponse
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target != nil {
+		t.Fatalf("send target for a wake before the join: %+v", out.Target)
+	}
+}

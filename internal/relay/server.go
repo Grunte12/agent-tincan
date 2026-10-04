@@ -617,6 +617,9 @@ func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Targ
 	if !ok {
 		return nil
 	}
+	if a, found, err := s.dir.Agent(ctx, agent); err == nil && found && wk.At.Before(a.JoinedAt) {
+		return nil // sent to an earlier agent of the same name
+	}
 	s.mu.Lock()
 	last, active := s.lastPoll[agent], s.lastSeen[agent]
 	s.mu.Unlock()
@@ -1129,7 +1132,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	wakes := map[string]store.Wake{}
 	if wr, ok := s.wake.(WakeReporter); ok {
 		for _, a := range agents {
-			if wk, ok := wr.LastWake(a.Name); ok && relayWoken(s.wake.WakeMethod(a.Name)) {
+			// A wake from before the join was sent to an earlier agent of
+			// the same name.
+			if wk, ok := wr.LastWake(a.Name); ok && relayWoken(s.wake.WakeMethod(a.Name)) && !wk.At.Before(a.JoinedAt) {
 				wakes[a.Name] = wk
 			}
 		}
