@@ -214,6 +214,9 @@ type Target struct {
 	Unanswered bool `json:"unanswered,omitempty"`
 }
 
+// WakeOK is Target.WakeResult for a wake the agent's platform accepted.
+const WakeOK = "ok"
+
 // Exchange is one clarification round; At is when the question was asked.
 type Exchange struct {
 	Question string    `json:"question"`

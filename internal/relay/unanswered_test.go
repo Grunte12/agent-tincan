@@ -58,7 +58,7 @@ func wakeHarness(t *testing.T) (*harness, *fakeClock, *fakeWaker) {
 func TestRosterUnansweredAfterGrace(t *testing.T) {
 	h, clk, fw := wakeHarness(t)
 	woke := clk.Now()
-	fw.set("grokbot", store.Wake{At: woke, Result: store.WakeOK})
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
 	g := agentInfo(t, h, macAddr, "grokbot")
 	if !g.WokenAt.Equal(woke) || g.WakeResult != "ok" || g.Unanswered {
 		t.Fatalf("just woken: %+v", g)
@@ -84,7 +84,7 @@ func TestRosterWakeGraceConfigurable(t *testing.T) {
 	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}}
 	h.srv.SetWakeNamer(fw)
 	clk.advance(time.Second)
-	fw.set("grokbot", store.Wake{At: clk.Now(), Result: store.WakeOK})
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
 	clk.advance(2 * time.Minute)
 	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
 		t.Fatalf("2m with a 1m grace: %+v", g)
@@ -126,8 +126,8 @@ func TestRosterAgentSideMethodsHaveNoWakeFields(t *testing.T) {
 // persisted activity shows it called after the wake.
 func TestRosterUnansweredAcrossRestart(t *testing.T) {
 	h, clk, fw := wakeHarness(t)
-	fw.set("grokbot", store.Wake{At: clk.Now(), Result: store.WakeOK})
-	fw.set("instinct", store.Wake{At: clk.Now(), Result: store.WakeOK})
+	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
+	fw.set("instinct", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
 	clk.advance(time.Minute)
 	h.do(instinctAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
 
@@ -157,7 +157,7 @@ func TestSendResponseCarriesUnansweredWake(t *testing.T) {
 		t.Fatalf("never woken: target %+v", out.Target)
 	}
 	woke := clk.Now()
-	fw.set("grokbot", store.Wake{At: woke, Result: store.WakeOK})
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
 	clk.advance(12 * time.Minute)
 	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi again"}`, http.StatusCreated, &out)
 	if out.Target == nil || !out.Target.Unanswered || !out.Target.WokenAt.Equal(woke) || out.Target.WakeResult != "ok" || out.Target.CheckEverySeconds != 0 {

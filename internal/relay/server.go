@@ -1069,7 +1069,7 @@ func (s *Server) wakeTarget(wk store.Wake, lastPoll, active, now time.Time) enve
 	if s.started.After(since) {
 		since = s.started
 	}
-	t.Unanswered = wk.Result != store.WakeOK || now.Sub(since) > s.cfg.WakeGrace
+	t.Unanswered = wk.Result != envelope.WakeOK || now.Sub(since) > s.cfg.WakeGrace
 	return t
 }
 

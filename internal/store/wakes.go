@@ -12,9 +12,6 @@ type Wake struct {
 	Result string
 }
 
-// WakeOK is Wake.Result for a send the agent's platform accepted.
-const WakeOK = "ok"
-
 // migrateWakes creates the table holding each relay-woken agent's last wake,
 // one row per agent. It is a no-op when the table exists.
 func (s *Store) migrateWakes() error {

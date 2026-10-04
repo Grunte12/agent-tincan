@@ -525,7 +525,7 @@ func (w *Waker) fire(agent string) {
 		w.remember(ctx, agent, store.Wake{At: at, Result: err.Error()})
 		return
 	}
-	w.remember(ctx, agent, store.Wake{At: at, Result: store.WakeOK})
+	w.remember(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK})
 	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
