@@ -1932,19 +1932,29 @@ type WakeExport struct {
 	Since time.Time   `json:"since"`
 	Until time.Time   `json:"until"`
 	Wakes []WakeEntry `json:"wakes"`
-	// Truncated is set when the window held more audit rows than one
-	// export reads (maxWakeExportRows): the wakes listed are the oldest,
-	// and a later since shows the rest.
+	// Truncated is set when the window held more wakes than one export
+	// lists (maxWakeExportWakes): the wakes listed are the oldest, and a
+	// later since shows the rest.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
-// maxWakeExportRows bounds the audit rows one wake export reads, and so its
-// memory and response size. Tests lower it.
-var maxWakeExportRows = 5000
+// maxWakeExportWakes bounds the wakes one export lists, and so its memory,
+// its lookups and its response size. Tests lower it.
+var maxWakeExportWakes = 1000
 
-// wakePollWindow is how long after until a wake export still looks for a
-// wake's next poll.
-const wakePollWindow = 24 * time.Hour
+// pollTime is when the poll an audit row records happened: the time in a
+// polled row written after its wake call ended ("polled at <time>, ..."),
+// otherwise the row's own time.
+func pollTime(e store.AuditEvent) time.Time {
+	if rest, ok := strings.CutPrefix(e.Detail, "polled at "); ok {
+		if ts, _, _ := strings.Cut(rest, ","); ts != "" {
+			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				return t.UTC()
+			}
+		}
+	}
+	return e.At
+}
 
 // WakeEntry is one wake the relay sent, failed to send, or skipped.
 type WakeEntry struct {
@@ -1990,9 +2000,8 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Rows up to a day after until are read too: a wake's next poll may
-	// fall after it.
-	rows, err := s.store.AuditForActor(r.Context(), agent, since, until.Add(wakePollWindow), maxWakeExportRows, append(wakeEvents, store.EventPolled, "delivered", "claimed")...)
+	ctx := r.Context()
+	rows, err := s.store.AuditForActor(ctx, agent, since, until, maxWakeExportWakes, wakeEvents...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -2003,26 +2012,45 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 			path = m
 		}
 	}
-	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}, Truncated: len(rows) == maxWakeExportRows}
+	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}, Truncated: len(rows) == maxWakeExportWakes}
 	for i, e := range rows {
-		if !slices.Contains(wakeEvents, e.Event) || e.At.After(until) {
-			continue
-		}
 		entry := wakeEntry(e, path)
-		older := e.Event == "woke" && entry.Status == "2xx"
-		// The next activity must come before the relay's next sent wake. A
-		// skipped wake sent nothing, so it does not end the search.
+		// The next activity must come before the relay's next sent wake,
+		// which may fall after until. A skipped wake sent nothing, so it
+		// does not end the search.
+		var next int64
 		for _, n := range rows[i+1:] {
 			if n.Event == "woke" || n.Event == "wake_failed" {
+				next = n.Seq
 				break
 			}
-			if n.Event == store.EventPolled || (older && (n.Event == "delivered" || n.Event == "claimed")) {
-				at := n.At
-				entry.NextPoll, entry.NextVia = &at, n.Event
-				if n.Event == store.EventPolled {
-					entry.NextVia = "poll"
-				}
-				break
+		}
+		if next == 0 {
+			n, found, err := s.store.FirstAuditAfter(ctx, agent, e.Seq, 0, "woke", "wake_failed")
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			if found {
+				next = n.Seq
+			}
+		}
+		activity := []string{store.EventPolled}
+		if e.Event == "woke" && entry.Status == "2xx" {
+			// Written before polled rows existed: the next delivery or claim
+			// is the best sign of a check-in.
+			activity = append(activity, "delivered", "claimed")
+		}
+		n, found, err := s.store.FirstAuditAfter(ctx, agent, e.Seq, next, activity...)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if found {
+			at := pollTime(n)
+			entry.NextPoll, entry.NextVia = &at, n.Event
+			if n.Event == store.EventPolled {
+				entry.NextVia = "poll"
 			}
 		}
 		out.Wakes = append(out.Wakes, entry)

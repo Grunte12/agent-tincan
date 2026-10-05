@@ -214,6 +214,7 @@ func TestWakeExportPollDuringWakeCall(t *testing.T) {
 	h := newHarness(t, Config{})
 	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+		time.Sleep(100 * time.Millisecond) // a slow webhook
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(hook.Close)
@@ -232,6 +233,10 @@ func TestWakeExportPollDuringWakeCall(t *testing.T) {
 	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
 	if len(out.Wakes) != 1 || out.Wakes[0].NextPoll == nil || out.Wakes[0].NextVia != "poll" {
 		t.Fatalf("export = %+v, want the wake paired with the poll made during it", out)
+	}
+	// The poll is reported when it happened, not when the slow call ended.
+	if got := out.Wakes[0].At.Sub(*out.Wakes[0].NextPoll); got < 80*time.Millisecond {
+		t.Errorf("next poll %v is %v before the wake row, want the poll's own time", *out.Wakes[0].NextPoll, got)
 	}
 	if n := auditCount(t, h.st, "polled", "grokbot"); n != 1 {
 		t.Fatalf("polled rows = %d, want 1", n)
@@ -299,9 +304,9 @@ func TestWakeExportPollDuringLaterWakeCall(t *testing.T) {
 
 // An export that reaches the row bound says so, and lists the oldest wakes.
 func TestWakeExportTruncated(t *testing.T) {
-	old := maxWakeExportRows
-	maxWakeExportRows = 3
-	t.Cleanup(func() { maxWakeExportRows = old })
+	old := maxWakeExportWakes
+	maxWakeExportWakes = 3
+	t.Cleanup(func() { maxWakeExportWakes = old })
 	h, w := wakeExportHarness(t, http.StatusOK)
 	since := time.Now().Add(-time.Second)
 	for range 5 {
@@ -311,8 +316,32 @@ func TestWakeExportTruncated(t *testing.T) {
 	if !out.Truncated || len(out.Wakes) != 3 {
 		t.Fatalf("export = %d wakes, truncated %v; want 3, true", len(out.Wakes), out.Truncated)
 	}
-	maxWakeExportRows = 100
+	maxWakeExportWakes = 100
 	if out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK); out.Truncated || len(out.Wakes) != 5 {
 		t.Fatalf("export = %d wakes, truncated %v; want 5, false", len(out.Wakes), out.Truncated)
+	}
+}
+
+// Polls and deliveries do not count toward the export bound: every wake in
+// the window is listed and paired.
+func TestWakeExportBoundCountsWakesOnly(t *testing.T) {
+	old := maxWakeExportWakes
+	maxWakeExportWakes = 4
+	t.Cleanup(func() { maxWakeExportWakes = old })
+	h, w := wakeExportHarness(t, http.StatusOK)
+	since := time.Now().Add(-time.Second)
+	for range 3 {
+		wakeOnce(h, w, "grokbot")
+		h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+		time.Sleep(2 * time.Millisecond)
+	}
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if out.Truncated || len(out.Wakes) != 3 {
+		t.Fatalf("export = %d wakes, truncated %v; want 3, false", len(out.Wakes), out.Truncated)
+	}
+	for i, e := range out.Wakes {
+		if e.NextPoll == nil || e.NextVia != "poll" {
+			t.Errorf("wake %d = %+v, want its poll", i, e)
+		}
 	}
 }

@@ -367,3 +367,28 @@ func TestSpanReadsWholeHoursPlainly(t *testing.T) {
 		}
 	}
 }
+
+// A recovery alert that keeps failing does not hide the next outage: that
+// outage gets its own down alert, and the old recovery is still sent once
+// alerts work again, naming when the relay came back.
+func TestFailedRecoveryAlertDoesNotMaskNextOutage(t *testing.T) {
+	r := newRig()
+	r.minutes(t, 11, false) // down alert at minute 10
+	back := r.now
+	r.fail = 3
+	r.minutes(t, 1, true)   // recovery alert fails
+	r.minutes(t, 12, false) // down again; the retries fail twice, then work
+	var kinds []string
+	for _, e := range r.alerts {
+		kinds = append(kinds, string(e.Kind))
+	}
+	if got := strings.Join(kinds, ","); got != "down,up,down" {
+		t.Fatalf("alerts = %s, want down,up,down", got)
+	}
+	if !strings.Contains(r.alerts[1].Message, back.Local().Format("Jan 2 15:04 MST")) {
+		t.Errorf("late recovery alert %q does not say when the relay came back", r.alerts[1].Message)
+	}
+	if !r.alerts[2].Since.After(back) {
+		t.Errorf("second down alert since %v, want the new outage after %v", r.alerts[2].Since, back)
+	}
+}

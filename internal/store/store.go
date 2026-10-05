@@ -674,6 +674,19 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 // upload on no other message, and comes back filled in from its metadata.
 // A bad reference stores nothing.
 func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	defer tx.Rollback()
+	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
+		return envelope.Request{}, err
+	}
+	return req, tx.Commit()
+}
+
+// enqueueTx is Enqueue inside tx, which the caller commits.
+func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
 	status := envelope.StatusQueued
 	if req.Status == envelope.StatusHeld {
@@ -690,11 +703,6 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return envelope.Request{}, err
-	}
-	defer tx.Rollback()
 	if req.Group != "" {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM requests WHERE from_agent = ? AND group_id = ? LIMIT ?)`, req.From, req.Group, MaxGroupRequests).Scan(&count); err != nil {
@@ -716,7 +724,7 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	return req, tx.Commit()
+	return req, nil
 }
 
 // Deliver hands up to limit queued requests for agent to its poller, marking

@@ -332,3 +332,42 @@ func queuedOwnerNotices(t *testing.T, h *harness) []string {
 	}
 	return out
 }
+
+// A webhook that answers 200 with an error in its body gets that reply in
+// the owner's notice, and never the token it was sent with.
+func TestOwnerWakeNoticeCarriesWebhookReply(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.srv.SetPreparer(notifyPreparer{to: "instinct"})
+	const token = "tok-owner-reply-secret"
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"error","message":"Activity task failed","echo":"` + token + `"}`))
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL, BearerToken: token, MaxPerHour: 100}}, h.st, wake.Options{
+		HTTP:       hook.Client(),
+		Debounce:   time.Millisecond,
+		WakeGrace:  20 * time.Millisecond,
+		Queued:     h.srv.QueuedCount,
+		LastPoll:   h.srv.LastPoll,
+		Unanswered: h.srv.TellAskers,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	h.send(museAddr, "grokbot", "are you there")
+	var got []string
+	for deadline := time.Now().Add(10 * time.Second); len(got) == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		got = queuedOwnerNotices(t, h)
+	}
+	if len(got) != 1 {
+		t.Fatalf("owner notices = %q, want one", got)
+	}
+	if !strings.Contains(got[0], `last webhook reply: {"status":"error","message":"Activity task failed","echo":"[redacted]"}`) {
+		t.Errorf("owner notice lacks the webhook reply: %s", got[0])
+	}
+	if strings.Contains(got[0], token) {
+		t.Errorf("owner notice leaks the token: %s", got[0])
+	}
+}

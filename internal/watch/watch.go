@@ -60,6 +60,7 @@ type Watcher struct {
 	downSince time.Time // first failed probe of the current outage; zero when up
 	lastErr   error     // the latest failed probe's error
 	alerted   bool      // the Down alert for this outage was delivered
+	pendingUp *Event    // a recovery alert that failed, retried before each probe
 }
 
 // Run probes now and then every interval until ctx ends, and returns
@@ -79,6 +80,9 @@ func (w *Watcher) Run(ctx context.Context, every time.Duration) error {
 
 // Check runs one probe and sends whatever alert it calls for.
 func (w *Watcher) Check(ctx context.Context) {
+	if w.pendingUp != nil && w.send(ctx, *w.pendingUp) {
+		w.pendingUp = nil
+	}
 	now := w.now()
 	if err := w.Probe(ctx); err != nil {
 		w.lastErr = err
@@ -102,10 +106,14 @@ func (w *Watcher) Check(ctx context.Context) {
 		w.downSince = time.Time{}
 		return
 	}
-	msg := fmt.Sprintf("Tincan relay %s is back after %s (down since %s).",
-		w.relay(), span(now.Sub(w.downSince)), w.downSince.Local().Format("Jan 2 15:04 MST"))
-	if w.send(ctx, Event{Kind: Up, Relay: w.relay(), Since: w.downSince, Message: msg}) {
-		w.downSince, w.alerted = time.Time{}, false
+	msg := fmt.Sprintf("Tincan relay %s was back at %s after %s (down since %s).",
+		w.relay(), now.Local().Format("Jan 2 15:04 MST"), span(now.Sub(w.downSince)), w.downSince.Local().Format("Jan 2 15:04 MST"))
+	up := Event{Kind: Up, Relay: w.relay(), Since: w.downSince, Message: msg}
+	// The outage is over either way, so a new one is tracked and alerted
+	// on its own; a recovery alert that failed is retried before each probe.
+	w.downSince, w.alerted = time.Time{}, false
+	if !w.send(ctx, up) {
+		w.pendingUp = &up
 	}
 }
 

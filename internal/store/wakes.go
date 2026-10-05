@@ -297,21 +297,26 @@ func (s *Store) migrateOwnerNotices() error {
 	return err
 }
 
-// AddOwnerNotice records that the owner is being told about agent's silent
-// episode, and reports false when that was already recorded.
-func (s *Store) AddOwnerNotice(ctx context.Context, agent string, episode int64, note string, at time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO owner_notices (agent, episode, note, at) VALUES (?, ?, ?, ?)
-		ON CONFLICT(agent, episode) DO NOTHING`, agent, episode, note, at.UnixMilli())
+// EnqueueOwnerNotice queues req, the owner's notice about agent's silent
+// episode, and records that it was sent, in one transaction, so a failure
+// or crash leaves neither and the next follow-up tries again. It reports
+// false, queuing nothing, when the episode's notice was already sent.
+func (s *Store) EnqueueOwnerNotice(ctx context.Context, agent string, episode int64, req envelope.Request, ttl time.Duration) (envelope.Request, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return envelope.Request{}, false, err
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-// DeleteOwnerNotice removes what AddOwnerNotice recorded, so a notice that
-// could not be queued is tried again.
-func (s *Store) DeleteOwnerNotice(ctx context.Context, agent string, episode int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM owner_notices WHERE agent = ? AND episode = ?`, agent, episode)
-	return err
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO owner_notices (agent, episode, note, at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(agent, episode) DO NOTHING`, agent, episode, req.Body, s.now().UnixMilli())
+	if err != nil {
+		return envelope.Request{}, false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return envelope.Request{}, false, err
+	}
+	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
+		return envelope.Request{}, false, err
+	}
+	return req, true, tx.Commit()
 }
