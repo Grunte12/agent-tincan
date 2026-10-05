@@ -189,6 +189,7 @@ const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SEND_SPEC = Object.freeze({ message: 'message', conversation_id: 'id?', new_chat: 'bool?' });
 const CLOSE_SPEC = Object.freeze({ conversation_id: 'id' });
 const SPEC = Object.freeze({
+  ...Object.fromEntries(['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => [site + '.session', Object.freeze({})])),
   'chatgpt.list': Object.freeze({ count: 'count' }),
   'chatgpt.detail': Object.freeze({ id: 'id' }),
   'chatgpt.file': Object.freeze({ file_id: 'id', conversation_id: 'id?' }),
@@ -1050,6 +1051,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   }
 
   const handlers = {
+    async 'chatgpt.session'() { await chatgptAuth(); return {}; },
+    async 'dots.session'() { await chatgptAuth(); return {}; },
+    async 'claudeai.session'() { claudeOrg = null; await claudeOrgId(); return {}; },
+    async 'grok.session'() { await grokSession(); return {}; },
+    async 'gemini.session'() { await geminiAuth(true); return {}; },
+    async 'perplexity.session'() { await perplexitySession(); return {}; },
+    async 'copilot.session'() {
+      if (!sender || typeof sender.session !== 'function') throw new OpError('unsupported', 'upgrade the extension for session probes');
+      return sender.session('copilot');
+    },
     async 'chatgpt.list'(a) {
       const auth = await chatgptAuth();
       return getJSON(`${CHATGPT}/backend-api/conversations?offset=0&limit=${a.count}&order=updated`, auth);

@@ -33,6 +33,7 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // Capabilities is what a relay says it supports, from GET /v1/capabilities.
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
+	WebStatus          bool  `json:"web_status,omitempty"`
 	Groups             bool  `json:"groups,omitempty"`
 	Progress           bool  `json:"progress,omitempty"`
 	Search             bool  `json:"search,omitempty"`

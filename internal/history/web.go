@@ -166,6 +166,7 @@ type WebAgent struct {
 	mu sync.Mutex
 	// watch is the outbound watcher's state; only the watcher uses it.
 	watch dotWatch
+	auth  webAuthState
 }
 
 func (w *WebAgent) logf(format string, args ...any) {
@@ -179,6 +180,10 @@ func (w *WebAgent) logf(format string, args ...any) {
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
 // On a dot with OutPath set, the outbound watcher runs beside it.
 func (w *WebAgent) Run(ctx context.Context) error {
+	actx, stopAuth := context.WithCancel(ctx)
+	authDone := make(chan struct{})
+	go func() { defer close(authDone); w.runWebStatus(actx) }()
+	defer func() { stopAuth(); <-authDone }()
 	if w.watching() {
 		wctx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -458,13 +463,13 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		w.reply(ctx, req, w.rateLimitReply(), envelope.StatusFailed, nil)
 		return
 	}
-	res, err := w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
+	res, err := w.authSend(ctx, w.Site, wr.message, convID, newChat)
 	if remembered && convID != "" && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
 		anchor = replyAnchor{message: wr.message}
-		res, err = w.Native.Send(ctx, w.Site, wr.message, "", true)
+		res, err = w.authSend(ctx, w.Site, wr.message, "", true)
 	}
 	if err != nil {
 		w.logf("request %s from %s: send: %v", req.ID, req.From, err)
@@ -776,7 +781,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if convID == "" {
 		return a, nil
 	}
-	raw, err := w.Native.Request(ctx, w.live().detailOp, OpArgs{ID: convID})
+	raw, err := w.authRequest(ctx, w.live().detailOp, OpArgs{ID: convID})
 	if err == nil {
 		var nodes []webNode
 		if nodes, err = w.nodes(raw); err == nil {
@@ -792,7 +797,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if _, ok := rateLimited(err); ok || errors.Is(err, errThreadTooLong) {
 		return a, err
 	}
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotLoggedIn) {
 		w.logf("conversation %s: reading it before the send: %v", convID, err)
 	}
 	return a, nil

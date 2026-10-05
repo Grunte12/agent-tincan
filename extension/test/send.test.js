@@ -1595,3 +1595,14 @@ test('the dots selectors match the DM page markup', () => {
     globalThis.location = saved.location;
   }
 });
+
+test('copilot session probe closes its owned tab on success and sign-out', async () => {
+  const fc = fakeChrome(url => new HtmlSite(url, SIDEBAR));
+  assert.deepEqual(await sender(fc).session('copilot'), {});
+  assert.deepEqual(fc.log.removed, [100]);
+  assert.equal(fc.log.created[0].active, false);
+  const signedOut = '<html><body><button aria-label="Sign in">Sign in</button></body></html>';
+  const failed = fakeChrome(url => new HtmlSite(url, signedOut));
+  await assert.rejects(sender(failed).session('copilot'), e => e.code === 'not_logged_in');
+  assert.deepEqual(failed.log.removed, [100]);
+});

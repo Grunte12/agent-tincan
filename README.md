@@ -1326,3 +1326,9 @@ Always upload the `checksums.txt` written after signing; `make release` and `mak
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+Web agents report browser sign-out separately from process presence. Look for
+`signed_out` in CLI/MCP rosters, `SIGNED-OUT` in `tincan top`, or browser-host
+recovery guidance in `tincan doctor`. Sign in on that host in Chrome without
+restarting Chrome. See [web-agent authentication status](docs/adapters/web-agents.md#browser-authentication-status)
+for idle probes, optional operator notices and upgrade limits.

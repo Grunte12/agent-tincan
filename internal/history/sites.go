@@ -312,16 +312,17 @@ func lookupSite(src Source) (*webSite, error) {
 type opKind string
 
 const (
-	opList   opKind = "list"
-	opDetail opKind = "detail"
-	opFile   opKind = "file"
-	opSend   opKind = "send"
-	opClose  opKind = "close"
+	opSession opKind = "session"
+	opList    opKind = "list"
+	opDetail  opKind = "detail"
+	opFile    opKind = "file"
+	opSend    opKind = "send"
+	opClose   opKind = "close"
 )
 
 func (k opKind) valid() bool {
 	switch k {
-	case opList, opDetail, opFile, opSend, opClose:
+	case opSession, opList, opDetail, opFile, opSend, opClose:
 		return true
 	}
 	return false
