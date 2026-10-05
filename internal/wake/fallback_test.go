@@ -123,7 +123,7 @@ func TestFallbackFollowUpsCycleThroughPaths(t *testing.T) {
 		t.Fatalf("send order = %s, want %s", got, want)
 	}
 	woke := details(t, st, "woke")
-	for i, want := range []string{"webhook, 1 waiting", "fallback 1: webhook, 1 waiting", "fallback 2: email, 1 waiting", "webhook, 1 waiting"} {
+	for i, want := range []string{"webhook, HTTP 200, 1 waiting", "fallback 1: webhook, HTTP 200, 1 waiting", "fallback 2: email, HTTP 200, 1 waiting", "webhook, HTTP 200, 1 waiting"} {
 		if !strings.HasPrefix(woke[i], want) {
 			t.Errorf("woke %d detail = %q, want prefix %q", i, woke[i], want)
 		}
@@ -256,7 +256,7 @@ func TestNoFallbackResendsPrimary(t *testing.T) {
 	h.wait(t, 3)
 	drainFollowUp(t, w, &queuedN)
 	for _, d := range details(t, st, "woke") {
-		if !strings.HasPrefix(d, "webhook, 1 waiting") || strings.Contains(d, "fallback") {
+		if !strings.HasPrefix(d, "webhook, HTTP 200, 1 waiting") || strings.Contains(d, "fallback") {
 			t.Errorf("woke detail = %q", d)
 		}
 	}
@@ -346,7 +346,7 @@ func TestWebhookAnswerSummarySanitized(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(logged.String(), "wake grokbot: ok, webhook, 1 waiting, response: ") {
+	if !strings.Contains(logged.String(), "wake grokbot: ok, webhook, HTTP 200, 1 waiting, response: ") {
 		t.Errorf("relay log = %q", logged.String())
 	}
 	if got, _ := w.LastWake("grokbot"); got.Result != envelope.WakeOK {
