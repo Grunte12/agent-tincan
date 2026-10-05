@@ -649,12 +649,12 @@ func (w *Waker) fire(agent string) {
 	msg := UrgentWaitingMessage(p.requests, urgent, replies)
 	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
 	at := w.opts.Now()
-	err := w.send(ctx, agent, msg, key)
+	code, err := w.send(ctx, agent, msg, key)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
 			at = w.opts.Now()
-			err = w.send(ctx, agent, msg, key)
+			code, err = w.send(ctx, agent, msg, key)
 		case <-ctx.Done():
 		}
 	}
@@ -669,7 +669,8 @@ func (w *Waker) fire(agent string) {
 		return
 	}
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK}, true)
-	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
+	// The exact status lets a wake export show what the webhook answered.
+	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", w.cfg[agent].Method, code, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
 	}
@@ -901,14 +902,16 @@ func webhookBody(t Target, msg string) []byte {
 	return body
 }
 
-func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
+// send delivers one nudge and returns the HTTP status the wake endpoint
+// answered with (0 when there was no response).
+func (w *Waker) send(ctx context.Context, agent, msg, key string) (int, error) {
 	t := w.cfg[agent]
 	switch t.Method {
 	case Webhook:
 		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
-			return &sendError{reason: "invalid webhook URL", err: err}
+			return 0, &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
@@ -930,27 +933,27 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {
-			return &sendError{reason: "invalid AgentMail URL", err: err}
+			return 0, &sendError{reason: "invalid AgentMail URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
 		return w.do(req)
 	}
-	return nil
+	return 0, nil
 }
 
-func (w *Waker) do(req *http.Request) error {
+func (w *Waker) do(req *http.Request) (int, error) {
 	resp, err := w.opts.HTTP.Do(req)
 	if err != nil {
-		return &sendError{reason: transportReason(req, err), err: err}
+		return 0, &sendError{reason: transportReason(req, err), err: err}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("%s returned %s", req.URL.Host, resp.Status)
-		return &sendError{reason: msg, err: errors.New(msg)}
+		return resp.StatusCode, &sendError{reason: msg, err: errors.New(msg)}
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // sendError is a failed wake send: err in full for the relay's log, and
