@@ -284,6 +284,7 @@ func TestLoadConfigFallback(t *testing.T) {
 		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"webhook","url":"http://y"},{"method":"webhook"}]}}`, `wake grokbot: fallback 2: webhook needs url`},
 		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"email","email_to":"a@b"}]}}`, `wake grokbot: fallback 1: email needs email_to, agentmail_inbox, agentmail_key`},
 		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"webhook","url":"http://y","fallback":[{"method":"webhook","url":"http://z"}]}]}}`, `wake grokbot: fallback 1: a fallback cannot have its own fallback list`},
+		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"webhook","url":"http://y","fallback":[]}]}}`, `wake grokbot: fallback 1: a fallback cannot have its own fallback list`},
 		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"webhook","url":"http://y","max_per_hour":3}]}}`, `wake grokbot: fallback 1: max_per_hour belongs on the agent`},
 		{`{"grokbot":{"method":"webhook","url":"http://x","fallback":[{"method":"webhook","url":"http://y","format":"openclaw"}]}}`, `wake grokbot: fallback 1: format openclaw needs bearer_token`},
 	} {
@@ -364,7 +365,9 @@ func TestAnswerSummary(t *testing.T) {
 		{"one line", "{\"ok\": true}\r\n\r\n", nil, `{"ok": true}`},
 		{"controls and bidi", "a\x00b\u202ec\x7fd", nil, "a b c d"},
 		{"json-escaped url", `{"u":"https:\/\/h\/hook\/abcd"}`, []string{"https://h/hook/abcd"}, `{"u":"[redacted]"}`},
-		{"short secrets kept", `{"p":"/"}`, []string{"/", ""}, `{"p":"/"}`},
+		{"bare path kept", `{"p":"/"}`, []string{"/", ""}, `{"p":"/"}`},
+		{"short secret withholds the body", `{"echo":"k9x"}`, []string{"k9x"}, "[withheld: may contain a secret]"},
+		{"short secret absent", `{"ok":true}`, []string{"k9x"}, `{"ok":true}`},
 		{"secret at the cut", long, []string{"SECRETTOKEN"}, strings.Repeat("a", 195) + "[reda..."},
 		{"rune boundary", strings.Repeat("a", 199) + "é" + "z", nil, strings.Repeat("a", 199) + "..."},
 		{"invalid utf8", "ok\xff", nil, "ok?"},
@@ -374,5 +377,39 @@ func TestAnswerSummary(t *testing.T) {
 				t.Fatalf("answerSummary = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A request that arrives while a silent agent's follow-up is due rides that
+// follow-up, which moves to the next path, instead of resending the path
+// that did not start the agent.
+func TestFallbackNewRequestKeepsFollowUp(t *testing.T) {
+	var h hits
+	primary, second := h.server(t, "primary"), h.server(t, "fallback1")
+	st := auditStore(t)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	cfg := Config{"grokbot": {Method: Webhook, URL: primary.URL, MaxPerHour: 2, Fallback: []Target{{Method: Webhook, URL: second.URL}}}}
+	w := New(cfg, st, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Millisecond,
+		WakeGrace:  100 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+		Now:        fixedClock(time.Unix(1_790_000_000, 0)),
+	})
+	queued(w, "grokbot", 1)
+	for deadline := time.Now().Add(5 * time.Second); len(h.order()) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("no first wake")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	queuedN.Store(2)
+	queued(w, "grokbot", 1)
+	waitEvent(t, st, "wake_skipped")
+	drainFollowUp(t, w, &queuedN)
+	if got := strings.Join(h.order(), ","); got != "primary,fallback1" {
+		t.Fatalf("sends = %s, want primary,fallback1", got)
 	}
 }

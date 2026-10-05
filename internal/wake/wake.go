@@ -218,7 +218,7 @@ func checkFallback(f Target) error {
 	if f.Method != Webhook && f.Method != Email {
 		return fmt.Errorf("method must be webhook or email, not %q", f.Method)
 	}
-	if len(f.Fallback) > 0 {
+	if f.Fallback != nil {
 		return errors.New("a fallback cannot have its own fallback list")
 	}
 	if f.MaxPerHour != 0 {
@@ -591,8 +591,13 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 	defer w.mu.Unlock()
 	p := w.nudgeFor(agent)
 	p.requests++
-	p.followUp = false
 	p.urgent = p.urgent || urgent
+	if p.followUp && !urgent {
+		// A follow-up is already due for this silent agent and counts what
+		// is queued when it fires, so it carries this request too. Waking
+		// now would resend the path that has not started the agent.
+		return
+	}
 	if urgent {
 		w.arm(agent, 0)
 	} else {
@@ -1086,6 +1091,10 @@ func webhookSecrets(t Target, u *url.URL) []string {
 	return out
 }
 
+// withheldAnswer stands in for a response body that holds a secret too short
+// to redact.
+const withheldAnswer = "[withheld: may contain a secret]"
+
 // answerSummary is a 2xx response body as one short line for the relay log
 // and audit log: each secret (also JSON-escaped) replaced by [redacted],
 // control and format characters turned into spaces, whitespace collapsed,
@@ -1095,9 +1104,18 @@ func answerSummary(raw []byte, secrets []string) string {
 	s := strings.ToValidUTF8(string(raw), "?")
 	var redact []string
 	for _, sec := range secrets {
-		if len(sec) >= 4 {
-			redact = append(redact, sec, strings.ReplaceAll(sec, "/", `\/`))
+		if strings.Trim(sec, "/") == "" {
+			continue // an empty or bare "/" URL path is not a secret
 		}
+		if len(sec) < 4 {
+			// Too short to replace without mangling the text around it, so
+			// a body holding one is not kept at all.
+			if strings.Contains(s, sec) {
+				return withheldAnswer
+			}
+			continue
+		}
+		redact = append(redact, sec, strings.ReplaceAll(sec, "/", `\/`))
 	}
 	// Longest first, so a secret inside a longer one (the path inside the
 	// URL) does not break the longer match.
