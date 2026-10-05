@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS audit (
   hash       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_trace ON audit(trace_id);
+CREATE INDEX IF NOT EXISTS audit_actor_at ON audit(actor, at);
 `
 
 // AuditEvent is one entry in the append-only audit log.
@@ -101,6 +102,19 @@ func (s *Store) AuditEvents(ctx context.Context) ([]AuditEvent, error) {
 // AuditForTrace returns every audit entry for a trace, oldest first.
 func (s *Store) AuditForTrace(ctx context.Context, traceID string) ([]AuditEvent, error) {
 	return s.auditWhere(ctx, "WHERE trace_id = ?", traceID)
+}
+
+// AuditForActor returns actor's audit entries of the given events at or
+// after since, oldest first.
+func (s *Store) AuditForActor(ctx context.Context, actor string, since time.Time, events ...string) ([]AuditEvent, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	args := []any{actor, since.UnixMilli()}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	return s.auditWhere(ctx, "WHERE actor = ? AND at >= ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", args...)
 }
 
 func (s *Store) auditWhere(ctx context.Context, where string, args ...any) ([]AuditEvent, error) {

@@ -730,12 +730,12 @@ func (w *Waker) fire(agent string) {
 		marker = " (" + pathLabel(cfg, step) + ")"
 	}
 	at := w.opts.Now()
-	answer, err := w.send(ctx, t, msg, key)
+	code, answer, err := w.send(ctx, t, msg, key)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
 			at = w.opts.Now()
-			answer, err = w.send(ctx, t, msg, key)
+			code, answer, err = w.send(ctx, t, msg, key)
 		case <-ctx.Done():
 		}
 	}
@@ -749,8 +749,13 @@ func (w *Waker) fire(agent string) {
 		w.followUpLater(agent, p.requests)
 		return
 	}
+	// A poll while the webhook was still answering came before the wake was
+	// stored, so the store wrote no polled row for it. Note it after the
+	// woke row, where a wake export looks for it.
+	polled := w.pollTime(agent)
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK + marker}, true)
-	detail := fmt.Sprintf("%s, %d waiting", pathLabel(cfg, step), p.requests)
+	// The exact status lets a wake export show what the webhook answered.
+	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", pathLabel(cfg, step), code, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
 	}
@@ -762,6 +767,9 @@ func (w *Waker) fire(agent string) {
 	}
 	log.Printf("wake %s: ok, %s", agent, detail)
 	w.record(ctx, "woke", agent, detail)
+	if !polled.Before(at) {
+		w.record(ctx, store.EventPolled, agent, "polled at "+polled.UTC().Format(time.RFC3339Nano)+", while the wake call was still answering")
+	}
 	w.followUpLater(agent, p.requests)
 }
 
@@ -1011,15 +1019,17 @@ func webhookBody(t Target, msg string) []byte {
 	return body
 }
 
-// send posts msg on wake path t. For a webhook it also returns a short,
-// sanitized summary of the 2xx response body (see answerSummary).
-func (w *Waker) send(ctx context.Context, t Target, msg, key string) (string, error) {
+// send posts msg on wake path t and returns the HTTP status the endpoint
+// answered with (0 when there was no response). For a webhook it also
+// returns a short, sanitized summary of the 2xx response body (see
+// answerSummary).
+func (w *Waker) send(ctx context.Context, t Target, msg, key string) (int, string, error) {
 	switch t.Method {
 	case Webhook:
 		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
-			return "", &sendError{reason: "invalid webhook URL", err: err}
+			return 0, "", &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
@@ -1036,11 +1046,11 @@ func (w *Waker) send(ctx context.Context, t Target, msg, key string) (string, er
 			req.Header.Set("X-Hub-Signature-256", "sha256="+sig)
 			secrets = append(secrets, sig)
 		}
-		raw, err := w.do(req)
+		code, raw, err := w.do(req)
 		if err != nil {
-			return "", err
+			return code, "", err
 		}
-		return answerSummary(raw, secrets), nil
+		return code, answerSummary(raw, secrets), nil
 	case Email:
 		// The subject stays fixed for replies too: standing instructions
 		// match on it.
@@ -1048,29 +1058,30 @@ func (w *Waker) send(ctx context.Context, t Target, msg, key string) (string, er
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {
-			return "", &sendError{reason: "invalid AgentMail URL", err: err}
+			return 0, "", &sendError{reason: "invalid AgentMail URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
-		_, err = w.do(req)
-		return "", err
+		code, _, err := w.do(req)
+		return code, "", err
 	}
-	return "", nil
+	return 0, "", nil
 }
 
-// do sends req and returns up to the first 64 KiB of a 2xx response body.
-func (w *Waker) do(req *http.Request) ([]byte, error) {
+// do sends req and returns the status and up to the first 64 KiB of a 2xx
+// response body.
+func (w *Waker) do(req *http.Request) (int, []byte, error) {
 	resp, err := w.opts.HTTP.Do(req)
 	if err != nil {
-		return nil, &sendError{reason: transportReason(req, err), err: err}
+		return 0, nil, &sendError{reason: transportReason(req, err), err: err}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("%s returned %s", req.URL.Host, resp.Status)
-		return nil, &sendError{reason: msg, err: errors.New(msg)}
+		return resp.StatusCode, nil, &sendError{reason: msg, err: errors.New(msg)}
 	}
-	return raw, nil
+	return resp.StatusCode, raw, nil
 }
 
 // maxAnswer bounds the response summary kept from a webhook's 2xx, in bytes.

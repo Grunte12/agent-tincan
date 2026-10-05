@@ -72,11 +72,36 @@ func (s *Store) migrateAgentLastPoll() error {
 	return err
 }
 
+// EventPolled is the audit event for an agent's first poll after a relay
+// wake. A wake export pairs each wake with it.
+const EventPolled = "polled"
+
 // TouchAgentPoll records that name polled the relay at t. It only moves the
-// stored time forward and ignores names not in the directory.
+// stored time forward and ignores names not in the directory. The first poll
+// at or after name's last recorded wake also writes a polled audit row, so
+// each wake gets at most one: the conditional update moves last_poll_at past
+// the wake, and later polls no longer match it.
 func (s *Store) TouchAgentPoll(ctx context.Context, name string, t time.Time) error {
 	ms := t.UnixMilli()
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ? AND (last_poll_at IS NULL OR last_poll_at < ?)`, ms, name, ms)
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ?
+		AND (last_poll_at IS NULL OR last_poll_at < (SELECT woken_at FROM wakes WHERE agent = ?))
+		AND (SELECT woken_at FROM wakes WHERE agent = ?) <= ?`, ms, name, name, name, ms)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		var woken int64
+		if err := s.db.QueryRowContext(ctx, `SELECT woken_at FROM wakes WHERE agent = ?`, name).Scan(&woken); err != nil {
+			return err
+		}
+		detail := "first poll since the wake at " + time.UnixMilli(woken).UTC().Format(time.RFC3339Nano)
+		return s.Audit(ctx, AuditEvent{Event: EventPolled, Actor: name, Detail: detail})
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ? AND (last_poll_at IS NULL OR last_poll_at < ?)`, ms, name, ms)
 	return err
 }
 
@@ -124,6 +149,11 @@ const (
 	NoteStaleClaim = "stale_claim"
 	// NoteExpired: the request expired with no reply.
 	NoteExpired = "expired"
+	// NoteOwnerWake: the owner was told that the target missed several
+	// wakes in a row. It sits on the target's oldest queued request, its
+	// episode is the silent episode's wake time, and the asker never sees
+	// it.
+	NoteOwnerWake = "owner_wake"
 )
 
 // migrateRelayNotes creates the table of notes the relay added to requests
@@ -152,6 +182,23 @@ func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Req
 	return scanRequests(rows)
 }
 
+// OldestQueued returns agent's oldest live queued request of any kind, and
+// whether there is one. The owner's wake notice dedupes on it.
+func (s *Store) OldestQueued(ctx context.Context, agent string) (envelope.Request, bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT 1`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli())
+	if err != nil {
+		return envelope.Request{}, false, err
+	}
+	defer rows.Close()
+	reqs, err := scanRequests(rows)
+	if err != nil || len(reqs) == 0 {
+		return envelope.Request{}, false, err
+	}
+	return reqs[0], true, nil
+}
+
 // AddRelayNote records note on request id for kind and episode, once. It
 // reports false when that note is already there, so a later follow-up, a
 // second sweep, or a restarted relay does not tell the asker again.
@@ -165,12 +212,20 @@ func (s *Store) AddRelayNote(ctx context.Context, id, kind string, episode int64
 	return n == 1, err
 }
 
-// RelayNote is the latest note the relay added to request id, nil when it
-// has none. By is "relay".
+// DeleteRelayNote removes the note AddRelayNote added, so a notice that
+// could not be sent is tried again.
+func (s *Store) DeleteRelayNote(ctx context.Context, id, kind string, episode int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM relay_notes WHERE request_id = ? AND kind = ? AND episode = ?`, id, kind, episode)
+	return err
+}
+
+// RelayNote is the latest note the relay added to request id for its
+// asker, nil when it has none. The owner's wake notes are left out. By is
+// "relay".
 func (s *Store) RelayNote(ctx context.Context, id string) (*envelope.Progress, error) {
 	var note string
 	var ms int64
-	err := s.db.QueryRowContext(ctx, `SELECT note, at FROM relay_notes WHERE request_id = ? ORDER BY at DESC, rowid DESC LIMIT 1`, id).Scan(&note, &ms)
+	err := s.db.QueryRowContext(ctx, `SELECT note, at FROM relay_notes WHERE request_id = ? AND kind != ? ORDER BY at DESC, rowid DESC LIMIT 1`, id, NoteOwnerWake).Scan(&note, &ms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

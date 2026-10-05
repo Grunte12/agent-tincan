@@ -64,7 +64,7 @@ One port serves both SOCKS5 and HTTP. Every `tailscale` command needs `--socket=
 2. Starts tailscaled as above if nothing answers on the socket.
 3. Brings the node up. A node that still has its identity but is stopped comes up without a key. A logged-out node logs in only with `TS_AUTHKEY`, passed to `tailscale up` on stdin (`--auth-key=file:/dev/stdin`), so the key is never written to disk or shown in the process list. It never starts a browser login. It then waits for the node to be running. Settings: `TS_HOSTNAME` (default `grokbot`) and `TS_TAGS` (default `tag:grokbot`, which must match the key).
 4. Checks that `tincan` is installed at `~/.local/bin/tincan` (or `TINCAN`). A missing or non-executable `tincan` is unhealthy.
-5. With `START_RELAY=1`, starts `tincan relay` if no relay is running as this user, and checks that it stayed up. `RELAY_ADMIN` sets its `--admin` list. Read section 5 before using this.
+5. With `START_RELAY=1`, starts `tincan relay` if no relay is running as this user, and checks that it stayed up. The relay always runs as its own tsnet node with its state in `~/.config/tincan-relay`, never with `--listen`, so it keeps its name and address when the box's own Tailscale is lost. `RELAY_ADMIN` sets its `--admin` list. `TS_AUTHKEY` is never passed to the relay. `RELAY_TS_AUTHKEY` is passed to it as its `TS_AUTHKEY` only while `~/.config/tincan-relay/tsnet` holds no identity yet, so the relay's first login uses its own tagged key. Read section 5 before using this.
 6. Runs `tincan doctor`.
 
 | Exit | Meaning | Fix |
@@ -73,6 +73,7 @@ One port serves both SOCKS5 and HTTP. Every `tailscale` command needs `--socket=
 | 1 | something unhealthy, including a missing `tincan` | read the output, run `tincan doctor` |
 | 2 | device waiting for approval | approve it in the admin under Machines; next time make the key with Pre-approved on |
 | 3 | logged out and the auth key is missing, the wrong type, expired, already used or rejected | the owner generates a fresh one-off key as in step 1 and sets the secret, then removes it after the login |
+| 4 | legacy layout: a `tincan relay` started with `--listen`, or a system `tailscaled` with its state in `/var/lib/tailscale`, is running; nothing was started | move the box to this layout (see [Moving an existing box to this layout](#moving-an-existing-box-to-this-layout)) |
 
 After an ordinary wipe, `~/.config/tailscale` comes back, so the script restarts the same device with the same name and IP. It does not use the key, and nothing needs approval.
 
@@ -103,6 +104,9 @@ If you run a relay here anyway (`START_RELAY=1`), know that Grok Bot has owner a
 
 ## 6. Health check
 
+Grok Bot's standing instructions (`tincan onboard --section agents` for a `vm-webhook` agent) run `~/.local/bin/tincan-up.sh` at the start of every turn, before `check_inbox`. A Grok Bot box has no init system that runs anything at boot, so the first turn after a rebuild, whatever starts it, is what brings Tailscale and the relay back. Set `START_RELAY=1` and `RELAY_ADMIN` as Grok Bot environment variables, not in a file: they live on Cursor's side and survive a rebuild.
+
+
 Add a recurring Grok Bot task, hourly for example, that runs the script **on the box itself**, not on one of your other computers:
 
 ```bash
@@ -121,6 +125,29 @@ tincan join <code> --replace --relay http://tincan-relay --proxy http://localhos
 ```
 
 With the state in the home folder this should be rare. An ordinary wipe needs no re-link.
+
+## Moving an existing box to this layout
+
+A box set up some other way (system Tailscale with its state in `/var/lib/tailscale`, a relay started with `--listen`, a hand-written keep-alive loop) loses its node and its relay on the next rebuild, and `tincan-up.sh` exits 4 while that setup is running. Move it once, with the owner present:
+
+1. Install the release's `tincan-up.sh` into `~/.local/bin` and reload the standing instructions with `tincan onboard --section agents`. Set `START_RELAY=1` and `RELAY_ADMIN=<the owner's untagged laptop>` as Grok Bot environment variables.
+2. The owner creates two one-off, pre-approved, non-ephemeral keys: one tagged `tag:grokbot`, set as `TS_AUTHKEY`, and one tagged with a relay-only tag such as `tag:tincan-relay` (owned by `autogroup:admin`), set as `RELAY_TS_AUTHKEY`. If the tailnet policy limits agents to the relay's IP, change those rules to the relay's tag now.
+3. Stop the `--listen` relay, its keep-alive loops and the system `tailscaled`. The team is down from here until step 4 finishes.
+4. Run `tincan-up.sh`. It brings up the box's node in `~/.config/tailscale` and starts the relay as its own tagged tsnet node with the existing state dir. Remove both keys from Grok Bot's secrets afterwards.
+5. The box's node is new and tagged, so the relay never re-admits it on its own (see [the trust model](../trust-model.md#rebuilt-machines)). Re-link Grok Bot once: `tincan invite grokbot --socket ~/.config/tincan-relay/admin.sock`, then `tincan join <code> --replace --relay http://tincan-relay --proxy http://localhost:1055`. Other agents find the relay through its advertised addresses and the tailnet netmap.
+6. When `tincan agents` lists grokbot and the other online agents, delete the old system-Tailscale devices in the Tailscale admin.
+7. Drill: click "Update Grok Bot's Computer", then send Grok Bot one message. Its first turn must log `started tincan relay`, every agent must reconnect, an admin command such as `tincan held` must work from the owner's laptop, and no new Tailscale device may appear.
+
+## Know when the relay is down
+
+A relay that is down cannot send its own outage notice, so watch it from another always-on machine. `tincan relay-watch` probes the relay every `--every` (default 1m) with a joined client config's relay discovery, so a relay that moved still counts as up. After `--after` (default 10m) with no answer it runs `--alert-cmd` once, and once more when the relay answers again. The command gets `TINCAN_WATCH_MESSAGE`, `TINCAN_WATCH_EVENT` (`down` or `up`), `TINCAN_WATCH_RELAY` and `TINCAN_WATCH_SINCE`. [`examples/watch/imessage-alert.sh`](../../examples/watch/imessage-alert.sh) sends the message by iMessage to `TINCAN_ALERT_TO`. To run it as a service on a Mac that stays on:
+
+```bash
+tincan relay-watch install --config <a joined client config on that machine> \
+  --alert-cmd 'TINCAN_ALERT_TO=you@example.com /path/to/imessage-alert.sh'
+```
+
+It writes a launchd agent (a systemd user unit on Linux) and prints the command that starts it. After a rebuild the alert is the cue to send Grok Bot a message, which runs `tincan-up.sh` and brings the relay back.
 
 ## Relay rediscovery and the custom socket
 
@@ -144,6 +171,8 @@ The relay posts `{"source":"agent-tincan","message":"Agent Tincan: 2 requests fr
 
 If `tincan agents` shows grokbot with `unanswered="woken 12m ago, no check-in (webhook ok)"`, the relay's webhook reached the Grok Bot app but no session ran, so Grok Bot never polled. The relay wakes it again on `--wake-grace` until grokbot polls, the queue is empty, or `max_per_hour` is spent; a later 2xx does not move the unanswered time. Without a fallback (below) that is the same webhook each time. The requests stay queued until a session runs. A failed send shows the error in place of `ok`; for a 401 or 403, check `bearer_token` in `wake.json`.
 
+After `--owner-notice-after` (default 3) unanswered wakes in a row, the relay also tells the owner once per silent episode, through the approval policy's `notify` destination (`<agent> has not checked in after <N> wakes in a row since <time> ...`). Name an agent there that the owner reads, not Grok Bot itself. `tincan wakes grokbot --since 2h` on an admin device lists each wake with its HTTP status, the webhook's reply when the relay recorded one, and the first poll after it.
+
 ## When the webhook says OK but nothing runs
 
 The webhook only enqueues a run of the "Tincan wake" routine. Grok Bot answers 2xx as soon as the run is queued, before it starts. If the run itself then fails inside Grok Bot, every wake is `webhook ok` and the agent never starts. This has happened: routine runs failed with "Activity task failed" and "The background task was interrupted before it finished", after notices that "A background task was stopped after 50 minutes so it would not hang". Posting the same webhook again cannot fix that.
@@ -151,8 +180,10 @@ The webhook only enqueues a run of the "Tincan wake" routine. Grok Bot answers 2
 To check:
 
 1. Open the "Tincan wake" routine in the Grok Bot app and look at the status of its recent runs. Failed runs show as "Activity task failed".
-2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted, so an error the platform still answered 2xx to shows there.
+2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, HTTP 200, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted, so an error the platform still answered 2xx to shows there.
 3. In Grok Bot's settings, "Update Grok Bot's Computer" has unstuck the routine before. Run a test ask afterwards and check that grokbot polls.
+
+"Activity task failed" with no other detail is also what the app shows when the Cursor account has hit its on-demand spend limit: the webhook still returns 200, the routine never runs. Check the account's spending page before treating it as a broken routine.
 
 Give grokbot a second path so a dead routine does not strand its requests. A `fallback` list in `wake.json` holds further webhook or email targets, each with the same fields as the primary. The first wake goes to the primary. Each follow-up after a silent `--wake-grace` goes to the next path, and after the last it cycles back to the primary. A poll starts the next episode on the primary again. All paths share `max_per_hour`. For example, with an AgentMail inbox whose listener can wake the bot:
 
