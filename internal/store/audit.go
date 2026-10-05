@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS audit (
   hash       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_trace ON audit(trace_id);
+CREATE INDEX IF NOT EXISTS audit_actor_at ON audit(actor, at);
 `
 
 // AuditEvent is one entry in the append-only audit log.

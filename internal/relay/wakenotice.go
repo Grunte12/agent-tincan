@@ -132,15 +132,13 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 		return
 	}
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"owner_wake_notice_for": agent, "to": to}))
-	s.ownerNoticeQueued(ctx, n)
+	s.noticeQueued(ctx, n)
 }
 
 // ownerWakeNote is the text the owner gets when agent has left that many
 // wakes unanswered in a row. It names the wake method only, and the
 // stored result, which never carries a URL, token or key.
 func (s *Server) ownerWakeNote(agent string, wk store.Wake, wakes int, now time.Time) string {
-	// When the stored wake carries the webhook's reply summary, it goes
-	// after the result here.
 	return fmt.Sprintf("%s has not checked in after %d wakes in a row since %s (wake path: %s; last wake result: %s). Its requests are still queued. Run tincan wakes %s for its wake history. No reply needed.",
 		agent, wakes, utcClock(wk.At, now), s.wake.WakeMethod(agent), wk.Result, agent)
 }
@@ -292,10 +290,7 @@ func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note str
 		return
 	}
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"wake_notice_for": req.ID, "to": n.To}))
-	s.hub.notify(inboxKey(n.To))
-	if s.events != nil {
-		s.events.Queued(ctx, n)
-	}
+	s.noticeQueued(ctx, n)
 }
 
 // utcClock is t as "16:40 UTC", with the date when it is not now's day:

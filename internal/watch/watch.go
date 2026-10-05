@@ -147,7 +147,11 @@ func span(d time.Duration) string {
 	if d < time.Minute {
 		return "under a minute"
 	}
-	return strings.TrimSuffix(d.String(), "0s")
+	s := strings.TrimSuffix(d.String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m") // a whole hour reads "1h", not "1h0m"
+	}
+	return s
 }
 
 // alertTimeout bounds one run of the alert command, so a command that

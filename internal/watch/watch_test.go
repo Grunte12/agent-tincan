@@ -353,3 +353,17 @@ func TestInstallServiceRefusesWhatItCannotWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestSpanReadsWholeHoursPlainly(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		20 * time.Second:             "under a minute",
+		10 * time.Minute:             "10m",
+		time.Hour:                    "1h",
+		2*time.Hour + 5*time.Minute:  "2h5m",
+		2*time.Hour + 10*time.Minute: "2h10m",
+	} {
+		if got := span(d); got != want {
+			t.Errorf("span(%v) = %q, want %q", d, got, want)
+		}
+	}
+}

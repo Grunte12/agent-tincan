@@ -68,9 +68,9 @@ func (s *Server) notifyDestination() string {
 	return notifier.NotifyDestination()
 }
 
-// ownerNoticeQueued wakes the owner's agent for req, a notice the relay
-// just queued for it.
-func (s *Server) ownerNoticeQueued(ctx context.Context, req envelope.Request) {
+// noticeQueued wakes the recipient of req, a notice the relay just
+// queued for it.
+func (s *Server) noticeQueued(ctx context.Context, req envelope.Request) {
 	s.hub.notify(inboxKey(req.To))
 	if s.events != nil {
 		s.events.Queued(ctx, req)
@@ -110,6 +110,6 @@ func (s *Server) notifyWebStatus(ctx context.Context) {
 			continue
 		}
 		s.record(ctx, "web_status_notified", req.ID, req.TraceID, "relay", "")
-		s.ownerNoticeQueued(ctx, req)
+		s.noticeQueued(ctx, req)
 	}
 }

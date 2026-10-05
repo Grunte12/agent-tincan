@@ -1985,8 +1985,10 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := ""
-	if s.wake != nil && relayWoken(s.wake.WakeMethod(agent)) {
-		path = s.wake.WakeMethod(agent)
+	if s.wake != nil {
+		if m := s.wake.WakeMethod(agent); relayWoken(m) {
+			path = m
+		}
 	}
 	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}}
 	for i, e := range rows {
@@ -2037,7 +2039,7 @@ func wakeEntry(e store.AuditEvent, path string) WakeEntry {
 		}
 		entry.Status = "2xx" // a woke row is only written for a 2xx answer
 		for j, part := range strings.Split(head, ", ") {
-			if j == 0 && (part == "webhook" || part == "email") {
+			if j == 0 && relayWoken(part) {
 				entry.Path = part
 			}
 			if code, ok := strings.CutPrefix(part, "HTTP "); ok {
