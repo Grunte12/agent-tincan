@@ -5,6 +5,7 @@
 # See docs/adapters/grokbot.md.
 # Exit codes: 0 healthy | 1 unhealthy | 2 device needs approval in the Tailscale admin
 #             3 auth key missing, wrong type, expired, used or rejected
+#             4 legacy layout: a relay with --listen or a system tailscaled is running
 set -euo pipefail
 
 TS_HOSTNAME="${TS_HOSTNAME:-grokbot}"        # the machine name the relay knows
@@ -13,6 +14,7 @@ TS_VERSION="${TS_VERSION:-}"                 # pin a version, or empty for lates
 PROXY_ADDR="${PROXY_ADDR:-localhost:1055}"   # SOCKS5 + HTTP proxy into the tailnet
 START_RELAY="${START_RELAY:-0}"              # 1 if this host also runs `tincan relay` (see the doc first)
 RELAY_ADMIN="${RELAY_ADMIN:-}"               # --admin list for that relay, e.g. my-laptop
+# RELAY_TS_AUTHKEY: the relay's own one-off auth key, used only while the relay has no saved identity
 
 LIB="$HOME/.local/lib/tailscale"             # real binaries
 BIN="$HOME/.local/bin"                       # wrapper `tailscale` (on PATH)
@@ -27,6 +29,23 @@ chmod 700 "$STATEDIR" "$CACHE"
 
 exec 9>"$CACHE/tincan-up.lock"
 if command -v flock >/dev/null && ! flock -n 9; then echo "already running"; exit 0; fi
+
+# 0. Refuse to run next to the old layout: a relay bound to the system Tailscale with --listen, or
+#    a system tailscaled keeping its state in /var/lib/tailscale (its default). Starting a second
+#    tailscaled or relay beside them would fight over the node and the relay's database.
+legacy=$(ps -eo args= 2>/dev/null | awk '
+  { n = split($1, p, "/"); b = p[n] }
+  b == "tincan" && $2 == "relay" {
+    for (i = 3; i <= NF; i++) if ($i ~ /^--?listen(=|$)/) { print "a tincan relay started with --listen"; exit }
+  }
+  b == "tailscaled" {
+    s = 0; for (i = 2; i <= NF; i++) if ($i ~ /^--?(state|statedir)(=|$)/) s = 1
+    if (!s || index($0, "/var/lib/tailscale")) { print "a system tailscaled with its state in /var/lib/tailscale"; exit }
+  }' || true)
+if [ -n "$legacy" ]; then
+  echo "legacy layout: $legacy is running. Stop it and move this box to the layout in docs/adapters/grokbot.md; nothing was started"
+  exit 4
+fi
 
 tsc() { "$LIB/tailscale" --socket="$SOCK" "$@"; }
 backend() { { tsc status --json 2>/dev/null || true; } | sed -n 's/.*"BackendState": *"\([^"]*\)".*/\1/p' | head -n1; }
@@ -79,7 +98,7 @@ chmod 755 "$BIN/tailscale.new" && mv -f "$BIN/tailscale.new" "$BIN/tailscale"
 if [ "$restart_daemon" = 1 ] || ! tsc status --json >/dev/null 2>&1; then
   if pkill -u "$(id -u)" -f "tailscaled .*--socket=$SOCK" 2>/dev/null; then sleep 2; fi
   rm -f "$SOCK"
-  ( exec 9>&-; cd "$HOME" && env -u TS_AUTHKEY nohup "$LIB/tailscaled" \
+  ( exec 9>&-; cd "$HOME" && env -u TS_AUTHKEY -u RELAY_TS_AUTHKEY nohup "$LIB/tailscaled" \
       --tun=userspace-networking --statedir="$STATEDIR" --socket="$SOCK" \
       --socks5-server="$PROXY_ADDR" --outbound-http-proxy-listen="$PROXY_ADDR" \
       >>"$LOG" 2>&1 </dev/null & )
@@ -132,8 +151,10 @@ if [ ! -x "$TINCAN" ]; then
   echo "tincan not found or not executable at $TINCAN: install it (or set TINCAN to its path)"; exit 1
 fi
 
-# 5. Optional: the relay, if this host runs it. TS_AUTHKEY is stripped so a lost relay
-#    state never silently registers the relay as a new node with this host's tag.
+# 5. Optional: the relay, if this host runs it, as its own tailnet node (tsnet, never --listen)
+#    with its identity in the home folder. TS_AUTHKEY is stripped so a lost relay state never
+#    silently registers the relay as a new node with this host's tag. RELAY_TS_AUTHKEY is handed
+#    to the relay as its TS_AUTHKEY only while it has no saved identity, for its first login.
 #    The relay this script starts is tracked by its PID, so a TINCAN with another file name is
 #    still recognized; a relay started by hand as `tincan relay` is recognized by name.
 RELAY_STATE="$HOME/.config/tincan-relay"
@@ -152,9 +173,14 @@ relay_running() {
 if [ "$START_RELAY" = 1 ] && ! relay_running; then
   relay_args=(relay --state-dir "$RELAY_STATE")
   [ -n "$RELAY_ADMIN" ] && relay_args+=(--admin "$RELAY_ADMIN")
+  relay_key=$(printf '%s' "${RELAY_TS_AUTHKEY:-}" | tr -d '[:space:]')
+  [ -s "$RELAY_STATE/tsnet/tailscaled.state" ] && relay_key=""
   rm -f "$RELAY_PID"
+  # The key goes to the relay in its environment, never on a command line.
   ( exec 9>&-; cd "$HOME" || exit 1
-    env -u TS_AUTHKEY nohup "$TINCAN" "${relay_args[@]}" \
+    unset TS_AUTHKEY RELAY_TS_AUTHKEY
+    if [ -n "$relay_key" ]; then export TS_AUTHKEY="$relay_key"; fi
+    nohup "$TINCAN" "${relay_args[@]}" \
       >>"$HOME/.cache/tincan-relay.log" 2>&1 </dev/null &
     echo "$!" > "$RELAY_PID" )
   started=0
@@ -163,9 +189,13 @@ if [ "$START_RELAY" = 1 ] && ! relay_running; then
   if [ "$started" = 1 ]; then sleep 3; relay_running || started=0; fi
   if [ "$started" = 1 ]; then
     echo "started tincan relay"
+    if [ -n "$relay_key" ]; then
+      echo "started the relay with RELAY_TS_AUTHKEY: once it is on the tailnet, remove the key from the secrets; its identity is saved in $RELAY_STATE/tsnet"
+    fi
   else
     echo "tincan relay did not start; see $HOME/.cache/tincan-relay.log"; [ "$rc" -eq 0 ] && rc=1
   fi
+  unset relay_key
 fi
 
 # 6. Tincan client check.
