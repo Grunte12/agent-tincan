@@ -168,8 +168,8 @@ func (s *Server) noticeGrace(urgent bool) time.Duration {
 // wakeNote is the text an asker gets about agent's silence.
 func (s *Server) wakeNote(agent string, wk store.Wake, online []string, now time.Time) string {
 	method := s.wake.WakeMethod(agent)
-	result := method + " " + wk.Result // "webhook ok", or with a fallback marker
-	if !envelope.WakeAccepted(wk.Result) {
+	result := method + " ok"
+	if wk.Result != envelope.WakeOK {
 		result = method + " failed: " + wk.Result
 	}
 	note := fmt.Sprintf("%s was woken at %s and has not checked in (%s). The request is still queued.", agent, utcClock(wk.At, now), result)

@@ -112,20 +112,6 @@ func TestRosterFailedWakeUnansweredAtOnce(t *testing.T) {
 	}
 }
 
-// A 2xx on a fallback path counts as a sent wake: unanswered only after the
-// grace, like a primary ok.
-func TestRosterFallbackOKWaitsOutGrace(t *testing.T) {
-	h, clk, fw := wakeHarness(t)
-	fw.set("grokbot", store.Wake{At: clk.Now(), Result: "ok (fallback 1: email)"})
-	if g := agentInfo(t, h, macAddr, "grokbot"); g.Unanswered || g.WakeResult != "ok (fallback 1: email)" {
-		t.Fatalf("fallback ok just sent: %+v", g)
-	}
-	clk.advance(DefaultWakeGrace + time.Minute)
-	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {
-		t.Fatalf("fallback ok past the grace: %+v", g)
-	}
-}
-
 // AE5: an agent the relay does not wake never carries the wake fields, even
 // with a stale record from an earlier webhook config.
 func TestRosterAgentSideMethodsHaveNoWakeFields(t *testing.T) {

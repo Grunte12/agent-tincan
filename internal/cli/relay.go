@@ -75,8 +75,7 @@ is also woken when a reply to its own request is still unread after
 --reply-grace. A webhook or email agent that has not checked in by
 --wake-grace after a wake shows as unanswered in tincan agents and top, and
 is woken again every --wake-grace (--urgent-wake-grace while an urgent request
-to it is queued), on the next of its wake.json fallback paths when it has
-any. When a request has waited through such a silent grace, its
+to it is queued). When a request has waited through such a silent grace, its
 asker is told once, with the teammates online now. A claim on an urgent
 request lasts --urgent-claim-lease (each progress note renews it); when it
 runs out with no reply the request is requeued, the agent woken again and
