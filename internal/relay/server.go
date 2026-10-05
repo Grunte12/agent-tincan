@@ -33,10 +33,14 @@ type Config struct {
 	PollHold        time.Duration // max time a long-poll is held
 	DeliveryLease   time.Duration // how long a delivered request waits for a claim
 	ClaimLease      time.Duration // how long a claim lasts before the request is requeued
-	MaxWait         time.Duration // cap on get-reply waits
-	SweepEvery      time.Duration
-	Now             func() time.Time
-	Attachments     AttachmentConfig
+	// UrgentClaimLease replaces ClaimLease for an urgent request, when
+	// shorter, at claim and at each progress note; default
+	// DefaultUrgentClaimLease.
+	UrgentClaimLease time.Duration
+	MaxWait          time.Duration // cap on get-reply waits
+	SweepEvery       time.Duration
+	Now              func() time.Time
+	Attachments      AttachmentConfig
 	// Version is this relay's tincan build, reported to agents in the
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
@@ -44,6 +48,10 @@ type Config struct {
 	// after a wake before it shows as unanswered and the waker sends the
 	// same webhook or email again; default DefaultWakeGrace.
 	WakeGrace time.Duration
+	// UrgentWakeGrace is the shorter grace the waker uses while an urgent
+	// request is queued, and how long an urgent request waits in silence
+	// before its asker is told; default DefaultUrgentWakeGrace.
+	UrgentWakeGrace time.Duration
 }
 
 func (c *Config) defaults() {
@@ -62,6 +70,9 @@ func (c *Config) defaults() {
 	if c.ClaimLease == 0 {
 		c.ClaimLease = 30 * time.Minute
 	}
+	if c.UrgentClaimLease == 0 {
+		c.UrgentClaimLease = DefaultUrgentClaimLease
+	}
 	if c.MaxWait == 0 {
 		c.MaxWait = client.DefaultPollHold
 	}
@@ -74,7 +85,21 @@ func (c *Config) defaults() {
 	if c.WakeGrace == 0 {
 		c.WakeGrace = DefaultWakeGrace
 	}
+	if c.UrgentWakeGrace == 0 {
+		c.UrgentWakeGrace = DefaultUrgentWakeGrace
+	}
 	c.Attachments.defaults()
+}
+
+// DefaultUrgentClaimLease is how long a claim on an urgent request lasts
+// without a reply or progress note before the request is requeued (and its
+// target woken again).
+const DefaultUrgentClaimLease = 10 * time.Minute
+
+// urgentLease is the claim lease for an urgent request: UrgentClaimLease,
+// or ClaimLease when that is shorter.
+func (c Config) urgentLease() time.Duration {
+	return min(c.UrgentClaimLease, c.ClaimLease)
 }
 
 // Preparer fills in a new request's chain fields and applies policy. The
@@ -289,7 +314,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
 	mux.HandleFunc("POST "+uploadPath, s.handleUpload)
 	s.adminRoutes(mux)
-	return limitBodies(mux)
+	return s.withHeld(limitBodies(mux))
 }
 
 // adminRoutes registers the routes served on both the tailnet API (for admin
@@ -382,6 +407,7 @@ func (s *Server) Sweep(ctx context.Context) {
 		}
 		s.record(ctx, event, t.ID, t.TraceID, "relay", "")
 		s.hub.notify(requestKey(t.ID))
+		s.tellSwept(ctx, t)
 		if t.Status == envelope.StatusQueued {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
@@ -429,6 +455,7 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 		}))
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
+	markHeld(r, res.Name)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/poll" {
 		supported := false
 		for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
@@ -903,7 +930,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
-	req, err := s.store.Claim(r.Context(), r.PathValue("id"), name, s.cfg.ClaimLease)
+	req, err := s.store.ClaimLeases(r.Context(), r.PathValue("id"), name, s.cfg.ClaimLease, s.cfg.urgentLease())
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
@@ -939,7 +966,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.store.SetProgress(r.Context(), id, name, in.Note, s.cfg.ClaimLease); err != nil {
+	if err := s.store.SetProgressLeases(r.Context(), id, name, in.Note, s.cfg.ClaimLease, s.cfg.urgentLease()); err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
@@ -1087,6 +1114,10 @@ type WakeResumer interface {
 // shows it as unanswered and the waker sends the same path again.
 const DefaultWakeGrace = 10 * time.Minute
 
+// DefaultUrgentWakeGrace is the wake grace while an urgent request to the
+// agent is queued.
+const DefaultUrgentWakeGrace = 2 * time.Minute
+
 // relayWoken reports whether the relay itself wakes agents on method.
 func relayWoken(method string) bool { return method == "webhook" || method == "email" }
 
@@ -1190,7 +1221,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}
@@ -1441,6 +1472,20 @@ func (s *Server) QueuedCount(agent string) int {
 	n, err := s.store.CountQueued(ctx, agent)
 	if err != nil {
 		log.Printf("queued requests for %s: %v", agent, err)
+		return 1
+	}
+	return n
+}
+
+// UrgentQueuedCount returns how many of agent's queued requests are urgent.
+// The waker asks it to pick the grace for a request follow-up. A failed
+// count reports one, since a spare nudge costs less than a late urgent one.
+func (s *Server) UrgentQueuedCount(agent string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := s.store.CountUrgentQueued(ctx, agent)
+	if err != nil {
+		log.Printf("urgent queued requests for %s: %v", agent, err)
 		return 1
 	}
 	return n

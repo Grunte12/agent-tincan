@@ -241,6 +241,15 @@ func removeCmd() *cobra.Command {
 	return cmd
 }
 
+// printHeld writes the held-work line to stderr when the relay's last
+// response said this agent holds claimed asks it has not replied to.
+func printHeld(cmd *cobra.Command, r *client.Relay) {
+	held, _ := r.Held()
+	if n := client.FormatHeld(held, time.Now()); n != "" {
+		fmt.Fprint(cmd.ErrOrStderr(), n)
+	}
+}
+
 func relayFor(override string) (*client.Relay, client.Config, error) {
 	if override == "" {
 		return connect()
@@ -276,6 +285,7 @@ names one elsewhere).`,
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			ro, err := r.Roster(cmd.Context())
 			if err != nil {
 				return err
@@ -347,6 +357,7 @@ func askCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			body := strings.Join(args[1:], " ")
 			targets, err := client.NormalizeTargets(strings.Split(args[0], ","), "")
 			if err != nil {
@@ -429,6 +440,7 @@ func getCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 
 			if strings.HasPrefix(args[0], "group-") {
 				g, err := r.GetGroup(cmd.Context(), args[0], client.ClampWait(wait))
@@ -468,6 +480,7 @@ func inboxCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			if asJSON {
 				return checkInboxJSON(cmd.Context(), r, client.ClampWait(wait), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
@@ -635,6 +648,7 @@ func progressCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			if err := r.Progress(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
 				return err
 			}
@@ -663,6 +677,7 @@ func replyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			ups, err := r.UploadFiles(cmd.Context(), attach)
 			if err != nil {
 				return err
@@ -692,6 +707,7 @@ func answerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			if _, err := r.Answer(cmd.Context(), args[0], strings.Join(args[1:], " ")); err != nil {
 				return err
 			}
@@ -711,6 +727,7 @@ func cancelCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			if err := r.Cancel(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -739,6 +756,7 @@ flaky tailnet path does not end the wait.`,
 			if err != nil {
 				return err
 			}
+			defer printHeld(cmd, r)
 			ctx := cmd.Context()
 			if limit > 0 {
 				var cancel context.CancelFunc
