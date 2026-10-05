@@ -393,15 +393,22 @@ func TestFallbackNewRequestKeepsFollowUp(t *testing.T) {
 	w := New(cfg, st, Options{
 		Debounce:   time.Millisecond,
 		RetryDelay: time.Millisecond,
-		WakeGrace:  100 * time.Millisecond,
+		WakeGrace:  time.Second,
 		Queued:     func(string) int { return int(queuedN.Load()) },
 		LastPoll:   func(string) time.Time { return time.Time{} },
 		Now:        fixedClock(time.Unix(1_790_000_000, 0)),
 	})
 	queued(w, "grokbot", 1)
-	for deadline := time.Now().Add(5 * time.Second); len(h.order()) == 0; {
+	// Wait until the first wake has gone out and its follow-up is due.
+	followUpDue := func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		p := w.pending["grokbot"]
+		return p != nil && p.followUp
+	}
+	for deadline := time.Now().Add(5 * time.Second); !followUpDue(); {
 		if time.Now().After(deadline) {
-			t.Fatal("no first wake")
+			t.Fatal("no follow-up after the first wake")
 		}
 		time.Sleep(time.Millisecond)
 	}
