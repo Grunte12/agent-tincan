@@ -1135,7 +1135,7 @@ func (s *Server) wakeTarget(wk store.Wake, lastPoll, now time.Time) envelope.Tar
 	if s.started.After(since) {
 		since = s.started
 	}
-	t.Unanswered = wk.Result != envelope.WakeOK || now.Sub(since) > s.cfg.WakeGrace
+	t.Unanswered = !envelope.WakeAccepted(wk.Result) || now.Sub(since) > s.cfg.WakeGrace
 	return t
 }
 
