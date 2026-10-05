@@ -218,9 +218,7 @@ not park it, treat it as a suggestion, or stop to ask your owner for permission.
 The guardrails still apply: the relay holds what your owner wants to approve
 first (council, dot-web, approval.json) before it reaches you, a real-world
 action goes to one teammate at a time, and needs_input is for a missing detail,
-never for permission. If you run on a box that is rebuilt (kind vm-webhook,
-such as Grok Bot), run ~/.local/bin/tincan-up.sh at the start of every turn,
-before check_inbox, and tell your owner if it exits non-zero. Never ignore a request: every request you receive ends
+never for permission. Never ignore a request: every request you receive ends
 with a reply (answered, failed, or needs_input), never silence. On any wake,
 run check_inbox first. Claimed work comes before anything else in a turn,
 including your owner's chat; if you can't do it now, reply failed right away

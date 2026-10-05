@@ -58,27 +58,12 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// notifyDestination is the approval policy's notify destination, the
-// owner's agent for relay notices, or "" when none is configured.
-func (s *Server) notifyDestination() string {
+func (s *Server) notifyWebStatus(ctx context.Context) {
 	notifier, ok := s.preparer().(interface{ NotifyDestination() string })
 	if !ok {
-		return ""
+		return
 	}
-	return notifier.NotifyDestination()
-}
-
-// noticeQueued wakes the recipient of req, a notice the relay just
-// queued for it.
-func (s *Server) noticeQueued(ctx context.Context, req envelope.Request) {
-	s.hub.notify(inboxKey(req.To))
-	if s.events != nil {
-		s.events.Queued(ctx, req)
-	}
-}
-
-func (s *Server) notifyWebStatus(ctx context.Context) {
-	to := s.notifyDestination()
+	to := notifier.NotifyDestination()
 	if to == "" {
 		return
 	}
@@ -109,7 +94,10 @@ func (s *Server) notifyWebStatus(ctx context.Context) {
 		if req.ID == "" {
 			continue
 		}
+		s.hub.notify(inboxKey(to))
 		s.record(ctx, "web_status_notified", req.ID, req.TraceID, "relay", "")
-		s.noticeQueued(ctx, req)
+		if s.events != nil {
+			s.events.Queued(ctx, req)
+		}
 	}
 }

@@ -119,25 +119,3 @@ func TestRelayUrgentClaimLeaseFlag(t *testing.T) {
 		t.Fatalf("zero --urgent-claim-lease: %v", err)
 	}
 }
-
-// --owner-notice-after defaults to 3, reaches the relay config, and must be
-// at least 1.
-func TestRelayOwnerNoticeAfterFlag(t *testing.T) {
-	cmd := relayCmd()
-	if err := cmd.Flags().Parse(nil); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := cmd.Flags().GetInt("owner-notice-after"); err != nil || n != 3 {
-		t.Fatalf("default --owner-notice-after = %v %v, want 3", n, err)
-	}
-	if got := (relayFlags{ownerNotice: 5}).relayConfig().OwnerNoticeAfter; got != 5 {
-		t.Fatalf("relay config owner notice after = %v, want 5", got)
-	}
-	bad := relayCmd()
-	if err := bad.Flags().Parse([]string{"--owner-notice-after", "0"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := bad.RunE(bad, nil); err == nil || !strings.Contains(err.Error(), "--owner-notice-after") {
-		t.Fatalf("zero --owner-notice-after: %v", err)
-	}
-}

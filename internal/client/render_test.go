@@ -263,10 +263,6 @@ func TestUnansweredField(t *testing.T) {
 			`unanswered="woken 12m ago, no check-in (webhook ok)"`},
 		{"failed", client.AgentInfo{Wake: "email", Target: envelope.Target{WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway", Unanswered: true}},
 			`unanswered="woken just now, no check-in (email failed: api.agentmail.to returned 502 Bad Gateway)"`},
-		{"fallback ok", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok (fallback 1: email)", Unanswered: true}},
-			`unanswered="woken 12m ago, no check-in (webhook ok (fallback 1: email))"`},
-		{"fallback failed", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway (fallback 1: email)", Unanswered: true}},
-			`unanswered="woken just now, no check-in (webhook failed: api.agentmail.to returned 502 Bad Gateway (fallback 1: email))"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.info.UnansweredField(now); got != tc.want {

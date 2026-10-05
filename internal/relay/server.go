@@ -52,11 +52,6 @@ type Config struct {
 	// request is queued, and how long an urgent request waits in silence
 	// before its asker is told; default DefaultUrgentWakeGrace.
 	UrgentWakeGrace time.Duration
-	// OwnerNoticeAfter is how many wakes in a row a relay-woken agent may
-	// leave unanswered before the owner is told, once per silent episode,
-	// through the approval policy's notify destination; default
-	// DefaultOwnerNoticeAfter.
-	OwnerNoticeAfter int
 }
 
 func (c *Config) defaults() {
@@ -92,9 +87,6 @@ func (c *Config) defaults() {
 	}
 	if c.UrgentWakeGrace == 0 {
 		c.UrgentWakeGrace = DefaultUrgentWakeGrace
-	}
-	if c.OwnerNoticeAfter == 0 {
-		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
 	}
 	c.Attachments.defaults()
 }
@@ -186,9 +178,6 @@ type Server struct {
 	// upgraded CLI) do not write to the store on every alternating call.
 	storedVersion  map[string]string
 	versionWritten map[string]time.Time
-	// silent counts each relay-woken agent's unanswered wakes in its
-	// current silent episode, for the owner's wake notice.
-	silent map[string]silentEpisode
 
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
@@ -217,7 +206,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now()}
+		versionWritten: map[string]time.Time{}, stopping: make(chan struct{}), started: cfg.Now()}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -344,7 +333,6 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
-	mux.HandleFunc("GET /v1/admin/wakes/{agent}", s.handleWakes)
 	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
@@ -1147,7 +1135,7 @@ func (s *Server) wakeTarget(wk store.Wake, lastPoll, now time.Time) envelope.Tar
 	if s.started.After(since) {
 		since = s.started
 	}
-	t.Unanswered = !envelope.WakeAccepted(wk.Result) || now.Sub(since) > s.cfg.WakeGrace
+	t.Unanswered = wk.Result != envelope.WakeOK || now.Sub(since) > s.cfg.WakeGrace
 	return t
 }
 
@@ -1922,142 +1910,4 @@ func (s *Server) handleGroup(w http.ResponseWriter, r *http.Request) {
 		members = append(members, envelope.GroupMember{ID: req.ID, To: req.To})
 	}
 	writeJSON(w, http.StatusOK, members)
-}
-
-// WakeExport is an agent's wake history for a window, as GET
-// /v1/admin/wakes/{agent} returns it. It never carries a wake URL, token or
-// key: only what the audit rows already hold.
-type WakeExport struct {
-	Agent string      `json:"agent"`
-	Since time.Time   `json:"since"`
-	Until time.Time   `json:"until"`
-	Wakes []WakeEntry `json:"wakes"`
-}
-
-// WakeEntry is one wake the relay sent, failed to send, or skipped.
-type WakeEntry struct {
-	At    time.Time `json:"at"`
-	Event string    `json:"event"`          // woke, wake_failed or wake_skipped
-	Path  string    `json:"path,omitempty"` // webhook or email
-	// Status is the HTTP status the wake endpoint answered: exact when the
-	// relay recorded it, "2xx" for an older woke row, empty when unknown.
-	Status string `json:"status,omitempty"`
-	// Reply is the endpoint's reply summary for a woke row, or
-	// ReplyNotRecorded when the row has none.
-	Reply string `json:"reply,omitempty"`
-	Error string `json:"error,omitempty"` // why a wake failed or was skipped
-	// NextPoll is when the agent next polled, before the relay's next wake.
-	// For an older woke row, written before polls were audited, it is the
-	// agent's next delivery or claim, and NextVia names which.
-	NextPoll *time.Time `json:"next_poll,omitempty"`
-	NextVia  string     `json:"next_via,omitempty"` // poll, delivered or claimed
-}
-
-// ReplyNotRecorded is a woke row's reply when the relay kept no summary.
-const ReplyNotRecorded = "not recorded"
-
-var wakeEvents = []string{"woke", "wake_failed", "wake_skipped"}
-
-// handleWakes exports an agent's wakes in [since, until] (admin).
-func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
-	if !s.isAdmin(r) {
-		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
-		return
-	}
-	agent := r.PathValue("agent")
-	q := r.URL.Query()
-	since, err := time.Parse(time.RFC3339Nano, q.Get("since"))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, errors.New("since must be an RFC 3339 time"))
-		return
-	}
-	until := s.cfg.Now()
-	if v := q.Get("until"); v != "" {
-		if until, err = time.Parse(time.RFC3339Nano, v); err != nil {
-			writeErr(w, http.StatusBadRequest, errors.New("until must be an RFC 3339 time"))
-			return
-		}
-	}
-	// Rows after until are read too: a wake's next poll may fall after it.
-	rows, err := s.store.AuditForActor(r.Context(), agent, since, append(wakeEvents, store.EventPolled, "delivered", "claimed")...)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	path := ""
-	if s.wake != nil {
-		if m := s.wake.WakeMethod(agent); relayWoken(m) {
-			path = m
-		}
-	}
-	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}}
-	for i, e := range rows {
-		if !slices.Contains(wakeEvents, e.Event) || e.At.After(until) {
-			continue
-		}
-		entry := wakeEntry(e, path)
-		older := e.Event == "woke" && entry.Status == "2xx"
-		// The next activity must come before the relay's next sent wake. A
-		// skipped wake sent nothing, so it does not end the search.
-		for _, n := range rows[i+1:] {
-			if n.Event == "woke" || n.Event == "wake_failed" {
-				break
-			}
-			if n.Event == store.EventPolled || (older && (n.Event == "delivered" || n.Event == "claimed")) {
-				at := n.At
-				entry.NextPoll, entry.NextVia = &at, n.Event
-				if n.Event == store.EventPolled {
-					entry.NextVia = "poll"
-				}
-				break
-			}
-		}
-		out.Wakes = append(out.Wakes, entry)
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// failedStatus finds the status in a wake_failed reason ("host returned 500
-// Internal Server Error").
-var failedStatus = regexp.MustCompile(`returned (\d{3})\b`)
-
-// wakeEntry reads one wake audit row. A woke detail is "<path>, HTTP
-// <code>, <n> waiting[, <n> unseen replies][, response: <summary>]", the
-// path being the method or "fallback <n>: <method>", and a wake_failed
-// reason sent on a fallback ends in "(fallback <n>: <method>)"; rows
-// written before the status code was recorded lack the HTTP part. path is
-// the agent's current wake method, for rows that do not name one.
-func wakeEntry(e store.AuditEvent, path string) WakeEntry {
-	entry := WakeEntry{At: e.At, Event: e.Event, Path: path}
-	switch e.Event {
-	case "woke":
-		head := e.Detail
-		entry.Reply = ReplyNotRecorded
-		if i := strings.Index(head, ", response: "); i >= 0 {
-			if reply := strings.TrimSpace(head[i+len(", response: "):]); reply != "" {
-				entry.Reply = reply
-			}
-			head = head[:i]
-		}
-		entry.Status = "2xx" // a woke row is only written for a 2xx answer
-		for j, part := range strings.Split(head, ", ") {
-			if j == 0 && (relayWoken(part) || strings.HasPrefix(part, "fallback ")) {
-				entry.Path = part
-			}
-			if code, ok := strings.CutPrefix(part, "HTTP "); ok {
-				entry.Status = code
-			}
-		}
-	case "wake_failed":
-		entry.Error = e.Detail
-		if i := strings.LastIndex(e.Detail, " (fallback "); i >= 0 && strings.HasSuffix(e.Detail, ")") {
-			entry.Path = e.Detail[i+2 : len(e.Detail)-1]
-		}
-		if m := failedStatus.FindStringSubmatch(e.Detail); m != nil {
-			entry.Status = m[1]
-		}
-	default:
-		entry.Error = e.Detail
-	}
-	return entry
 }
