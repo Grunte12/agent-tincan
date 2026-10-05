@@ -151,7 +151,7 @@ The webhook only enqueues a run of the "Tincan wake" routine. Grok Bot answers 2
 To check:
 
 1. Open the "Tincan wake" routine in the Grok Bot app and look at the status of its recent runs. Failed runs show as "Activity task failed".
-2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted, so an error the platform still answered 2xx to shows there.
+2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted and long opaque tokens shown as `[token]`, so an error the platform still answered 2xx to shows there. A reply that still has escape sequences after redaction, or any form of a key, is shown as `[withheld: may contain a secret]`.
 3. In Grok Bot's settings, "Update Grok Bot's Computer" has unstuck the routine before. Run a test ask afterwards and check that grokbot polls.
 
 Give grokbot a second path so a dead routine does not strand its requests. A `fallback` list in `wake.json` holds further webhook or email targets, each with the same fields as the primary. The first wake goes to the primary. Each follow-up after a silent `--wake-grace` goes to the next path, and after the last it cycles back to the primary. A poll starts the next episode on the primary again. All paths share `max_per_hour`. For example, with an AgentMail inbox whose listener can wake the bot:

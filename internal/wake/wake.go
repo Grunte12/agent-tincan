@@ -1156,7 +1156,15 @@ func secretForms(sec string) []string {
 // replacement does not cover.
 const withheldAnswer = "[withheld: may contain a secret]"
 
-// leaksSecret reports whether any secret, or its base64 form, can still be
+// answerEscape matches an escape sequence in a webhook reply: a backslash
+// escape, a percent-encoded byte or an HTML character reference.
+var answerEscape = regexp.MustCompile(`\\.|%[0-9A-Fa-f]{2}|&#?[0-9A-Za-z]+;`)
+
+// opaqueToken matches a run of 16 or more characters that could be encoded
+// data: base64, hex or an id.
+var opaqueToken = regexp.MustCompile(`[0-9A-Za-z+/=_-]{16,}`)
+
+// leaksSecret reports whether any secret, or its base64 or hex form, can still be
 // read from s: as is, from the strings of s parsed as JSON (every escape
 // decoded), or from either of those percent-decoded or HTML-unescaped.
 func leaksSecret(s string, secrets []string) bool {
@@ -1192,6 +1200,8 @@ func leaksSecret(s string, secrets []string) bool {
 		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
 			needles = append(needles, enc.EncodeToString([]byte(sec)))
 		}
+		h := hex.EncodeToString([]byte(sec))
+		needles = append(needles, h, strings.ToUpper(h))
 		for _, v := range views {
 			for _, n := range needles {
 				if strings.Contains(v, n) {
@@ -1229,6 +1239,13 @@ func answerSummary(raw []byte, secrets []string) string {
 	for _, sec := range redact {
 		s = strings.ReplaceAll(s, sec, "[redacted]")
 	}
+	// Escapes could spell a secret in a form not replaced above, so a reply
+	// that still has any is withheld; long opaque tokens (encoded data, ids)
+	// are masked. What is left is plain text, checked once more.
+	if answerEscape.MatchString(s) {
+		return withheldAnswer
+	}
+	s = opaqueToken.ReplaceAllString(s, "[token]")
 	if leaksSecret(s, check) {
 		return withheldAnswer
 	}
