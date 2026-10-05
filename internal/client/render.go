@@ -97,7 +97,7 @@ func wakeHint(to string, t *envelope.Target) string {
 		return ""
 	}
 	at := clockTime(t.WokenAt, time.Now())
-	if t.WakeResult != envelope.WakeOK {
+	if !envelope.WakeAccepted(t.WakeResult) {
 		return fmt.Sprintf("%s's wake at %s failed (%s) and it has not checked in yet; the request is queued.\n", to, at, t.WakeResult)
 	}
 	return fmt.Sprintf("%s was woken at %s and has not checked in yet; the request is queued.\n", to, at)
@@ -151,8 +151,8 @@ func (a AgentInfo) UnansweredNote(now time.Time) string {
 	if !a.Unanswered || a.WokenAt.IsZero() {
 		return ""
 	}
-	result := a.Wake + " ok"
-	if a.WakeResult != envelope.WakeOK {
+	result := a.Wake + " " + a.WakeResult // "webhook ok", or with a fallback marker
+	if !envelope.WakeAccepted(a.WakeResult) {
 		result = a.Wake + " failed: " + a.WakeResult
 	}
 	return fmt.Sprintf("woken %s, no check-in (%s)", ageAgo(now.Sub(a.WokenAt)), result)

@@ -1147,7 +1147,7 @@ func (s *Server) wakeTarget(wk store.Wake, lastPoll, now time.Time) envelope.Tar
 	if s.started.After(since) {
 		since = s.started
 	}
-	t.Unanswered = wk.Result != envelope.WakeOK || now.Sub(since) > s.cfg.WakeGrace
+	t.Unanswered = !envelope.WakeAccepted(wk.Result) || now.Sub(since) > s.cfg.WakeGrace
 	return t
 }
 
@@ -2021,8 +2021,10 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 // Internal Server Error").
 var failedStatus = regexp.MustCompile(`returned (\d{3})\b`)
 
-// wakeEntry reads one wake audit row. A woke detail is "<method>, HTTP
-// <code>, <n> waiting[, <n> unseen replies][, response: <summary>]"; rows
+// wakeEntry reads one wake audit row. A woke detail is "<path>, HTTP
+// <code>, <n> waiting[, <n> unseen replies][, response: <summary>]", the
+// path being the method or "fallback <n>: <method>", and a wake_failed
+// reason sent on a fallback ends in "(fallback <n>: <method>)"; rows
 // written before the status code was recorded lack the HTTP part. path is
 // the agent's current wake method, for rows that do not name one.
 func wakeEntry(e store.AuditEvent, path string) WakeEntry {
@@ -2039,7 +2041,7 @@ func wakeEntry(e store.AuditEvent, path string) WakeEntry {
 		}
 		entry.Status = "2xx" // a woke row is only written for a 2xx answer
 		for j, part := range strings.Split(head, ", ") {
-			if j == 0 && relayWoken(part) {
+			if j == 0 && (relayWoken(part) || strings.HasPrefix(part, "fallback ")) {
 				entry.Path = part
 			}
 			if code, ok := strings.CutPrefix(part, "HTTP "); ok {
@@ -2048,6 +2050,9 @@ func wakeEntry(e store.AuditEvent, path string) WakeEntry {
 		}
 	case "wake_failed":
 		entry.Error = e.Detail
+		if i := strings.LastIndex(e.Detail, " (fallback "); i >= 0 && strings.HasSuffix(e.Detail, ")") {
+			entry.Path = e.Detail[i+2 : len(e.Detail)-1]
+		}
 		if m := failedStatus.FindStringSubmatch(e.Detail); m != nil {
 			entry.Status = m[1]
 		}

@@ -274,3 +274,18 @@ func TestParsePing(t *testing.T) {
 		t.Fatalf("ping: %+v %v", req, err)
 	}
 }
+
+func TestWakeAccepted(t *testing.T) {
+	for result, want := range map[string]bool{
+		"ok":                                     true,
+		"ok (fallback 1: email)":                 true,
+		"hooks.example returned 502 Bad Gateway": false,
+		"hooks.example returned 502 Bad Gateway (fallback 2: email)": false,
+		"":    false,
+		"ok!": false,
+	} {
+		if got := WakeAccepted(result); got != want {
+			t.Errorf("WakeAccepted(%q) = %v, want %v", result, got, want)
+		}
+	}
+}

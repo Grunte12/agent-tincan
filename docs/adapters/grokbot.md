@@ -169,8 +169,34 @@ Grok Bot wakes on its webhook. In the relay's `wake.json`:
 
 The relay posts `{"source":"agent-tincan","message":"Agent Tincan: 2 requests from your teammates waiting. Run check_inbox ..."}`. Grok Bot then calls `check_inbox`. The same wake can also mean a reply to one of Grok Bot's own requests is waiting (the message then counts replies). `check_inbox` shows it, and Grok Bot finishes the work that was waiting on it.
 
-If `tincan agents` shows grokbot with `unanswered="woken 12m ago, no check-in (webhook ok)"`, the relay's webhook reached the Grok Bot app but no session ran, so Grok Bot never polled. The relay keeps posting the same webhook on `--wake-grace` until grokbot polls, the queue is empty, or `max_per_hour` is spent; a later 2xx does not move the unanswered time. Check the run status of the "Tincan wake" routine in the app: failed runs show as "Activity task failed". That receiver still has to be repaired. The requests stay queued until a session runs.
+If `tincan agents` shows grokbot with `unanswered="woken 12m ago, no check-in (webhook ok)"`, the relay's webhook reached the Grok Bot app but no session ran, so Grok Bot never polled. The relay wakes it again on `--wake-grace` until grokbot polls, the queue is empty, or `max_per_hour` is spent; a later 2xx does not move the unanswered time. Without a fallback (below) that is the same webhook each time. The requests stay queued until a session runs. A failed send shows the error in place of `ok`; for a 401 or 403, check `bearer_token` in `wake.json`.
+
+After `--owner-notice-after` (default 3) unanswered wakes in a row, the relay also tells the owner once per silent episode, through the approval policy's `notify` destination (`<agent> has not checked in after <N> wakes in a row since <time> ...`). Name an agent there that the owner reads, not Grok Bot itself. `tincan wakes grokbot --since 2h` on an admin device lists each wake with its HTTP status, the webhook's reply when the relay recorded one, and the first poll after it.
+
+## When the webhook says OK but nothing runs
+
+The webhook only enqueues a run of the "Tincan wake" routine. Grok Bot answers 2xx as soon as the run is queued, before it starts. If the run itself then fails inside Grok Bot, every wake is `webhook ok` and the agent never starts. This has happened: routine runs failed with "Activity task failed" and "The background task was interrupted before it finished", after notices that "A background task was stopped after 50 minutes so it would not hang". Posting the same webhook again cannot fix that.
+
+To check:
+
+1. Open the "Tincan wake" routine in the Grok Bot app and look at the status of its recent runs. Failed runs show as "Activity task failed".
+2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, HTTP 200, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted, so an error the platform still answered 2xx to shows there.
+3. In Grok Bot's settings, "Update Grok Bot's Computer" has unstuck the routine before. Run a test ask afterwards and check that grokbot polls.
 
 "Activity task failed" with no other detail is also what the app shows when the Cursor account has hit its on-demand spend limit: the webhook still returns 200, the routine never runs. Check the account's spending page before treating it as a broken routine.
 
-After `--owner-notice-after` (default 3) unanswered wakes in a row, the relay also tells the owner once per silent episode, through the approval policy's `notify` destination (`<agent> has not checked in after <N> wakes in a row since <time> ...`). Name an agent there that the owner reads, not Grok Bot itself. `tincan wakes grokbot --since 2h` on an admin device lists each wake with its HTTP status, the webhook's reply when the relay recorded one, and the first poll after it. A failed send shows the error in place of `ok`; for a 401 or 403, check `bearer_token` in `wake.json`.
+Give grokbot a second path so a dead routine does not strand its requests. A `fallback` list in `wake.json` holds further webhook or email targets, each with the same fields as the primary. The first wake goes to the primary. Each follow-up after a silent `--wake-grace` goes to the next path, and after the last it cycles back to the primary. A poll starts the next episode on the primary again. All paths share `max_per_hour`. For example, with an AgentMail inbox whose listener can wake the bot:
+
+```json
+{
+  "grokbot": {
+    "method": "webhook", "url": "<Grok Bot webhook URL>", "bearer_token": "<webhook key>",
+    "max_per_hour": 12,
+    "fallback": [
+      { "method": "email", "email_to": "<inbox whose listener wakes Grok Bot>", "agentmail_inbox": "<sending inbox>", "agentmail_key": "<AgentMail API key>" }
+    ]
+  }
+}
+```
+
+A fallback cannot set `max_per_hour` or its own `fallback`, and a mistake is reported with the agent and the fallback's position, such as `wake grokbot: fallback 1: email needs email_to, agentmail_inbox, agentmail_key`. The roster and the asker's note name the path that sent the last wake, for example `woken 12m ago, no check-in (webhook ok (fallback 1: email))`. The URL, address and keys never reach agents.

@@ -236,3 +236,20 @@ func TestWakeExportPollDuringWakeCall(t *testing.T) {
 		t.Fatalf("polled rows = %d, want 1", n)
 	}
 }
+
+// A wake sent on a fallback names that path, in both a woke row and a
+// failed one.
+func TestWakeEntryFallbackPath(t *testing.T) {
+	woke := wakeEntry(store.AuditEvent{Event: "woke", Detail: `fallback 1: email, HTTP 200, 2 waiting`}, "webhook")
+	if woke.Path != "fallback 1: email" || woke.Status != "200" || woke.Reply != ReplyNotRecorded {
+		t.Fatalf("woke entry = %+v", woke)
+	}
+	failed := wakeEntry(store.AuditEvent{Event: "wake_failed", Detail: "hooks.example returned 502 Bad Gateway (fallback 2: webhook)"}, "webhook")
+	if failed.Path != "fallback 2: webhook" || failed.Status != "502" {
+		t.Fatalf("failed entry = %+v", failed)
+	}
+	primary := wakeEntry(store.AuditEvent{Event: "woke", Detail: `webhook, HTTP 202, 1 waiting, response: {"status":"queued"}`}, "webhook")
+	if primary.Path != "webhook" || primary.Status != "202" || primary.Reply != `{"status":"queued"}` {
+		t.Fatalf("primary entry = %+v", primary)
+	}
+}
