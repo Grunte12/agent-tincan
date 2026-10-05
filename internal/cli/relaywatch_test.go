@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 )
@@ -46,7 +47,22 @@ func goneURL(t *testing.T) string {
 func watchRelay(t *testing.T, c client.Config) *client.Relay {
 	t.Helper()
 	t.Setenv("TINCAN_RELAY", "")
-	path := filepath.Join(t.TempDir(), "hermes.json")
+	// Not t.TempDir: after a move the client refreshes relay info in the
+	// background and saves the config again, which can land while
+	// t.TempDir's cleanup is removing the folder.
+	dir, err := os.MkdirTemp("", "relaywatch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for range 50 {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	path := filepath.Join(dir, "hermes.json")
 	if err := client.SaveConfigTo(path, c); err != nil {
 		t.Fatal(err)
 	}
