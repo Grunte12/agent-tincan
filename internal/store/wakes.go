@@ -71,11 +71,36 @@ func (s *Store) migrateAgentLastPoll() error {
 	return err
 }
 
+// EventPolled is the audit event for an agent's first poll after a relay
+// wake. A wake export pairs each wake with it.
+const EventPolled = "polled"
+
 // TouchAgentPoll records that name polled the relay at t. It only moves the
-// stored time forward and ignores names not in the directory.
+// stored time forward and ignores names not in the directory. The first poll
+// at or after name's last recorded wake also writes a polled audit row, so
+// each wake gets at most one: the conditional update moves last_poll_at past
+// the wake, and later polls no longer match it.
 func (s *Store) TouchAgentPoll(ctx context.Context, name string, t time.Time) error {
 	ms := t.UnixMilli()
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ? AND (last_poll_at IS NULL OR last_poll_at < ?)`, ms, name, ms)
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ?
+		AND (last_poll_at IS NULL OR last_poll_at < (SELECT woken_at FROM wakes WHERE agent = ?))
+		AND (SELECT woken_at FROM wakes WHERE agent = ?) <= ?`, ms, name, name, name, ms)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		var woken int64
+		if err := s.db.QueryRowContext(ctx, `SELECT woken_at FROM wakes WHERE agent = ?`, name).Scan(&woken); err != nil {
+			return err
+		}
+		detail := "first poll since the wake at " + time.UnixMilli(woken).UTC().Format(time.RFC3339Nano)
+		return s.Audit(ctx, AuditEvent{Event: EventPolled, Actor: name, Detail: detail})
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ? AND (last_poll_at IS NULL OR last_poll_at < ?)`, ms, name, ms)
 	return err
 }
 

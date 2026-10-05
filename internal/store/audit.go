@@ -103,6 +103,19 @@ func (s *Store) AuditForTrace(ctx context.Context, traceID string) ([]AuditEvent
 	return s.auditWhere(ctx, "WHERE trace_id = ?", traceID)
 }
 
+// AuditForActor returns actor's audit entries of the given events at or
+// after since, oldest first.
+func (s *Store) AuditForActor(ctx context.Context, actor string, since time.Time, events ...string) ([]AuditEvent, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	args := []any{actor, since.UnixMilli()}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	return s.auditWhere(ctx, "WHERE actor = ? AND at >= ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", args...)
+}
+
 func (s *Store) auditWhere(ctx context.Context, where string, args ...any) ([]AuditEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, event, request_id, trace_id, actor, detail, prev_hash, hash FROM audit `+where+` ORDER BY seq`, args...)
 	if err != nil {
