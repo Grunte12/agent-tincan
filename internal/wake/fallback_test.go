@@ -356,7 +356,8 @@ func TestWebhookAnswerSummarySanitized(t *testing.T) {
 }
 
 func TestAnswerSummary(t *testing.T) {
-	long := strings.Repeat("a", 195) + "SECRETTOKEN" + strings.Repeat("b", 50)
+	words := strings.Repeat("a ", 97) + "a" // 195 bytes of plain words
+	long := words + "SECRETTOKEN" + strings.Repeat(" b", 25)
 	for _, tc := range []struct {
 		name, raw string
 		secrets   []string
@@ -369,8 +370,10 @@ func TestAnswerSummary(t *testing.T) {
 		{"bare path kept", `{"p":"/"}`, []string{"/", ""}, `{"p":"/"}`},
 		{"short secret withholds the body", `{"echo":"k9x"}`, []string{"k9x"}, "[withheld: may contain a secret]"},
 		{"short secret absent", `{"ok":true}`, []string{"k9x"}, `{"ok":true}`},
-		{"secret at the cut", long, []string{"SECRETTOKEN"}, strings.Repeat("a", 195) + "[reda..."},
-		{"rune boundary", strings.Repeat("a", 199) + "é" + "z", nil, strings.Repeat("a", 199) + "..."},
+		{"secret at the cut", long, []string{"SECRETTOKEN"}, words + "[reda..."},
+		{"rune boundary", strings.Repeat("a ", 99) + "a" + "é" + "z", nil, strings.Repeat("a ", 99) + "a..."},
+		{"opaque token masked", `{"run":"9f8e7d6c5b4a39281706f5e4"}`, nil, `{"run":"[token]"}`},
+		{"escape withheld", `notice: \u0062ear`, nil, withheldAnswer},
 		{"invalid utf8", "ok\xff", nil, "ok?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -567,11 +570,13 @@ func TestAnswerSummaryWithholdsEncodedSecrets(t *testing.T) {
 		{"path with every byte escaped", `{"path":"%2Fhook%2Ftok%252Fen%2520x"}`},
 		{"base64 token", `{"auth":"YmVhci10b2tlbi0x"}`},
 		{"token in unicode escapes", `{"t":"\u0062ear-token-1"}`},
+		{"token in unicode escapes, not JSON", `notice: \u0062ear-token-1`},
+		{"token in hex", `id=626561722d746f6b656e2d31`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := answerSummary([]byte(tc.body), secrets)
-			if got != withheldAnswer && !strings.Contains(got, "[redacted]") {
-				t.Fatalf("answerSummary = %q, want it withheld or redacted", got)
+			if got != withheldAnswer && !strings.Contains(got, "[redacted]") && !strings.Contains(got, "[token]") {
+				t.Fatalf("answerSummary = %q, want it withheld, redacted or masked", got)
 			}
 			if leaksSecret(got, []string{"bear-token-1", "<a>", "/hook/tok/en x", "/hook/tok%2Fen%20x"}) {
 				t.Fatalf("answerSummary = %q still holds a secret", got)

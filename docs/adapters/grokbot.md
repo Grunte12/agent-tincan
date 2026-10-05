@@ -180,7 +180,7 @@ The webhook only enqueues a run of the "Tincan wake" routine. Grok Bot answers 2
 To check:
 
 1. Open the "Tincan wake" routine in the Grok Bot app and look at the status of its recent runs. Failed runs show as "Activity task failed".
-2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, HTTP 200, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted, so an error the platform still answered 2xx to shows there.
+2. Look at the relay log or the `woke` audit event for the webhook's answer, for example `wake grokbot: ok, webhook, HTTP 200, 1 waiting, response: {"status":"queued"}`. The relay keeps the first 200 bytes of a 2xx response on one line, with the URL and keys redacted and long opaque tokens shown as `[token]`, so an error the platform still answered 2xx to shows there. A reply that still has escape sequences after redaction, or any form of a key, is shown as `[withheld: may contain a secret]`.
 3. In Grok Bot's settings, "Update Grok Bot's Computer" has unstuck the routine before. Run a test ask afterwards and check that grokbot polls.
 
 "Activity task failed" with no other detail is also what the app shows when the Cursor account has hit its on-demand spend limit: the webhook still returns 200, the routine never runs. Check the account's spending page before treating it as a broken routine.
