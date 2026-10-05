@@ -260,3 +260,34 @@ acknowledged 96 KiB decoded chunks. The host rejects unknown fields and assigns
 connection identity itself. Image send intent is journaled before submission;
 unknown outcomes are never automatically replayed. See the web-agent guide for
 vendor exposure, gate reasons and live acceptance requirements.
+
+### Web authentication observations
+
+`PUT /v1/agents/self/web-status` uses the calling agent's existing authentication.
+The body contains only `site`, `state` (`signed_out` or `authenticated`) and
+`observed_at` (RFC 3339). The relay advertises `web_status: true` in capabilities.
+Known sites are `chatgpt.com`, `claude.ai`, `grok.com`, `gemini.google.com`,
+`www.perplexity.ai` and `copilot.com`. Dots use `chatgpt.com`. A known agent kind
+must match the site; kindless agents may report a known site. Other identities,
+unknown fields, invalid states and timestamps older than five minutes or more
+than one minute in the future are rejected. Duplicate or older observations
+cannot replace a newer observation.
+
+The relay persists the latest observation against the agent's node and join
+identity. Removal or replacement deletes that state. Relay time starts a sign-out
+episode; repeated failures preserve it. Authenticated observations clear the
+condition while retaining an ordering tombstone across restarts.
+
+Roster entries and send `target` objects may include `signed_out_site`,
+`signed_out_since`, `web_status_observed_at` and `web_host`. The host comes from the
+directory, never the request body. These facts compose with schedule and wake
+facts, including held sends, without changing `online` or queue semantics.
+Missing fields mean unknown. A client may return a known signed-out ask promptly
+with its request ID; ordinary request retrieval remains available.
+
+Operator notices reuse the configured approval-policy notify destination. The
+pending episode and its queued notice are persisted; enqueue and deduplication
+are atomic. Notices contain agent, site, since, host and recovery guidance only.
+Recovery cancels a pending notice, and queue failures retry after a bounded delay.
+They neither forward held content nor grant approval. See the web-agent adapter
+for probe cost, recovery and mixed-version limits.

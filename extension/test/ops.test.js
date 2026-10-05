@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.list', 'chatgpt.send', 'chatgpt.send_images', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.send_images', ...['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => site + '.session')].sort());
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -1341,4 +1341,41 @@ test('dots ops need the ChatGPT grant; dots.close goes to the sender for its own
   assert.deepEqual(await grantedSites(perms), ['chatgpt', 'claudeai'], 'the hello names the site, not the alias');
   assert.equal((await run(r, 'dots.detail', { id: DOT_THREAD }))[0].ok, true);
   assert.deepEqual(validate({ id: 1, op: 'dots.send', args: { message: 'hi', conversation_id: DOT_THREAD } }).args, { message: 'hi', conversation_id: DOT_THREAD });
+});
+
+
+test('session operations are argument-free and return no credentials', async () => {
+  for (const site of ['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots']) {
+    validate({ id: 1, op: site + '.session', args: {} });
+    assert.throws(() => validate({ id: 1, op: site + '.session', args: { message: 'hello' } }));
+  }
+  for (const site of ['chatgpt', 'dots']) {
+    const fetch = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }) });
+    const frames = await run(createRunner({ fetch }), site + '.session', {});
+    assert.deepEqual(frames, [{ ok: true, result: {} }]);
+    assert.equal(JSON.stringify(frames).includes(TOKEN), false);
+    await assert.rejects(run(createRunner({ fetch: fakeFetch({ [SESSION]: jsonResponse({}) }) }), site + '.session', {}), e => e.code === 'not_logged_in');
+  }
+});
+
+for (const [site, url, signedIn, signedOut] of [
+  ['claudeai', 'https://claude.ai/api/organizations', () => jsonResponse(fixture('claudeai/organizations.json')), () => jsonResponse([])],
+  ['grok', 'https://grok.com/rest/app-chat/conversations?pageSize=1', () => jsonResponse({ conversations: [{ conversationId: 'account-conversation' }] }), () => jsonResponse({}, 401)],
+  ['gemini', 'https://gemini.google.com/app', () => new Response(APP_HTML), () => new Response('<html>Sign in</html>')],
+  ['perplexity', 'https://www.perplexity.ai/api/auth/session', () => jsonResponse({ user: { id: 'private-user-id' } }), () => jsonResponse({})],
+]) {
+  test(`${site}.session executes fresh signed-in and signed-out checks`, async () => {
+    let authenticated = true;
+    const fetch = fakeFetch({ [url]: () => authenticated ? signedIn() : signedOut() });
+    const runner = createRunner({ fetch });
+    assert.deepEqual(await run(runner, site + '.session', {}), [{ ok: true, result: {} }]);
+    authenticated = false;
+    await assert.rejects(run(runner, site + '.session', {}), e => e.code === 'not_logged_in');
+    assert.equal(fetch.calls.length, 2, 'each probe fetches fresh evidence');
+  });
+}
+
+test('grok.session treats an empty successful list as indeterminate', async () => {
+  const fetch = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ conversations: [] }) });
+  await assert.rejects(run(createRunner({ fetch }), 'grok.session', {}), e => e.code === 'indeterminate');
 });

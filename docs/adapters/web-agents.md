@@ -493,3 +493,42 @@ parent repository metadata. No commit, push or PR was created in this session.
 The plan file was left unchanged. Before release, rerun the full Go and race
 suites in an environment that permits their listeners and process probes, then
 complete the owner live acceptance checklist above.
+
+### Browser authentication status
+
+Process presence and site authentication are separate. A web agent can be online
+while its Chrome session is signed out. The CLI and MCP rosters then include
+`signed_out="chatgpt.com since 2h"`; `tincan top` flags `SIGNED-OUT`, and
+`tincan doctor` names the agent, site and registered browser host. Sign in to the
+named site in Chrome on that host without restarting Chrome. Copilot needs a
+personal Microsoft account with any sign-in or terms prompt completed.
+
+All seven web kinds, including custom agent names and dots, report typed sign-out
+failures from their traffic. A fresh authenticated read, confirmed send or session
+probe clears the mark. Polling the relay, closing a tab, downloading a public file
+and cached session data do not clear it. Repeated failures retain the episode's
+start time. Dots report only their own session, not every ChatGPT agent's session.
+
+An idle service probes at startup and every two minutes. Recent authenticated
+traffic replaces a probe. Active sends and site cooldowns defer probing; sleep,
+unavailable Chrome and a disconnected extension delay detection. HTTP probes are
+bounded to 30 seconds. Copilot uses the existing tab-read timeout and opens then
+closes a background tab for its signed-in gate. Probes never send a message or
+create a conversation.
+
+Known sign-out appears in ask and notify results, including groups and held asks.
+Asks return a pending request ID promptly. The warning does not cancel work,
+release a hold or prove nothing was sent. Check the request later as usual.
+
+The optional `notify` destination in `approval.json` also receives one metadata-only
+notice per sign-out episode. This queues a notification to an agent, not directly
+to a human. Queue failures are retried; recovery cancels an unqueued notice.
+Without a valid configured recipient, use roster, top and doctor. No push delivery
+or human acknowledgement is guaranteed.
+
+Upgrade the relay, service and extension for all surfaces and idle detection.
+An old relay does not store reports; the service logs the incompatibility once
+and keeps serving. An old extension disables session probes with one upgrade
+notice; traffic still detects sign-out, and confirmed sends or fresh ChatGPT/dot
+reads can clear it. Older clients ignore the optional fields. Missing reports mean
+unknown authentication, not a healthy session.

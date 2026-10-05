@@ -163,9 +163,11 @@ type WebAgent struct {
 	// request (send, reply wait and tab close) and for each watcher tick,
 	// so inbound and outbound never type into the site at once and an
 	// outbound reply is never typed while an inbound request waits.
-	mu sync.Mutex
+	mu             sync.Mutex
+	sendGeneration uint64
 	// watch is the outbound watcher's state; only the watcher uses it.
 	watch dotWatch
+	auth  webAuthState
 }
 
 func (w *WebAgent) logf(format string, args ...any) {
@@ -179,6 +181,10 @@ func (w *WebAgent) logf(format string, args ...any) {
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
 // On a dot with OutPath set, the outbound watcher runs beside it.
 func (w *WebAgent) Run(ctx context.Context) error {
+	actx, stopAuth := context.WithCancel(ctx)
+	authDone := make(chan struct{})
+	go func() { defer close(authDone); w.runWebStatus(actx) }()
+	defer func() { stopAuth(); <-authDone }()
 	if w.watching() {
 		wctx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -413,6 +419,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	// crash): it is not sent again, only its reply is read.
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.sendGeneration++
 	images := len(req.Attachments) > 0
 	var j webJournal
 	if images {
@@ -512,22 +519,24 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 			})
 		}
 		res, err = send()
+		w.observeAuth(err)
 		var ue *UnavailableError
 		if remembered && convID != "" && errors.Is(err, ErrNotFound) && errors.As(err, &ue) && !ue.Clicked && !ue.Uploaded {
 			note = fmt.Sprintf("Your previous %s conversation was not found, so this went to a new chat.", label)
 			convID, newChat = "", true
 			anchor = replyAnchor{message: wr.message}
 			res, err = send() // new connection, token and transfer; no uncertain replay
+			w.observeAuth(err)
 		}
 	} else {
-		res, err = w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
+		res, err = w.authSend(ctx, w.Site, wr.message, convID, newChat)
 	}
 	if !images && remembered && convID != "" && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
 		anchor = replyAnchor{message: wr.message}
-		res, err = w.Native.Send(ctx, w.Site, wr.message, "", true)
+		res, err = w.authSend(ctx, w.Site, wr.message, "", true)
 	}
 	if err != nil {
 		if !images {
@@ -863,7 +872,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if convID == "" {
 		return a, nil
 	}
-	raw, err := w.Native.Request(ctx, w.live().detailOp, OpArgs{ID: convID})
+	raw, err := w.authRequest(ctx, w.live().detailOp, OpArgs{ID: convID})
 	if err == nil {
 		var nodes []webNode
 		if nodes, err = w.nodes(raw); err == nil {
@@ -879,7 +888,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if _, ok := rateLimited(err); ok || errors.Is(err, errThreadTooLong) {
 		return a, err
 	}
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotLoggedIn) {
 		w.logf("conversation %s: reading it before the send: %v", convID, err)
 	}
 	return a, nil

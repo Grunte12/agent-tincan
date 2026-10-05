@@ -237,6 +237,11 @@ func ValidateOp(op Op, a OpArgs) error {
 		return fmt.Errorf("unknown operation %q", op)
 	}
 	switch kind {
+	case opSession:
+		if a != (OpArgs{}) {
+			return fmt.Errorf("%s: takes no arguments", op)
+		}
+		return nil
 	case opSend:
 		switch {
 		case a.Count != 0 || a.ID != "" || a.FileID != "":
@@ -420,7 +425,7 @@ func (e *UnavailableError) Error() string {
 	case ErrExtensionNotConnected:
 		reason = "the Tincan Chrome extension is not connected (install it, then run tincan history install)"
 	case ErrNotLoggedIn:
-		reason = "not logged in to " + site + " in Chrome"
+		reason = "not logged in to " + site + " in Chrome; sign in there without restarting Chrome"
 		if s := siteFor(e.Source); s != nil && s.notLoggedIn != nil {
 			reason = s.notLoggedIn(e.Detail)
 		}
@@ -771,7 +776,7 @@ const TabReadClientTimeout = 100 * time.Second
 // opening a tab (a site with listInTab).
 func (op Op) readsInTab() bool {
 	site, kind, ok := op.resolve()
-	return ok && kind == opList && site.listInTab
+	return ok && (kind == opList || kind == opSession) && site.listInTab
 }
 
 func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(NativeResponse) (bool, error)) error {

@@ -248,3 +248,17 @@ five-minute deadline, then clears them. Bytes never persist in the worker.
 Release packaging still uses `make extension` and `make store`. Extension changes
 bump the manifest version; the store release target skips versions no newer than
 the published version. This change requests no additional browser permissions.
+
+## Session operations
+
+These seven fixed operations accept no arguments and return only `{}` on positive authentication evidence. Typed errors report sign-out or an indeterminate outcome; indeterminate evidence cannot clear a known sign-out. No credentials or account fields are returned. Copilot probes use their own tab and do not queue sends behind the probe.
+
+| Operation | Arguments | What it reads |
+| --- | --- | --- |
+| `chatgpt.session` | None (`{}`) | Reads `GET https://chatgpt.com/api/auth/session` and requires an access token, which stays in the worker. |
+| `dots.session` | None (`{}`) | Uses the same ChatGPT session check; reads no dot thread or messages. |
+| `claudeai.session` | None (`{}`) | Fetches `GET https://claude.ai/api/organizations` fresh and requires a valid organization UUID, preferring an organization with chat capability. |
+| `grok.session` | None (`{}`) | Reads `GET https://grok.com/rest/app-chat/conversations?pageSize=1`; a nonempty conversations list is positive evidence, an empty successful list is `indeterminate`, and HTTP 401 is `not_logged_in`. |
+| `gemini.session` | None (`{}`) | Fetches `https://gemini.google.com/app` fresh and checks its session token and build label; those values stay in worker memory. |
+| `perplexity.session` | None (`{}`) | Reads `GET https://www.perplexity.ai/api/auth/session` and requires a signed-in `user` with an `id`; user fields are not returned. |
+| `copilot.session` | None (`{}`) | Opens its own background tab at `https://copilot.com/chat`, checks the rendered page for a signed-in account using the send gate, then closes the tab without typing or sending. |
