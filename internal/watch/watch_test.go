@@ -392,3 +392,27 @@ func TestFailedRecoveryAlertDoesNotMaskNextOutage(t *testing.T) {
 		t.Errorf("second down alert since %v, want the new outage after %v", r.alerts[2].Since, back)
 	}
 }
+
+// A recovery alert still failing when the next outage's down alert goes out
+// is folded into that alert and never sent after it, so the owner is not
+// told the relay is back while it is down.
+func TestStaleRecoveryFoldsIntoNextDownAlert(t *testing.T) {
+	r := newRig()
+	r.minutes(t, 11, false) // down alert at minute 10
+	back := r.now
+	r.fail = 12
+	r.minutes(t, 1, true)   // recovery alert fails
+	r.minutes(t, 11, false) // every retry fails through the next outage's first ten minutes
+	r.fail = 0
+	r.minutes(t, 5, false) // the new outage's down alert goes out
+	var kinds []string
+	for _, e := range r.alerts {
+		kinds = append(kinds, string(e.Kind))
+	}
+	if got := strings.Join(kinds, ","); got != "down,down" {
+		t.Fatalf("alerts = %s, want down,down with no stale up", got)
+	}
+	if msg := r.alerts[1].Message; !strings.Contains(msg, "was back at "+back.Local().Format("Jan 2 15:04 MST")) {
+		t.Errorf("second down alert %q does not carry the missed recovery", msg)
+	}
+}
