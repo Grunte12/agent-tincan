@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -548,5 +549,36 @@ func TestAnswerSummaryRedactsJSONEscapedSecret(t *testing.T) {
 		if got != `{"echo":"[redacted]"}` {
 			t.Errorf("answerSummary(%s) = %q, want the secret redacted", b, got)
 		}
+	}
+}
+
+// A secret in an encoding the replacement does not cover is still kept out
+// of the summary: it is redacted, or the whole body is withheld.
+func TestAnswerSummaryWithholdsEncodedSecrets(t *testing.T) {
+	u, err := url.Parse("https://hooks.example/hook/tok%2Fen%20x?k=v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := webhookSecrets(Target{URL: u.String(), BearerToken: "bear-token-1", HMACSecret: "<a>"}, u)
+	for _, tc := range []struct{ name, body string }{
+		{"short secret JSON-escaped", `{"e":"\u003ca\u003e"}`},
+		{"short secret HTML-escaped", `<p>&lt;a&gt;</p>`},
+		{"percent-encoded path", `{"path":"/hook/tok%2Fen%20x"}`},
+		{"path with every byte escaped", `{"path":"%2Fhook%2Ftok%252Fen%2520x"}`},
+		{"base64 token", `{"auth":"YmVhci10b2tlbi0x"}`},
+		{"token in unicode escapes", `{"t":"\u0062ear-token-1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := answerSummary([]byte(tc.body), secrets)
+			if got != withheldAnswer && !strings.Contains(got, "[redacted]") {
+				t.Fatalf("answerSummary = %q, want it withheld or redacted", got)
+			}
+			if leaksSecret(got, []string{"bear-token-1", "<a>", "/hook/tok/en x", "/hook/tok%2Fen%20x"}) {
+				t.Fatalf("answerSummary = %q still holds a secret", got)
+			}
+		})
+	}
+	if got := answerSummary([]byte(`{"status":"queued"}`), secrets); got != `{"status":"queued"}` {
+		t.Fatalf("clean body = %q", got)
 	}
 }
