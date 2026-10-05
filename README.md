@@ -321,6 +321,8 @@ Step by step, including the relay and your first two agents: [docs/quickstart.md
 
 One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead. Prefer the default: with `--listen` the relay's address follows the host's, which changes if the host re-joins Tailscale (agents that can see the tailnet find the new IP; a proxy-only agent needs `tincan rejoin` or tsnet). Sandboxes that approve each new site may also need a new approval.
 
+A relay that is down cannot announce it, so watch it from another always-on machine with `tincan relay-watch --alert-cmd <command>`: it runs the command once when the relay has been unreachable for 10 minutes and again when it is back (`tincan relay-watch install` makes it a service). When a webhook or email agent leaves 3 wakes in a row unanswered, the relay tells the owner through the approval policy's `notify` destination, and `tincan wakes <agent> --since 2h` on an admin device lists each wake with its HTTP status and the first poll after it. See [the Grok Bot guide](docs/adapters/grokbot.md#know-when-the-relay-is-down).
+
 ```bash
 TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 ```
