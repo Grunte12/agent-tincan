@@ -205,3 +205,34 @@ func TestWakeExportCarriesNoSecrets(t *testing.T) {
 		}
 	}
 }
+
+// A webhook that polls the relay before it answers, as one that runs the
+// agent's turn inline would, still gets that poll paired with its wake, and
+// only once.
+func TestWakeExportPollDuringWakeCall(t *testing.T) {
+	h := newHarness(t, Config{})
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP: hook.Client(), Debounce: time.Millisecond, RetryDelay: time.Millisecond,
+		WakeGrace: -1, ReplyRetries: []time.Duration{}, Queued: h.srv.QueuedCount, LastPoll: h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+	since := time.Now().Add(-time.Second)
+
+	wakeOnce(h, w, "grokbot")
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if len(out.Wakes) != 1 || out.Wakes[0].NextPoll == nil || out.Wakes[0].NextVia != "poll" {
+		t.Fatalf("export = %+v, want the wake paired with the poll made during it", out)
+	}
+	if n := auditCount(t, h.st, "polled", "grokbot"); n != 1 {
+		t.Fatalf("polled rows = %d, want 1", n)
+	}
+}

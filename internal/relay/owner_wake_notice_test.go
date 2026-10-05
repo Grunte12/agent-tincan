@@ -218,3 +218,26 @@ func TestOwnerWakeNoticeRealWaker(t *testing.T) {
 		t.Errorf("owner notice lacks the wake path: %s", got[0].Body)
 	}
 }
+
+// When the threshold follow-up finds nothing queued, a later follow-up in
+// the same episode that does tells the owner, once.
+func TestOwnerWakeNoticeRetriesPastThreshold(t *testing.T) {
+	h, clk, fw, _ := noticeHarness(t)
+	h.srv.SetPreparer(notifyPreparer{to: "muse"})
+	wk := store.Wake{At: clk.Now(), Result: "hooks.example returned 502 Bad Gateway"}
+	fw.set("grokbot", wk)
+
+	silentFollowUps(h, clk, wk, 3)
+	if got := ownerNotices(t, h, museAddr); len(got) != 0 {
+		t.Fatalf("owner told with nothing queued: %+v", got)
+	}
+	h.send(instinctAddr, "grokbot", "book the 3pm slot")
+	silentFollowUps(h, clk, wk, 1)
+	if got := ownerNotices(t, h, museAddr); len(got) != 1 {
+		t.Fatalf("owner notices once something is queued = %+v, want one", got)
+	}
+	silentFollowUps(h, clk, wk, 2)
+	if got := ownerNotices(t, h, museAddr); len(got) != 0 {
+		t.Fatalf("owner told again in the same episode: %+v", got)
+	}
+}

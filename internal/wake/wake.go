@@ -668,6 +668,10 @@ func (w *Waker) fire(agent string) {
 		w.followUpLater(agent, p.requests)
 		return
 	}
+	// A poll while the webhook was still answering came before the wake was
+	// stored, so the store wrote no polled row for it. Note it after the
+	// woke row, where a wake export looks for it.
+	polled := w.pollTime(agent)
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK}, true)
 	// The exact status lets a wake export show what the webhook answered.
 	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", w.cfg[agent].Method, code, p.requests)
@@ -675,6 +679,9 @@ func (w *Waker) fire(agent string) {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
 	}
 	w.record(ctx, "woke", agent, detail)
+	if !polled.Before(at) {
+		w.record(ctx, store.EventPolled, agent, "polled at "+polled.UTC().Format(time.RFC3339Nano)+", while the wake call was still answering")
+	}
 	w.followUpLater(agent, p.requests)
 }
 

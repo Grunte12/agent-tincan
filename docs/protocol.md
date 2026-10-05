@@ -223,9 +223,11 @@ Urgent sends have a separate per-sender rolling hourly limit (default 5, configu
 
 A poll with no messages holds until its normal deadline, then returns HTTP 200 with the upgrade field and empty `requests` (or zero `waiting` and `queued` for peek), instead of 204. Populated polls carry the same optional field. `tincan wait` continues waiting on empty polls with an upgrade; it prints the notice when a request or reply ends the wait. The relay repeats it on every response; clients display the actionable notice at most once per process per available version. Unknown fields are safe for older clients to ignore. Notices neither claim requests nor acknowledge replies, and no client upgrades automatically.
 
-### Relay self-upgrade
+### Wake history export
 
 `GET /v1/admin/wakes/{agent}?since=<RFC3339>[&until=<RFC3339>]` lists the agent's relay wakes in the window for admins (403 for anyone else): `{"agent","since","until","wakes":[...]}`, each entry with `at`, `event` (`woke`, `wake_failed` or `wake_skipped`), `path` (`webhook` or `email`), `status` (the HTTP code, or `2xx` for `woke` rows written before the code was recorded), `reply` (the webhook's reply summary, or `not recorded`), `error`, `next_poll` and `next_via` (`poll`, or `delivered` / `claimed` for older rows). Polls are read from a `polled` audit row the relay writes on the first poll after each wake. No URL, token or key appears. `tincan wakes <agent> --since <time>` prints it as a table or, with `--json`, as JSON.
+
+### Relay self-upgrade
 
 `POST /v1/admin/relay/upgrade` installs a release over the relay's own binary. Only admin devices and the local admin socket may call it; agents and other callers get 403. The optional body is `{"force": false, "from_github": "v0.8.0"}`.
 

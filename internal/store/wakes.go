@@ -211,6 +211,13 @@ func (s *Store) AddRelayNote(ctx context.Context, id, kind string, episode int64
 	return n == 1, err
 }
 
+// DeleteRelayNote removes the note AddRelayNote added, so a notice that
+// could not be sent is tried again.
+func (s *Store) DeleteRelayNote(ctx context.Context, id, kind string, episode int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM relay_notes WHERE request_id = ? AND kind = ? AND episode = ?`, id, kind, episode)
+	return err
+}
+
 // RelayNote is the latest note the relay added to request id for its
 // asker, nil when it has none. The owner's wake notes are left out. By is
 // "relay".

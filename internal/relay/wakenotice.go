@@ -77,6 +77,7 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 type silentEpisode struct {
 	at    int64 // the episode's wake time, Unix ms, fixed while it is silent
 	wakes int   // wakes it has left unanswered
+	told  bool  // the owner's notice is queued
 }
 
 // DefaultOwnerNoticeAfter is how many wakes in a row a relay-woken agent
@@ -98,11 +99,16 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 	e.wakes++
 	s.silent[agent] = e
 	s.mu.Unlock()
-	if e.wakes != s.cfg.OwnerNoticeAfter {
+	// Every follow-up past the threshold tries again, so a notice that
+	// could not be queued is retried; the note below keeps it to one.
+	if e.wakes < s.cfg.OwnerNoticeAfter || e.told {
 		return
 	}
 	to := s.notifyDestination()
 	if to == "" {
+		if e.wakes > s.cfg.OwnerNoticeAfter {
+			return // said once already
+		}
 		log.Printf("owner wake notice for %s: %d wakes unanswered, but no notify destination is configured in the approval policy", agent, e.wakes)
 		return
 	}
@@ -122,6 +128,7 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 		return
 	}
 	if !added {
+		s.markTold(agent, episode)
 		return
 	}
 	n := envelope.Request{From: "relay", To: to, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: note}
@@ -129,10 +136,26 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 	if err != nil {
 		log.Printf("owner wake notice for %s: tell %s: %v", agent, to, err)
 		s.record(ctx, "owner_wake_notice_failed", anchor.ID, anchor.TraceID, "relay", store.DetailJSON(map[string]any{"agent": agent, "to": to}))
+		// Drop the note so the next follow-up tries again.
+		if err := s.store.DeleteRelayNote(ctx, anchor.ID, store.NoteOwnerWake, episode); err != nil {
+			log.Printf("relay note %s %s: %v", store.NoteOwnerWake, anchor.ID, err)
+		}
 		return
 	}
+	s.markTold(agent, episode)
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"owner_wake_notice_for": agent, "to": to}))
 	s.noticeQueued(ctx, n)
+}
+
+// markTold records that the owner has been told about agent's episode, so
+// later follow-ups in it skip the store.
+func (s *Server) markTold(agent string, episode int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur := s.silent[agent]; cur.at == episode {
+		cur.told = true
+		s.silent[agent] = cur
+	}
 }
 
 // ownerWakeNote is the text the owner gets when agent has left that many
