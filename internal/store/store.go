@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -88,6 +89,9 @@ type Store struct {
 	db   *sql.DB
 	now  func() time.Time
 	path string // the database file, "" for an in-memory store
+
+	pollMu sync.Mutex     // orders poll audit rows against wake calls
+	waking map[string]int // agents with a wake call in flight, guarded by pollMu
 }
 
 // Open opens (creating if needed) the database at path. Use ":memory:" in
@@ -211,6 +215,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateRelayNotes(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate relay notes: %w", err)
+	}
+	if err := s.migrateOwnerNotices(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate owner notices: %w", err)
 	}
 	for {
 		more, err := s.backfillSearchBatch()

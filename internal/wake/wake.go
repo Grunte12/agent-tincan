@@ -761,6 +761,9 @@ func (w *Waker) fire(agent string) {
 	if step > 0 {
 		marker = " (" + pathLabel(cfg, step) + ")"
 	}
+	if w.audit != nil {
+		w.audit.BeginWake(agent)
+	}
 	at := w.opts.Now()
 	code, answer, err := w.send(ctx, t, msg, key)
 	if err != nil {
@@ -778,13 +781,10 @@ func (w *Waker) fire(agent string) {
 		log.Printf("wake %s: %s", agent, reason)
 		w.record(ctx, "wake_failed", agent, reason)
 		w.rememberSend(ctx, agent, store.Wake{At: at, Result: reason}, false)
+		w.endWake(ctx, agent, at)
 		w.followUpLater(agent, p.requests)
 		return
 	}
-	// A poll while the webhook was still answering came before the wake was
-	// stored, so the store wrote no polled row for it. Note it after the
-	// woke row, where a wake export looks for it.
-	polled := w.pollTime(agent)
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK + marker}, true)
 	// The exact status lets a wake export show what the webhook answered.
 	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", pathLabel(cfg, step), code, p.requests)
@@ -799,10 +799,21 @@ func (w *Waker) fire(agent string) {
 	}
 	log.Printf("wake %s: ok, %s", agent, detail)
 	w.record(ctx, "woke", agent, detail)
-	if !polled.Before(at) {
-		w.record(ctx, store.EventPolled, agent, "polled at "+polled.UTC().Format(time.RFC3339Nano)+", while the wake call was still answering")
-	}
+	w.endWake(ctx, agent, at)
 	w.followUpLater(agent, p.requests)
+}
+
+// endWake ends the wake call to agent in the store, which writes the polled
+// row for a poll the call set off before it returned.
+func (w *Waker) endWake(ctx context.Context, agent string, at time.Time) {
+	if w.audit == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := w.audit.EndWake(ctx, agent, at); err != nil {
+		log.Printf("end wake %s: %v", agent, err)
+	}
 }
 
 // pathStep picks the wake path for agent's nudge about to be sent. An

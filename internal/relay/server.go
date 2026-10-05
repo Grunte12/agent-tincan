@@ -1932,7 +1932,19 @@ type WakeExport struct {
 	Since time.Time   `json:"since"`
 	Until time.Time   `json:"until"`
 	Wakes []WakeEntry `json:"wakes"`
+	// Truncated is set when the window held more audit rows than one
+	// export reads (maxWakeExportRows): the wakes listed are the oldest,
+	// and a later since shows the rest.
+	Truncated bool `json:"truncated,omitempty"`
 }
+
+// maxWakeExportRows bounds the audit rows one wake export reads, and so its
+// memory and response size. Tests lower it.
+var maxWakeExportRows = 5000
+
+// wakePollWindow is how long after until a wake export still looks for a
+// wake's next poll.
+const wakePollWindow = 24 * time.Hour
 
 // WakeEntry is one wake the relay sent, failed to send, or skipped.
 type WakeEntry struct {
@@ -1978,8 +1990,9 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Rows after until are read too: a wake's next poll may fall after it.
-	rows, err := s.store.AuditForActor(r.Context(), agent, since, append(wakeEvents, store.EventPolled, "delivered", "claimed")...)
+	// Rows up to a day after until are read too: a wake's next poll may
+	// fall after it.
+	rows, err := s.store.AuditForActor(r.Context(), agent, since, until.Add(wakePollWindow), maxWakeExportRows, append(wakeEvents, store.EventPolled, "delivered", "claimed")...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -1990,7 +2003,7 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 			path = m
 		}
 	}
-	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}}
+	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}, Truncated: len(rows) == maxWakeExportRows}
 	for i, e := range rows {
 		if !slices.Contains(wakeEvents, e.Event) || e.At.After(until) {
 			continue

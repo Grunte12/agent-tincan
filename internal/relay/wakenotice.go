@@ -87,8 +87,8 @@ const DefaultOwnerNoticeAfter = 3
 // tellOwner counts one more unanswered wake in agent's silent episode,
 // which wk's time names, and when the count reaches OwnerNoticeAfter tells
 // the owner once: a notify from the relay to the approval policy's notify
-// destination. A note on agent's oldest queued request, keyed by the
-// episode, keeps it to once across follow-ups and restarts.
+// destination. A stored record keyed by agent and episode keeps it to once
+// across follow-ups and restarts.
 func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 	episode := wk.At.UnixMilli()
 	s.mu.Lock()
@@ -100,7 +100,7 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 	s.silent[agent] = e
 	s.mu.Unlock()
 	// Every follow-up past the threshold tries again, so a notice that
-	// could not be queued is retried; the note below keeps it to one.
+	// could not be queued is retried; the stored notice keeps it to one.
 	if e.wakes < s.cfg.OwnerNoticeAfter || e.told {
 		return
 	}
@@ -122,9 +122,9 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 	}
 	now := s.cfg.Now()
 	note := s.ownerWakeNote(agent, wk, e.wakes, now)
-	added, err := s.store.AddRelayNote(ctx, anchor.ID, store.NoteOwnerWake, episode, note, now)
+	added, err := s.store.AddOwnerNotice(ctx, agent, episode, note, now)
 	if err != nil {
-		log.Printf("relay note %s %s: %v", store.NoteOwnerWake, anchor.ID, err)
+		log.Printf("owner wake notice for %s: %v", agent, err)
 		return
 	}
 	if !added {
@@ -137,8 +137,8 @@ func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
 		log.Printf("owner wake notice for %s: tell %s: %v", agent, to, err)
 		s.record(ctx, "owner_wake_notice_failed", anchor.ID, anchor.TraceID, "relay", store.DetailJSON(map[string]any{"agent": agent, "to": to}))
 		// Drop the note so the next follow-up tries again.
-		if err := s.store.DeleteRelayNote(ctx, anchor.ID, store.NoteOwnerWake, episode); err != nil {
-			log.Printf("relay note %s %s: %v", store.NoteOwnerWake, anchor.ID, err)
+		if err := s.store.DeleteOwnerNotice(ctx, agent, episode); err != nil {
+			log.Printf("owner wake notice for %s: %v", agent, err)
 		}
 		return
 	}

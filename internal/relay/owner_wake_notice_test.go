@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,7 +159,7 @@ func TestOwnerWakeNoticeNoDestination(t *testing.T) {
 		}
 	}
 	var notes int
-	if err := h.st.DB().QueryRow(`SELECT COUNT(*) FROM relay_notes WHERE kind = ?`, store.NoteOwnerWake).Scan(&notes); err != nil || notes != 0 {
+	if err := h.st.DB().QueryRow(`SELECT COUNT(*) FROM owner_notices`).Scan(&notes); err != nil || notes != 0 {
 		t.Fatalf("owner wake notes = %d, %v; want none", notes, err)
 	}
 	if n := strings.Count(logs.String(), "no notify destination"); n != 1 {
@@ -240,4 +241,94 @@ func TestOwnerWakeNoticeRetriesPastThreshold(t *testing.T) {
 	if got := ownerNotices(t, h, museAddr); len(got) != 0 {
 		t.Fatalf("owner told again in the same episode: %+v", got)
 	}
+}
+
+// The notice is kept to once per agent and episode, not per request: when
+// the request it was raised on is gone, a restarted relay that finds a
+// different oldest request does not tell the owner again.
+func TestOwnerWakeNoticeOnceAfterAnchorGoes(t *testing.T) {
+	h, clk, fw, _ := noticeHarness(t)
+	h.srv.SetPreparer(notifyPreparer{to: "muse"})
+	first := h.send(instinctAddr, "grokbot", "book the 3pm slot")
+	h.send(instinctAddr, "grokbot", "and the 5pm")
+	wk := store.Wake{At: clk.Now(), Result: envelope.WakeOK}
+	fw.set("grokbot", wk)
+	silentFollowUps(h, clk, wk, 3)
+	if got := ownerNotices(t, h, museAddr); len(got) != 1 {
+		t.Fatalf("owner notices = %+v, want one", got)
+	}
+	h.do(instinctAddr, "POST", "/v1/requests/"+first.ID+"/cancel", "", http.StatusOK, nil)
+
+	srv := New(identity.NewDirectory(h.st, h.who, identity.Config{Admins: []string{"macbook-pro-44"}}), h.st, Config{Now: clk.Now})
+	srv.SetWakeNamer(fw)
+	srv.SetPreparer(notifyPreparer{to: "muse"})
+	h2 := &harness{t: t, srv: srv, h: srv.Handler(), st: h.st, who: h.who}
+	silentFollowUps(h2, clk, wk, 4)
+	if got := ownerNotices(t, h2, museAddr); len(got) != 0 {
+		t.Fatalf("owner told again after its first request went: %+v", got)
+	}
+}
+
+// The default threshold of three means three wakes sent and none answered:
+// the waker judges each wake when its follow-up fires, before sending the
+// next, so the owner is told as the fourth would go out, and the notice
+// counts three.
+func TestOwnerWakeNoticeAfterThreeSentWakes(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.srv.SetPreparer(notifyPreparer{to: "instinct"})
+	var sent atomic.Int32
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sent.Add(1) }))
+	t.Cleanup(hook.Close)
+	var sentAtNotice atomic.Int32
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL, MaxPerHour: 100}}, h.st, wake.Options{
+		HTTP:      hook.Client(),
+		Debounce:  time.Millisecond,
+		WakeGrace: 20 * time.Millisecond,
+		Queued:    h.srv.QueuedCount,
+		LastPoll:  h.srv.LastPoll,
+		Unanswered: func(agent string, wk store.Wake) {
+			h.srv.TellAskers(agent, wk)
+			if sentAtNotice.Load() == 0 && len(queuedOwnerNotices(t, h)) > 0 {
+				sentAtNotice.Store(sent.Load())
+			}
+		},
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	h.send(museAddr, "grokbot", "are you there")
+	for deadline := time.Now().Add(10 * time.Second); sentAtNotice.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("no owner notice after %d wakes", sent.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := sentAtNotice.Load(); n != 3 {
+		t.Fatalf("wakes sent when the owner was told = %d, want 3", n)
+	}
+	got := queuedOwnerNotices(t, h)
+	if !strings.Contains(got[0], "after 3 wakes in a row") {
+		t.Fatalf("owner notice = %s", got[0])
+	}
+}
+
+// queuedOwnerNotices reads the bodies of the owner notices queued for
+// instinct without delivering them.
+func queuedOwnerNotices(t *testing.T, h *harness) []string {
+	t.Helper()
+	rows, err := h.st.DB().Query(`SELECT body FROM requests WHERE to_agent = 'instinct' AND body LIKE '%tincan wakes%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, b)
+	}
+	return out
 }

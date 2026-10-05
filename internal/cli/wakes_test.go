@@ -142,3 +142,17 @@ func TestParseWhen(t *testing.T) {
 		}
 	}
 }
+
+// A truncated export says so under the table.
+func TestFormatWakesTruncated(t *testing.T) {
+	at := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	out := relay.WakeExport{Agent: "grokbot", Since: at, Until: at.Add(time.Hour), Truncated: true,
+		Wakes: []relay.WakeEntry{{At: at, Event: "woke", Path: "webhook", Status: "200", Reply: relay.ReplyNotRecorded}}}
+	if got := formatWakes(out); !strings.Contains(got, "later --since") {
+		t.Fatalf("table lacks the truncation line:\n%s", got)
+	}
+	out.Truncated = false
+	if got := formatWakes(out); strings.Contains(got, "later --since") {
+		t.Fatalf("untruncated table has the truncation line:\n%s", got)
+	}
+}

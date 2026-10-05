@@ -104,21 +104,28 @@ func (s *Store) AuditForTrace(ctx context.Context, traceID string) ([]AuditEvent
 	return s.auditWhere(ctx, "WHERE trace_id = ?", traceID)
 }
 
-// AuditForActor returns actor's audit entries of the given events at or
-// after since, oldest first.
-func (s *Store) AuditForActor(ctx context.Context, actor string, since time.Time, events ...string) ([]AuditEvent, error) {
-	if len(events) == 0 {
+// AuditForActor returns actor's audit entries of the given events from
+// since to until, oldest first, at most limit of them.
+func (s *Store) AuditForActor(ctx context.Context, actor string, since, until time.Time, limit int, events ...string) ([]AuditEvent, error) {
+	if len(events) == 0 || limit <= 0 {
 		return nil, nil
 	}
-	args := []any{actor, since.UnixMilli()}
+	args := []any{actor, since.UnixMilli(), until.UnixMilli()}
 	for _, e := range events {
 		args = append(args, e)
 	}
-	return s.auditWhere(ctx, "WHERE actor = ? AND at >= ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", args...)
+	args = append(args, limit)
+	return s.auditQuery(ctx, "WHERE actor = ? AND at >= ? AND at <= ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", "LIMIT ?", args...)
 }
 
 func (s *Store) auditWhere(ctx context.Context, where string, args ...any) ([]AuditEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, event, request_id, trace_id, actor, detail, prev_hash, hash FROM audit `+where+` ORDER BY seq`, args...)
+	return s.auditQuery(ctx, where, "", args...)
+}
+
+// auditQuery reads audit rows matching where, in seq order, with tail (a
+// LIMIT clause, or "") after the ordering.
+func (s *Store) auditQuery(ctx context.Context, where, tail string, args ...any) ([]AuditEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, event, request_id, trace_id, actor, detail, prev_hash, hash FROM audit `+where+` ORDER BY seq `+tail, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -105,6 +105,9 @@ func formatWakes(out relay.WakeExport) string {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", wakeTime(e.At), e.Event, dash(e.Path), dash(e.Status), dash(oneLine(e.Reply)), next, dash(oneLine(e.Error)))
 	}
 	_ = tw.Flush()
+	if out.Truncated {
+		b.WriteString("More wakes than one export holds: these are the oldest. Run again with a later --since for the rest.\n")
+	}
 	return b.String()
 }
 

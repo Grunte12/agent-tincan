@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,5 +252,67 @@ func TestWakeEntryFallbackPath(t *testing.T) {
 	primary := wakeEntry(store.AuditEvent{Event: "woke", Detail: `webhook, HTTP 202, 1 waiting, response: {"status":"queued"}`}, "webhook")
 	if primary.Path != "webhook" || primary.Status != "202" || primary.Reply != `{"status":"queued"}` {
 		t.Fatalf("primary entry = %+v", primary)
+	}
+}
+
+// When an earlier wake went unanswered, a poll made during the next wake's
+// call is still one polled row, written after that wake's own row, so the
+// export pairs it with the wake that set it off and not the earlier one.
+func TestWakeExportPollDuringLaterWakeCall(t *testing.T) {
+	h := newHarness(t, Config{})
+	var calls atomic.Int32
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 2 {
+			h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP: hook.Client(), Debounce: time.Millisecond, RetryDelay: time.Millisecond,
+		WakeGrace: -1, ReplyRetries: []time.Duration{}, Queued: h.srv.QueuedCount, LastPoll: h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+	since := time.Now().Add(-time.Second)
+
+	wakeOnce(h, w, "grokbot") // unanswered
+	time.Sleep(2 * time.Millisecond)
+	wakeOnce(h, w, "grokbot") // the agent polls during this call
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if len(out.Wakes) != 2 {
+		t.Fatalf("export = %+v, want 2 wakes", out)
+	}
+	if out.Wakes[0].NextPoll != nil {
+		t.Errorf("first wake next poll = %v, want none: the poll came during the second call", out.Wakes[0].NextPoll)
+	}
+	if out.Wakes[1].NextPoll == nil || out.Wakes[1].NextVia != "poll" {
+		t.Errorf("second wake = %+v, want the poll made during its call", out.Wakes[1])
+	}
+	if n := auditCount(t, h.st, "polled", "grokbot"); n != 1 {
+		t.Fatalf("polled rows = %d, want 1", n)
+	}
+}
+
+// An export that reaches the row bound says so, and lists the oldest wakes.
+func TestWakeExportTruncated(t *testing.T) {
+	old := maxWakeExportRows
+	maxWakeExportRows = 3
+	t.Cleanup(func() { maxWakeExportRows = old })
+	h, w := wakeExportHarness(t, http.StatusOK)
+	since := time.Now().Add(-time.Second)
+	for range 5 {
+		wakeOnce(h, w, "grokbot")
+	}
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if !out.Truncated || len(out.Wakes) != 3 {
+		t.Fatalf("export = %d wakes, truncated %v; want 3, true", len(out.Wakes), out.Truncated)
+	}
+	maxWakeExportRows = 100
+	if out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK); out.Truncated || len(out.Wakes) != 5 {
+		t.Fatalf("export = %d wakes, truncated %v; want 5, false", len(out.Wakes), out.Truncated)
 	}
 }
