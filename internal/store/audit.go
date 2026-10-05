@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS audit (
   hash       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_trace ON audit(trace_id);
+CREATE INDEX IF NOT EXISTS audit_actor_at ON audit(actor, at);
 `
 
 // AuditEvent is one entry in the append-only audit log.
@@ -103,8 +105,64 @@ func (s *Store) AuditForTrace(ctx context.Context, traceID string) ([]AuditEvent
 	return s.auditWhere(ctx, "WHERE trace_id = ?", traceID)
 }
 
+// AuditForActor returns actor's audit entries of the given events from
+// since to until, oldest first, at most limit of them.
+func (s *Store) AuditForActor(ctx context.Context, actor string, since, until time.Time, limit int, events ...string) ([]AuditEvent, error) {
+	if len(events) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	args := []any{actor, since.UnixMilli(), until.UnixMilli()}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	args = append(args, limit)
+	return s.auditQuery(ctx, "WHERE actor = ? AND at >= ? AND at <= ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", "LIMIT ?", args...)
+}
+
+// FirstAuditAfter returns actor's first audit entry of the given events with
+// a seq above after and, when before is not 0, below before.
+func (s *Store) FirstAuditAfter(ctx context.Context, actor string, after, before int64, events ...string) (AuditEvent, bool, error) {
+	if len(events) == 0 {
+		return AuditEvent{}, false, nil
+	}
+	if before == 0 {
+		before = math.MaxInt64
+	}
+	args := []any{actor, after, before}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	rows, err := s.auditQuery(ctx, "WHERE actor = ? AND seq > ? AND seq < ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+")", "LIMIT 1", args...)
+	if err != nil || len(rows) == 0 {
+		return AuditEvent{}, false, err
+	}
+	return rows[0], true, nil
+}
+
+// LastAuditFor returns actor's latest audit entry of the given events.
+func (s *Store) LastAuditFor(ctx context.Context, actor string, events ...string) (AuditEvent, bool, error) {
+	if len(events) == 0 {
+		return AuditEvent{}, false, nil
+	}
+	args := []any{actor}
+	for _, e := range events {
+		args = append(args, e)
+	}
+	rows, err := s.auditQuery(ctx, "WHERE seq = (SELECT MAX(seq) FROM audit WHERE actor = ? AND event IN (?"+strings.Repeat(", ?", len(events)-1)+"))", "", args...)
+	if err != nil || len(rows) == 0 {
+		return AuditEvent{}, false, err
+	}
+	return rows[0], true, nil
+}
+
 func (s *Store) auditWhere(ctx context.Context, where string, args ...any) ([]AuditEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, event, request_id, trace_id, actor, detail, prev_hash, hash FROM audit `+where+` ORDER BY seq`, args...)
+	return s.auditQuery(ctx, where, "", args...)
+}
+
+// auditQuery reads audit rows matching where, in seq order, with tail (a
+// LIMIT clause, or "") after the ordering.
+func (s *Store) auditQuery(ctx context.Context, where, tail string, args ...any) ([]AuditEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, event, request_id, trace_id, actor, detail, prev_hash, hash FROM audit `+where+` ORDER BY seq `+tail, args...)
 	if err != nil {
 		return nil, err
 	}

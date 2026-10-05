@@ -72,12 +72,77 @@ func (s *Store) migrateAgentLastPoll() error {
 	return err
 }
 
+// EventPolled is the audit event for an agent's first poll after a relay
+// wake. A wake export pairs each wake with it.
+const EventPolled = "polled"
+
 // TouchAgentPoll records that name polled the relay at t. It only moves the
-// stored time forward and ignores names not in the directory.
+// stored time forward and ignores names not in the directory. The first poll
+// at or after name's last recorded wake also writes a polled audit row, so
+// each wake gets at most one: the conditional update moves last_poll_at past
+// the wake, and later polls no longer match it. While a wake call to name is
+// in flight (BeginWake) the poll only moves the time; EndWake writes its row
+// after the wake's own, where a wake export pairs it.
 func (s *Store) TouchAgentPoll(ctx context.Context, name string, t time.Time) error {
 	ms := t.UnixMilli()
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	if s.waking[name] == 0 {
+		res, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ?
+			AND (last_poll_at IS NULL OR last_poll_at < (SELECT woken_at FROM wakes WHERE agent = ?))
+			AND (SELECT woken_at FROM wakes WHERE agent = ?) <= ?`, ms, name, name, name, ms)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 1 {
+			var woken int64
+			if err := s.db.QueryRowContext(ctx, `SELECT woken_at FROM wakes WHERE agent = ?`, name).Scan(&woken); err != nil {
+				return err
+			}
+			detail := "first poll since the wake at " + time.UnixMilli(woken).UTC().Format(time.RFC3339Nano)
+			return s.Audit(ctx, AuditEvent{Event: EventPolled, Actor: name, Detail: detail})
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_poll_at = ? WHERE name = ? AND (last_poll_at IS NULL OR last_poll_at < ?)`, ms, name, ms)
 	return err
+}
+
+// BeginWake marks a wake call to agent as in flight, so a poll it sets off
+// before the call returns is held for EndWake.
+func (s *Store) BeginWake(agent string) {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	if s.waking == nil {
+		s.waking = map[string]int{}
+	}
+	s.waking[agent]++
+}
+
+// EndWake ends the wake call BeginWake marked, once its result and audit row
+// are written. at is when the send that decided the result started. If agent
+// polled at or after it while the call was in flight, the polled row is
+// written now, after the wake's own row; later polls write none for this
+// wake, as last_poll_at is already past it.
+func (s *Store) EndWake(ctx context.Context, agent string, at time.Time) error {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	if s.waking[agent]--; s.waking[agent] <= 0 {
+		delete(s.waking, agent)
+	}
+	var last sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT last_poll_at FROM agents WHERE name = ?`, agent).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (!last.Valid || last.Int64 < at.UnixMilli())) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	detail := "polled at " + time.UnixMilli(last.Int64).UTC().Format(time.RFC3339Nano) + ", while the wake call was still answering"
+	return s.Audit(ctx, AuditEvent{Event: EventPolled, Actor: agent, Detail: detail})
 }
 
 // AgentLastPoll is name's persisted last poll, zero when it has never polled
@@ -152,6 +217,23 @@ func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Req
 	return scanRequests(rows)
 }
 
+// OldestQueued returns agent's oldest live queued request of any kind, and
+// whether there is one. The owner's wake notice dedupes on it.
+func (s *Store) OldestQueued(ctx context.Context, agent string) (envelope.Request, bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT 1`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli())
+	if err != nil {
+		return envelope.Request{}, false, err
+	}
+	defer rows.Close()
+	reqs, err := scanRequests(rows)
+	if err != nil || len(reqs) == 0 {
+		return envelope.Request{}, false, err
+	}
+	return reqs[0], true, nil
+}
+
 // AddRelayNote records note on request id for kind and episode, once. It
 // reports false when that note is already there, so a later follow-up, a
 // second sweep, or a restarted relay does not tell the asker again.
@@ -165,8 +247,8 @@ func (s *Store) AddRelayNote(ctx context.Context, id, kind string, episode int64
 	return n == 1, err
 }
 
-// RelayNote is the latest note the relay added to request id, nil when it
-// has none. By is "relay".
+// RelayNote is the latest note the relay added to request id for its
+// asker, nil when it has none. By is "relay".
 func (s *Store) RelayNote(ctx context.Context, id string) (*envelope.Progress, error) {
 	var note string
 	var ms int64
@@ -204,4 +286,37 @@ func (s *Store) HeldClaims(ctx context.Context, agent string, limit int) ([]enve
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// migrateOwnerNotices creates the table that keeps the owner's wake notice
+// to once per agent and silent episode (the episode's wake time, Unix ms),
+// across follow-ups and relay restarts.
+func (s *Store) migrateOwnerNotices() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS owner_notices (agent TEXT NOT NULL, episode INTEGER NOT NULL,
+		note TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (agent, episode))`)
+	return err
+}
+
+// EnqueueOwnerNotice queues req, the owner's notice about agent's silent
+// episode, and records that it was sent, in one transaction, so a failure
+// or crash leaves neither and the next follow-up tries again. It reports
+// false, queuing nothing, when the episode's notice was already sent.
+func (s *Store) EnqueueOwnerNotice(ctx context.Context, agent string, episode int64, req envelope.Request, ttl time.Duration) (envelope.Request, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Request{}, false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO owner_notices (agent, episode, note, at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(agent, episode) DO NOTHING`, agent, episode, req.Body, s.now().UnixMilli())
+	if err != nil {
+		return envelope.Request{}, false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return envelope.Request{}, false, err
+	}
+	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
+		return envelope.Request{}, false, err
+	}
+	return req, true, tx.Commit()
 }

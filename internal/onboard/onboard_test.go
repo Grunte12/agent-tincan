@@ -558,6 +558,36 @@ func TestRenderedInstructionsIncludeUpgradeGuidance(t *testing.T) {
 	}
 }
 
+// A vm-webhook agent (Grok Bot) runs its box bring-up before anything else in
+// every turn, so the first turn after a rebuild restores Tailscale and the
+// relay, and reports a failed bring-up to the owner. Other kinds do not.
+func TestVMWebhookRunsBringUpFirst(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{
+		{Name: "grokbot", Wake: "webhook", Kind: "vm-webhook"},
+		{Name: "claude-code", Wake: "channel", Kind: "claude-code"},
+		{Name: "codex", Wake: "command", Kind: "codex"},
+		{Name: "chatgpt", Kind: "chatgpt"},
+		{Name: "chatgpt-web", Kind: "chatgpt-web"},
+	}})
+	const bringUp = "~/.local/bin/tincan-up.sh"
+	txt := block(t, k, "grokbot").Instructions
+	up, inbox := strings.Index(txt, bringUp), strings.Index(txt, "call check_inbox (or run tincan inbox) first")
+	if up < 0 || inbox < 0 || up > inbox {
+		t.Fatalf("vm-webhook instructions must run %s before the check_inbox step:\n%s", bringUp, txt)
+	}
+	line := txt[strings.LastIndex(txt[:up], "\n")+1 : inbox]
+	for _, want := range []string{"If ~/.local/bin/tincan-up.sh exists", "skip this step", "every turn", "before check_inbox", "tell Matt", "exit code", "docs/adapters/grokbot.md"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("bring-up line lacks %q:\n%s", want, line)
+		}
+	}
+	for _, n := range []string{"claude-code", "codex", "chatgpt", "chatgpt-web"} {
+		if a := block(t, k, n); strings.Contains(blockText(a), "tincan-up.sh") {
+			t.Errorf("%s block mentions tincan-up.sh:\n%s", n, blockText(a))
+		}
+	}
+}
+
 // Every model agent, the scheduled kind included, is told to choose a
 // teammate by its good_at line in the live roster, to send a real-world
 // action to one teammate at a time, and to leave lines to the owner. Service

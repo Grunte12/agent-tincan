@@ -35,13 +35,17 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 		return
 	}
 	if last := s.lastPollSince(agent, wk.At); !last.IsZero() && !last.Before(wk.At) {
-		return // it checked in after all
+		s.mu.Lock()
+		delete(s.silent, agent) // it checked in after all
+		s.mu.Unlock()
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if a, found, err := s.dir.Agent(ctx, agent); err != nil || !found || wk.At.Before(a.JoinedAt) {
 		return // gone, or the wake went to an earlier agent of the same name
 	}
+	s.tellOwner(ctx, agent, wk)
 	reqs, err := s.store.UnnoticedAsks(ctx, agent)
 	if err != nil {
 		log.Printf("wake notice for %s: %v", agent, err)
@@ -66,6 +70,98 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 		note := s.wakeNote(agent, wk, s.onlineTeammates(roster, now, req.From, agent), now)
 		s.noteAndTell(ctx, req, store.NoteWake, 0, note, now)
 	}
+}
+
+// silentEpisode is one relay-woken agent's current run of unanswered
+// wakes.
+type silentEpisode struct {
+	at    int64 // the episode's wake time, Unix ms, fixed while it is silent
+	wakes int   // wakes it has left unanswered
+	told  bool  // the owner's notice is queued
+}
+
+// DefaultOwnerNoticeAfter is how many wakes in a row a relay-woken agent
+// may leave unanswered before the owner is told.
+const DefaultOwnerNoticeAfter = 3
+
+// tellOwner counts one more unanswered wake in agent's silent episode,
+// which wk's time names, and when the count reaches OwnerNoticeAfter tells
+// the owner once: a notify from the relay to the approval policy's notify
+// destination. A stored record keyed by agent and episode keeps it to once
+// across follow-ups and restarts.
+func (s *Server) tellOwner(ctx context.Context, agent string, wk store.Wake) {
+	episode := wk.At.UnixMilli()
+	s.mu.Lock()
+	e := s.silent[agent]
+	if e.at != episode {
+		e = silentEpisode{at: episode}
+	}
+	e.wakes++
+	s.silent[agent] = e
+	s.mu.Unlock()
+	// Every follow-up past the threshold tries again, so a notice that
+	// could not be queued is retried; the stored notice keeps it to one.
+	if e.wakes < s.cfg.OwnerNoticeAfter || e.told {
+		return
+	}
+	to := s.notifyDestination()
+	if to == "" {
+		if e.wakes > s.cfg.OwnerNoticeAfter {
+			return // said once already
+		}
+		log.Printf("owner wake notice for %s: %d wakes unanswered, but no notify destination is configured in the approval policy", agent, e.wakes)
+		return
+	}
+	anchor, found, err := s.store.OldestQueued(ctx, agent)
+	if err != nil {
+		log.Printf("owner wake notice for %s: %v", agent, err)
+		return
+	}
+	if !found {
+		return
+	}
+	note := s.ownerWakeNote(ctx, agent, wk, e.wakes, s.cfg.Now())
+	n := envelope.Request{From: "relay", To: to, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: note}
+	n, added, err := s.store.EnqueueOwnerNotice(ctx, agent, episode, n, s.requestTTL(ctx, to))
+	if err != nil {
+		log.Printf("owner wake notice for %s: tell %s: %v", agent, to, err)
+		s.record(ctx, "owner_wake_notice_failed", anchor.ID, anchor.TraceID, "relay", store.DetailJSON(map[string]any{"agent": agent, "to": to}))
+		return // nothing was recorded, so the next follow-up tries again
+	}
+	if !added {
+		s.markTold(agent, episode) // sent before, by this relay or one before a restart
+		return
+	}
+	s.markTold(agent, episode)
+	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"owner_wake_notice_for": agent, "to": to}))
+	s.noticeQueued(ctx, n)
+}
+
+// markTold records that the owner has been told about agent's episode, so
+// later follow-ups in it skip the store.
+func (s *Server) markTold(agent string, episode int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur := s.silent[agent]; cur.at == episode {
+		cur.told = true
+		s.silent[agent] = cur
+	}
+}
+
+// ownerWakeNote is the text the owner gets when agent has left that many
+// wakes unanswered in a row. It names the wake method only, the stored
+// result, and, when the last wake sent was answered 2xx, the webhook's reply
+// as the waker kept it (secrets redacted, or the whole reply withheld); none
+// of these carries a URL, token or key.
+func (s *Server) ownerWakeNote(ctx context.Context, agent string, wk store.Wake, wakes int, now time.Time) string {
+	reply := ""
+	if e, found, err := s.store.LastAuditFor(ctx, agent, "woke", "wake_failed"); err == nil && found && e.Event == "woke" {
+		if r := wakeEntry(e, "").Reply; r != ReplyNotRecorded {
+			reply = "; last webhook reply: " + r
+		}
+	}
+	return fmt.Sprintf("%s has not checked in after %d wakes in a row since %s (wake path: %s; last wake result: %s%s). Its requests are still queued. Run tincan wakes %s for its wake history. No reply needed.",
+		agent, wakes, utcClock(wk.At, now), s.wake.WakeMethod(agent), wk.Result, reply, agent)
 }
 
 // noteAndTell records note on req for kind and episode and, the first time
@@ -215,10 +311,7 @@ func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note str
 		return
 	}
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"wake_notice_for": req.ID, "to": n.To}))
-	s.hub.notify(inboxKey(n.To))
-	if s.events != nil {
-		s.events.Queued(ctx, n)
-	}
+	s.noticeQueued(ctx, n)
 }
 
 // utcClock is t as "16:40 UTC", with the date when it is not now's day:
