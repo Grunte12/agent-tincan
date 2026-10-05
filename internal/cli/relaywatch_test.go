@@ -89,8 +89,9 @@ func TestRelayWatchProbe(t *testing.T) {
 	if err := relayProbe(watchRelay(t, client.Config{Relay: watchedRelay(t, key, http.StatusForbidden), Agent: "hermes", RelayKey: key}))(t.Context()); err != nil {
 		t.Fatalf("relay answering 403: probe %v", err)
 	}
-	// A proxy answering for a relay that is down is not the relay.
-	for _, code := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
+	// A proxy answering for a relay that is down is not the relay, and a
+	// relay that cannot check callers serves no one.
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		if err := relayProbe(watchRelay(t, client.Config{Relay: watchedRelay(t, key, code), Agent: "hermes", RelayKey: key}))(t.Context()); err == nil {
 			t.Fatalf("relay answering %d: probe reported up", code)
 		}

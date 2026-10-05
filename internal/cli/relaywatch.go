@@ -109,17 +109,23 @@ func relayWatchCmd() *cobra.Command {
 
 // relayProbe asks the relay who this client is, which finds a relay that
 // moved (internal/client/discover.go). Any answer from the relay, even an
-// error, means it is up; only no answer is an outage.
+// error, means it is up, except a 502, 503 or 504: a proxy answering for a
+// relay that is gone, or a relay that cannot check who is calling, which
+// serves no agent either.
 func relayProbe(r *client.Relay) func(context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, relayProbeFor)
 		defer cancel()
 		_, err := r.WhoAmI(ctx)
-		if api, ok := errors.AsType[*client.APIError](err); ok && api.Code != http.StatusBadGateway && api.Code != http.StatusGatewayTimeout {
+		if api, ok := errors.AsType[*client.APIError](err); ok && !relayDownCode(api.Code) {
 			return nil
 		}
 		return err
 	}
+}
+
+func relayDownCode(code int) bool {
+	return code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 }
 
 func relayWatchInstallCmd() *cobra.Command {
