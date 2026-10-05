@@ -48,10 +48,12 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -1117,7 +1119,7 @@ const maxAnswer = 200
 // and HMAC secret. Strings too short to be a secret are left out, so a "/"
 // path does not blank out the summary.
 func webhookSecrets(t Target, u *url.URL) []string {
-	out := []string{t.URL, t.BearerToken, t.HMACSecret, u.Path, u.RawQuery}
+	out := []string{t.URL, t.BearerToken, t.HMACSecret, u.Path, u.EscapedPath(), u.RawQuery}
 	if u.User != nil {
 		out = append(out, u.User.String())
 	}
@@ -1149,37 +1151,86 @@ func secretForms(sec string) []string {
 	return slices.Compact(forms)
 }
 
-// withheldAnswer stands in for a response body that holds a secret too short
-// to redact.
+// withheldAnswer stands in for a response body that still holds a secret
+// after redaction: one too short to replace, or one in an encoding the
+// replacement does not cover.
 const withheldAnswer = "[withheld: may contain a secret]"
+
+// leaksSecret reports whether any secret, or its base64 form, can still be
+// read from s: as is, from the strings of s parsed as JSON (every escape
+// decoded), or from either of those percent-decoded or HTML-unescaped.
+func leaksSecret(s string, secrets []string) bool {
+	views := []string{s}
+	if json.Valid([]byte(s)) {
+		var strs []string
+		dec := json.NewDecoder(strings.NewReader(s))
+		for {
+			tok, err := dec.Token()
+			if err != nil {
+				break
+			}
+			if str, ok := tok.(string); ok {
+				strs = append(strs, str)
+			}
+		}
+		views = append(views, strings.Join(strs, "\n"))
+	}
+	for _, v := range views[:len(views):len(views)] {
+		if d, err := url.PathUnescape(v); err == nil && d != v {
+			views = append(views, d)
+		} else if d, err := url.QueryUnescape(v); err == nil && d != v {
+			views = append(views, d)
+		}
+	}
+	for _, v := range views[:len(views):len(views)] {
+		if d := html.UnescapeString(v); d != v {
+			views = append(views, d)
+		}
+	}
+	for _, sec := range secrets {
+		needles := []string{sec}
+		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+			needles = append(needles, enc.EncodeToString([]byte(sec)))
+		}
+		for _, v := range views {
+			for _, n := range needles {
+				if strings.Contains(v, n) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 // answerSummary is a 2xx response body as one short line for the relay log
 // and audit log: each secret (also JSON-escaped) replaced by [redacted],
 // control and format characters turned into spaces, whitespace collapsed,
 // then cut to maxAnswer bytes on a rune boundary. Secrets are replaced
-// before the cut, so no part of one survives at the edge.
+// before the cut, so no part of one survives at the edge. A body that still
+// holds a secret in any form leaksSecret can read is withheld whole.
 func answerSummary(raw []byte, secrets []string) string {
 	s := strings.ToValidUTF8(string(raw), "?")
-	var redact []string
+	var redact, check []string
 	for _, sec := range secrets {
 		if strings.Trim(sec, "/") == "" {
 			continue // an empty or bare "/" URL path is not a secret
 		}
-		if len(sec) < 4 {
-			// Too short to replace without mangling the text around it, so
-			// a body holding one is not kept at all.
-			if strings.Contains(s, sec) {
-				return withheldAnswer
-			}
-			continue
+		check = append(check, sec)
+		if len(sec) >= 4 {
+			// A shorter one cannot be replaced without mangling the text
+			// around it; the leak check below withholds a body holding it.
+			redact = append(redact, secretForms(sec)...)
 		}
-		redact = append(redact, secretForms(sec)...)
 	}
 	// Longest first, so a secret inside a longer one (the path inside the
 	// URL) does not break the longer match.
 	sort.Slice(redact, func(i, j int) bool { return len(redact[i]) > len(redact[j]) })
 	for _, sec := range redact {
 		s = strings.ReplaceAll(s, sec, "[redacted]")
+	}
+	if leaksSecret(s, check) {
+		return withheldAnswer
 	}
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
