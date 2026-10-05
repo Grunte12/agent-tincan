@@ -10,7 +10,8 @@ import (
 )
 
 // Wake is the last wake the relay sent an agent: when, and "ok" or the
-// error that made the send and its retry fail.
+// error that made the send and its retry fail, with " (fallback N: <method>)"
+// after it when the send went out on a fallback path.
 type Wake struct {
 	At     time.Time
 	Result string
