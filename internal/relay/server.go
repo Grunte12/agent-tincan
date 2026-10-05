@@ -52,6 +52,11 @@ type Config struct {
 	// request is queued, and how long an urgent request waits in silence
 	// before its asker is told; default DefaultUrgentWakeGrace.
 	UrgentWakeGrace time.Duration
+	// OwnerNoticeAfter is how many wakes in a row a relay-woken agent may
+	// leave unanswered before the owner is told, once per silent episode,
+	// through the approval policy's notify destination; default
+	// DefaultOwnerNoticeAfter.
+	OwnerNoticeAfter int
 }
 
 func (c *Config) defaults() {
@@ -87,6 +92,9 @@ func (c *Config) defaults() {
 	}
 	if c.UrgentWakeGrace == 0 {
 		c.UrgentWakeGrace = DefaultUrgentWakeGrace
+	}
+	if c.OwnerNoticeAfter == 0 {
+		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
 	}
 	c.Attachments.defaults()
 }
@@ -178,6 +186,9 @@ type Server struct {
 	// upgraded CLI) do not write to the store on every alternating call.
 	storedVersion  map[string]string
 	versionWritten map[string]time.Time
+	// silent counts each relay-woken agent's unanswered wakes in its
+	// current silent episode, for the owner's wake notice.
+	silent map[string]silentEpisode
 
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
@@ -206,7 +217,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, stopping: make(chan struct{}), started: cfg.Now()}
+		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now()}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
