@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type authChannel struct {
@@ -95,5 +100,76 @@ func TestWebStatusIdleProbe(t *testing.T) {
 	w.probeIdle(t.Context())
 	if len(c.calls) != 2 {
 		t.Fatal("idle probe did not resume")
+	}
+}
+
+// A session can stay in the browser long after an incoming ask arrives.
+type stalledProbeChannel struct {
+	started, release chan struct{}
+}
+
+func (c *stalledProbeChannel) Exchange(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+	if req.Op == Op("chatgpt.session") {
+		close(c.started)
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		_, err := recv(NativeResponse{OK: true, Result: json.RawMessage(`{}`)})
+		return err
+	}
+	_, err := recv(NativeResponse{Error: &NativeError{Code: "not_logged_in"}})
+	return err
+}
+
+type statusTransport func(*http.Request) (*http.Response, error)
+
+func (f statusTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestIdleProbeDoesNotDelayAsk(t *testing.T) {
+	c := &stalledProbeChannel{started: make(chan struct{}), release: make(chan struct{})}
+	relay := client.NewRelayHTTP("http://relay", &http.Client{Transport: statusTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})})
+	w := &WebAgent{Site: SourceChatGPT, Name: "web", Relay: relay, Native: &Client{Channel: c}, Allowlist: StaticAllowlist("codex"), Log: &bytes.Buffer{}}
+	probeDone := make(chan struct{})
+	go func() { defer close(probeDone); w.probeIdle(t.Context()) }()
+	<-c.started
+	released := false
+	defer func() {
+		if !released {
+			close(c.release)
+		}
+		<-probeDone
+	}()
+	askDone := make(chan struct{})
+	go func() {
+		defer close(askDone)
+		w.Handle(t.Context(), envelope.Request{ID: "ask", From: "codex", To: "web", Chain: []string{"codex"}, Kind: envelope.KindAsk, Body: "hello"})
+	}()
+	select {
+	case <-askDone:
+	case <-time.After(time.Second):
+		t.Fatal("ask waited for the idle probe")
+	}
+	if w.auth.latest.State != "signed_out" {
+		t.Fatal("ask did not reach the browser send")
+	}
+	// Release explicitly to inspect the stale result, keeping cleanup safe.
+	close(c.release)
+	<-probeDone
+	released = true
+	if w.auth.latest.State != "signed_out" {
+		t.Fatal("stale probe cleared the send's sign-out")
+	}
+}
+
+func TestIndeterminateProbeDoesNotClear(t *testing.T) {
+	w := &WebAgent{Site: SourceGrok, Native: &Client{Channel: &authChannel{code: "indeterminate"}}, Log: &bytes.Buffer{}}
+	w.observeAuth(ErrNotLoggedIn)
+	w.probeSession(t.Context())
+	if w.auth.latest.State != "signed_out" {
+		t.Fatal("indeterminate probe cleared sign-out")
 	}
 }

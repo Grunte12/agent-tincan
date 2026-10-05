@@ -820,9 +820,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // send.js's grok selectors) is the second gate and runs before anything
   // is typed, so a signed-out page that still answered the list is
   // refused there.
-  async function grokSession() {
+  async function grokSession(requireAccount = false) {
     const r = await grokJSON(`${GROK}/rest/app-chat/conversations?pageSize=1`, {});
     if (!r || !Array.isArray(r.conversations)) throw new OpError('not_logged_in', 'no grok.com session');
+    if (requireAccount && r.conversations.length === 0) throw new OpError('indeterminate', 'empty Grok list carries no account signal');
   }
 
   // grokAsset resolves a generatedImageUrls entry (a path on the image host,
@@ -1054,7 +1055,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'chatgpt.session'() { await chatgptAuth(); return {}; },
     async 'dots.session'() { await chatgptAuth(); return {}; },
     async 'claudeai.session'() { claudeOrg = null; await claudeOrgId(); return {}; },
-    async 'grok.session'() { await grokSession(); return {}; },
+    async 'grok.session'() { await grokSession(true); return {}; },
     async 'gemini.session'() { await geminiAuth(true); return {}; },
     async 'perplexity.session'() { await perplexitySession(); return {}; },
     async 'copilot.session'() {

@@ -1606,3 +1606,33 @@ test('copilot session probe closes its owned tab on success and sign-out', async
   await assert.rejects(sender(failed).session('copilot'), e => e.code === 'not_logged_in');
   assert.deepEqual(failed.log.removed, [100]);
 });
+
+test('copilot send finishes while an idle session probe is still loading', async () => {
+  const fc = fakeChrome(url => url.includes('/conversation/')
+    ? new FakeSite('copilot', url, { neverFinish: true }) : new HtmlSite(url, SIDEBAR));
+  let release, started;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  const get = fc.chrome.tabs.get;
+  fc.chrome.tabs.get = async id => {
+    if (id === 100) { started(); await blocked; }
+    return get(id);
+  };
+  const s = sender(fc);
+  const probe = s.session('copilot');
+  await entered;
+  let timer;
+  try {
+    await Promise.race([
+      s.send('copilot', { message: 'hi', conversation_id: COPILOT_CONV }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('send waited for probe')), 1000); }),
+    ]);
+    assert.equal(fc.log.created.length, 2);
+    assert.equal(fc.log.removed.includes(100), false, 'probe is still in flight');
+  } finally {
+    clearTimeout(timer);
+    release();
+    await probe;
+  }
+  assert.equal(fc.log.removed.includes(100), true, 'probe closes its own tab');
+});

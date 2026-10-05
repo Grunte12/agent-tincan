@@ -1229,12 +1229,13 @@ A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan Histor
 
 What it can do:
 
-- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai, grok.com and gemini.google.com, `perplexity.detail` for one www.perplexity.ai thread, `copilot.list` and `copilot.detail` for copilot.com, `chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `perplexity.send` and `copilot.send`, `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close`, `perplexity.close` and `copilot.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
-- Open, fill and close its own background tabs for sends.
+- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai, grok.com and gemini.google.com, `perplexity.detail` for one www.perplexity.ai thread, `copilot.list` and `copilot.detail` for copilot.com, `chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `perplexity.send` and `copilot.send`, `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close`, `perplexity.close` and `copilot.close`, `chatgpt.session`, `dots.session`, `claudeai.session`, `grok.session`, `gemini.session`, `perplexity.session` and `copilot.session`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
+- Open, fill and close its own background tabs for sends. Run argument-free session checks, including an owned Copilot background tab that closes without typing. See the [session operation contract](extension/README.md#session-operations) for each check's inputs and reads.
 
 What it cannot do:
 
 - It accepts nothing outside that operation set and never runs code from a message or a page. A message is passed as data to a fixed function in an isolated content script and inserted as text.
+- Session checks cannot accept arbitrary URLs, return credentials or account fields, or send messages. An indeterminate check cannot clear a known sign-out.
 - No cookie or token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
 - Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok, gemini.google.com and `lh3.googleusercontent.com` only after the owner grants Gemini, www.perplexity.ai only after the owner grants Perplexity, and copilot.com and copilot.microsoft.com only after the owner grants Copilot, on the extension's options page (optional host permissions, so installing or updating asks nothing for any of them).

@@ -228,7 +228,17 @@ func cleanVersion(v string) string {
 }
 
 // SetPreparer installs the chain and policy step.
-func (s *Server) SetPreparer(p Preparer) { s.prep = p }
+func (s *Server) SetPreparer(p Preparer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prep = p
+}
+
+func (s *Server) preparer() Preparer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prep
+}
 
 // Connector links virtual agents (ChatGPT through the gateway).
 type Connector interface {
@@ -556,7 +566,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.prep.Prepare(r.Context(), &req); err != nil {
+	prep := s.preparer()
+	if err := prep.Prepare(r.Context(), &req); err != nil {
 		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
 		writeErr(w, statusFor(err), err)
 		return
@@ -564,7 +575,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	prepared := req
 	req, err = s.store.Enqueue(r.Context(), req, s.requestTTL(r.Context(), req.To))
 	if err != nil {
-		if rf, ok := s.prep.(Refunder); ok {
+		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
 		}
 		if errors.Is(err, store.ErrGroupFull) {

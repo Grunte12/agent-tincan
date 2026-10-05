@@ -163,7 +163,8 @@ type WebAgent struct {
 	// request (send, reply wait and tab close) and for each watcher tick,
 	// so inbound and outbound never type into the site at once and an
 	// outbound reply is never typed while an inbound request waits.
-	mu sync.Mutex
+	mu             sync.Mutex
+	sendGeneration uint64
 	// watch is the outbound watcher's state; only the watcher uses it.
 	watch dotWatch
 	auth  webAuthState
@@ -418,6 +419,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	// crash): it is not sent again, only its reply is read.
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.sendGeneration++
 	if e, ok := w.loadJournal().Requests[req.ID]; ok {
 		w.resume(ctx, req, wr, e)
 		return

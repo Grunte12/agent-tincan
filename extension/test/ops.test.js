@@ -1357,3 +1357,25 @@ test('session operations are argument-free and return no credentials', async () 
     await assert.rejects(run(createRunner({ fetch: fakeFetch({ [SESSION]: jsonResponse({}) }) }), site + '.session', {}), e => e.code === 'not_logged_in');
   }
 });
+
+for (const [site, url, signedIn, signedOut] of [
+  ['claudeai', 'https://claude.ai/api/organizations', () => jsonResponse(fixture('claudeai/organizations.json')), () => jsonResponse([])],
+  ['grok', 'https://grok.com/rest/app-chat/conversations?pageSize=1', () => jsonResponse({ conversations: [{ conversationId: 'account-conversation' }] }), () => jsonResponse({}, 401)],
+  ['gemini', 'https://gemini.google.com/app', () => new Response(APP_HTML), () => new Response('<html>Sign in</html>')],
+  ['perplexity', 'https://www.perplexity.ai/api/auth/session', () => jsonResponse({ user: { id: 'private-user-id' } }), () => jsonResponse({})],
+]) {
+  test(`${site}.session executes fresh signed-in and signed-out checks`, async () => {
+    let authenticated = true;
+    const fetch = fakeFetch({ [url]: () => authenticated ? signedIn() : signedOut() });
+    const runner = createRunner({ fetch });
+    assert.deepEqual(await run(runner, site + '.session', {}), [{ ok: true, result: {} }]);
+    authenticated = false;
+    await assert.rejects(run(runner, site + '.session', {}), e => e.code === 'not_logged_in');
+    assert.equal(fetch.calls.length, 2, 'each probe fetches fresh evidence');
+  });
+}
+
+test('grok.session treats an empty successful list as indeterminate', async () => {
+  const fetch = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ conversations: [] }) });
+  await assert.rejects(run(createRunner({ fetch }), 'grok.session', {}), e => e.code === 'indeterminate');
+});

@@ -59,7 +59,7 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) notifyWebStatus(ctx context.Context) {
-	notifier, ok := s.prep.(interface{ NotifyDestination() string })
+	notifier, ok := s.preparer().(interface{ NotifyDestination() string })
 	if !ok {
 		return
 	}

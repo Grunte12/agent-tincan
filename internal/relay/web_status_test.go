@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -25,4 +27,24 @@ func TestWebStatusRouteAndTarget(t *testing.T) {
 	} {
 		h.do(grokAddr, "PUT", "/v1/agents/self/web-status", bad, http.StatusBadRequest, nil)
 	}
+}
+
+type statusPreparer struct{}
+
+func (*statusPreparer) Prepare(context.Context, *envelope.Request) error { return nil }
+func (*statusPreparer) NotifyDestination() string                        { return "" }
+
+func TestWebStatusConcurrentPreparerReplacement(t *testing.T) {
+	s := &Server{}
+	s.SetPreparer(&statusPreparer{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			s.SetPreparer(&statusPreparer{})
+		}
+	})
+	for range 1000 {
+		s.notifyWebStatus(t.Context())
+	}
+	wg.Wait()
 }

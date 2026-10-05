@@ -1026,7 +1026,8 @@ export function createSender({
     session(site) {
       if (site !== 'copilot') return Promise.reject(new OpError('bad_request', 'unknown site'));
       const accepted = now();
-      return enqueue(site, () => readTab(site, SITES[site].newURL, async () => ({ result: {} }), accepted));
+      // Probes own a separate tab and must not queue an incoming send.
+      return readTab(site, SITES[site].newURL, async () => ({ result: {} }), accepted);
     },
     // readList reads Copilot's chat list from its rendered sidebar (see
     // above).

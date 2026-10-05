@@ -50,11 +50,15 @@ func (w *WebAgent) observeAuth(err error) {
 }
 
 func (w *WebAgent) probeSession(ctx context.Context) {
+	w.observeAuth(w.sessionError(ctx))
+}
+
+func (w *WebAgent) sessionError(ctx context.Context) error {
 	w.auth.mu.Lock()
 	disabled := w.auth.probeUnsupported
 	w.auth.mu.Unlock()
 	if disabled {
-		return
+		return ErrRejected
 	}
 	timeout := 30 * time.Second
 	if w.site().listInTab {
@@ -70,9 +74,8 @@ func (w *WebAgent) probeSession(ctx context.Context) {
 		}
 		w.auth.probeUnsupported = true
 		w.auth.mu.Unlock()
-		return
 	}
-	w.observeAuth(err)
+	return err
 }
 
 // authRequest observes failures before callers convert or swallow them.
@@ -149,13 +152,14 @@ func (w *WebAgent) reportWebStatus(ctx context.Context) {
 	}
 }
 
-// probeIdle never overlaps a send and schedules from the latest fresh evidence.
+// probeIdle starts only while idle, but never makes a send wait for browser I/O.
 func (w *WebAgent) probeIdle(ctx context.Context) time.Time {
 	now := w.clk().Now()
 	if !w.mu.TryLock() {
 		return now.Add(time.Second)
 	}
-	defer w.mu.Unlock()
+	generation := w.sendGeneration
+	w.mu.Unlock()
 	if w.Native == nil {
 		return now.Add(webProbeInterval)
 	}
@@ -168,6 +172,12 @@ func (w *WebAgent) probeIdle(ctx context.Context) time.Time {
 	if !fresh.IsZero() && now.Sub(fresh) < webProbeInterval {
 		return fresh.Add(webProbeInterval)
 	}
-	w.probeSession(ctx)
+	err := w.sessionError(ctx)
+	if w.mu.TryLock() {
+		if generation == w.sendGeneration {
+			w.observeAuth(err)
+		}
+		w.mu.Unlock()
+	}
 	return w.clk().Now().Add(webProbeInterval)
 }
