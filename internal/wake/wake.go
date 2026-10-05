@@ -57,7 +57,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,6 +149,21 @@ func pathLabel(t Target, i int) string {
 		return t.Method
 	}
 	return fmt.Sprintf("fallback %d: %s", i, t.path(i).Method)
+}
+
+// resultMarker finds the fallback a stored wake result names (see
+// pathLabel), as in "ok (fallback 2: email)".
+var resultMarker = regexp.MustCompile(`\(fallback (\d+): [a-z]+\)$`)
+
+// resultStep is the path index a stored wake result was sent on: 0 for the
+// primary, n for "(fallback n: ...)".
+func resultStep(result string) int {
+	m := resultMarker.FindStringSubmatch(result)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
 }
 
 // Config maps agent name to Target.
@@ -325,6 +343,7 @@ type nudge struct {
 	retry    int         // next step of Options.ReplyRetries to schedule
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 	followUp bool        // --wake-grace request follow-up; poll/queue stop checks apply
+	fresh    int         // requests that arrived while the follow-up was due
 	urgent   bool        // an urgent request was queued since the last nudge
 }
 
@@ -413,9 +432,17 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 		}
 		cancel()
 	}
+	// A restarted relay carries on from the path the last wake used, so a
+	// silent agent is not sent again on paths that already failed it.
+	step := map[string]int{}
+	for agent, wk := range last {
+		if i := resultStep(wk.Result); i > 0 && i <= len(cfg[agent].Fallback) {
+			step[agent] = i
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, step: map[string]int{}, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
+		last: last, step: step, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -587,17 +614,22 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 		}
 		return
 	}
+	silent := w.silent(agent)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	p := w.nudgeFor(agent)
 	p.requests++
 	p.urgent = p.urgent || urgent
-	if p.followUp && !urgent {
+	if p.followUp && !urgent && silent {
 		// A follow-up is already due for this silent agent and counts what
-		// is queued when it fires, so it carries this request too. Waking
-		// now would resend the path that has not started the agent.
+		// is queued when it fires, so it carries this request too, on the
+		// next path. Waking now would resend the path that has not started
+		// the agent. If the agent polls before then, the follow-up turns
+		// into a fresh wake for this request (applyFollowUpStops).
+		p.fresh++
 		return
 	}
+	p.followUp = false
 	if urgent {
 		w.arm(agent, 0)
 	} else {
@@ -679,7 +711,7 @@ func (w *Waker) fire(agent string) {
 	}
 	if p.followUp {
 		w.applyFollowUpStops(agent, p)
-		if p.requests > 0 && w.opts.Unanswered != nil {
+		if p.followUp && p.requests > 0 && w.opts.Unanswered != nil {
 			if wk, ok := w.LastWake(agent); ok {
 				w.opts.Unanswered(agent, wk)
 			}
@@ -791,7 +823,11 @@ func (w *Waker) pathStep(agent string, followUp bool) int {
 // wake. Reply counts are left alone so a coalesced reply ladder still fires.
 func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
 	if w.answered(agent) {
-		p.requests = 0
+		// The agent checked in, so the follow-up is moot, but requests that
+		// rode it still need their own wake: send that as a fresh nudge,
+		// which starts the next episode on the primary.
+		p.requests = p.fresh
+		p.followUp = false
 		return
 	}
 	if w.opts.Queued == nil {
@@ -1091,6 +1127,28 @@ func webhookSecrets(t Target, u *url.URL) []string {
 	return out
 }
 
+// secretForms is sec as it can appear in a response body: as is, and as
+// a JSON string encoder writes it (quotes and backslashes escaped, with or
+// without HTML escaping), each also with "/" escaped as "\/".
+func secretForms(sec string) []string {
+	forms := []string{sec}
+	for _, html := range []bool{true, false} {
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(html)
+		if enc.Encode(sec) == nil {
+			if q := strings.TrimSuffix(b.String(), "\n"); len(q) >= 2 {
+				forms = append(forms, q[1:len(q)-1])
+			}
+		}
+	}
+	for _, f := range forms[:len(forms):len(forms)] {
+		forms = append(forms, strings.ReplaceAll(f, "/", `\/`))
+	}
+	slices.Sort(forms)
+	return slices.Compact(forms)
+}
+
 // withheldAnswer stands in for a response body that holds a secret too short
 // to redact.
 const withheldAnswer = "[withheld: may contain a secret]"
@@ -1115,7 +1173,7 @@ func answerSummary(raw []byte, secrets []string) string {
 			}
 			continue
 		}
-		redact = append(redact, sec, strings.ReplaceAll(sec, "/", `\/`))
+		redact = append(redact, secretForms(sec)...)
 	}
 	// Longest first, so a secret inside a longer one (the path inside the
 	// URL) does not break the longer match.

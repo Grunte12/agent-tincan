@@ -420,3 +420,133 @@ func TestFallbackNewRequestKeepsFollowUp(t *testing.T) {
 		t.Fatalf("sends = %s, want primary,fallback1", got)
 	}
 }
+
+// followUpDue reports whether agent's request follow-up is armed.
+func followUpDue(w *Waker, agent string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p := w.pending[agent]
+	return p != nil && p.followUp
+}
+
+func waitFollowUpDue(t *testing.T, w *Waker, agent string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !followUpDue(w, agent); {
+		if time.Now().After(deadline) {
+			t.Fatal("no follow-up after the first wake")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A request that arrives after the agent checked in is woken for at once,
+// on the primary, even with an old follow-up still armed.
+func TestNewRequestAfterPollWakesAtOnce(t *testing.T) {
+	var h hits
+	primary, second := h.server(t, "primary"), h.server(t, "fallback1")
+	start := time.Unix(1_790_000_000, 0)
+	var poll atomicTime
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	cfg := Config{"grokbot": {Method: Webhook, URL: primary.URL, Fallback: []Target{{Method: Webhook, URL: second.URL}}}}
+	w := New(cfg, nil, Options{
+		Debounce:  time.Millisecond,
+		WakeGrace: time.Hour,
+		Queued:    func(string) int { return int(queuedN.Load()) },
+		LastPoll:  func(string) time.Time { return poll.get() },
+		Now:       fixedClock(start),
+	})
+	t.Cleanup(w.Stop)
+	queued(w, "grokbot", 1)
+	waitFollowUpDue(t, w, "grokbot")
+	poll.set(start.Add(time.Second)) // the agent checked in
+	queuedN.Store(2)
+	queued(w, "grokbot", 1)
+	h.wait(t, 2)
+	if got := strings.Join(h.order(), ","); got != "primary,primary" {
+		t.Fatalf("sends = %s, want primary,primary", got)
+	}
+}
+
+// A request that rode a silent agent's follow-up still gets a wake when the
+// agent checks in before the follow-up fires: a fresh one on the primary,
+// and the owner is not told of an unanswered wake.
+func TestRiddenFollowUpTurnsFreshAfterPoll(t *testing.T) {
+	var h hits
+	primary, second := h.server(t, "primary"), h.server(t, "fallback1")
+	start := time.Unix(1_790_000_000, 0)
+	var poll atomicTime
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	var unanswered atomic.Int32
+	cfg := Config{"grokbot": {Method: Webhook, URL: primary.URL, Fallback: []Target{{Method: Webhook, URL: second.URL}}}}
+	w := New(cfg, nil, Options{
+		Debounce:   time.Millisecond,
+		WakeGrace:  300 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return poll.get() },
+		Now:        fixedClock(start),
+		Unanswered: func(string, store.Wake) { unanswered.Add(1) },
+	})
+	t.Cleanup(w.Stop)
+	queued(w, "grokbot", 1)
+	waitFollowUpDue(t, w, "grokbot")
+	queuedN.Store(2)
+	queued(w, "grokbot", 1) // the agent is silent: this rides the follow-up
+	if got := len(h.order()); got != 1 {
+		t.Fatalf("sends after the ridden request = %d, want 1", got)
+	}
+	poll.set(start.Add(time.Second))
+	queuedN.Store(1) // the poll took the first request
+	w.Flush()
+	if got := strings.Join(h.order(), ","); got != "primary,primary" {
+		t.Fatalf("sends = %s, want primary,primary", got)
+	}
+	if n := unanswered.Load(); n != 0 {
+		t.Fatalf("unanswered told %d times after the agent checked in", n)
+	}
+}
+
+// A restarted relay carries on from the path its last stored wake used.
+func TestRestartKeepsFallbackPosition(t *testing.T) {
+	st := auditStore(t)
+	at := time.Unix(1_790_000_000, 0)
+	if err := st.SetLastWake(context.Background(), "grokbot", store.Wake{At: at, Result: "ok (fallback 1: webhook)"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetLastWake(context.Background(), "hermes", store.Wake{At: at, Result: "ok (fallback 3: email)"}); err != nil {
+		t.Fatal(err)
+	}
+	two := []Target{{Method: Webhook, URL: "http://b"}, {Method: Webhook, URL: "http://c"}}
+	w := New(Config{"grokbot": {Method: Webhook, URL: "http://a", Fallback: two}, "hermes": {Method: Webhook, URL: "http://a", Fallback: two}}, st, Options{})
+	t.Cleanup(w.Stop)
+	if got := w.step["grokbot"]; got != 1 {
+		t.Fatalf("grokbot step after restart = %d, want 1", got)
+	}
+	// A path the config no longer has starts again on the primary.
+	if got := w.step["hermes"]; got != 0 {
+		t.Fatalf("hermes step after restart = %d, want 0", got)
+	}
+	if got := w.pathStep("grokbot", true); got != 2 {
+		t.Fatalf("next follow-up path = %d, want 2", got)
+	}
+}
+
+// A secret a webhook echoes inside a JSON string, where quotes, backslashes
+// and HTML characters are escaped, is still redacted.
+func TestAnswerSummaryRedactsJSONEscapedSecret(t *testing.T) {
+	const sec = `tok"en\with</x>&more`
+	bodies := []string{
+		`{"echo":"tok\"en\\with\u003c/x\u003e\u0026more"}`,
+		`{"echo":"tok\"en\\with</x>&more"}`,
+		`{"echo":"tok\"en\\with<\/x>&more"}`,
+		`{"echo":"tok\"en\\with\u003c\/x\u003e\u0026more"}`,
+		`{"echo":"` + sec + `"}`,
+	}
+	for _, b := range bodies {
+		got := answerSummary([]byte(b), []string{sec})
+		if got != `{"echo":"[redacted]"}` {
+			t.Errorf("answerSummary(%s) = %q, want the secret redacted", b, got)
+		}
+	}
+}
