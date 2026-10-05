@@ -30,6 +30,12 @@
 // Each silent follow-up tells the relay (Options.Unanswered), which lets the
 // askers know once per request.
 //
+// An agent may list fallback wake paths after its primary one. Each request
+// follow-up sends on the next path in the list, cycling back to the primary
+// after the last, since a path whose 2xx never starts a turn will not start
+// one on a resend either. A poll resets the episode to the primary. Every
+// path shares the agent's MaxPerHour.
+//
 // Wake messages carry only counts and an instruction, never request or reply
 // text.
 // URLs, addresses, and keys live in the relay-local wake config and are never
@@ -42,17 +48,26 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -111,7 +126,46 @@ type Target struct {
 	Every string `json:"every,omitempty"`
 
 	// MaxPerHour caps relay-side wakes (e.g. e2b resumes). Default 12.
+	// Every path of the agent, fallbacks included, shares it.
 	MaxPerHour int `json:"max_per_hour,omitempty"`
+
+	// Fallback is an ordered list of further webhook or email paths for a
+	// webhook or email agent. Request follow-ups move to the next one; see
+	// the package doc. A fallback has no fallback or max_per_hour of its own.
+	Fallback []Target `json:"fallback,omitempty"`
+}
+
+// path is agent's wake path i: 0 is the primary, i > 0 is Fallback[i-1].
+func (t Target) path(i int) Target {
+	if i <= 0 || i > len(t.Fallback) {
+		return t
+	}
+	return t.Fallback[i-1]
+}
+
+// pathLabel names wake path i of a target for logs, the audit log and the
+// stored wake result: the method, with "fallback i" for a fallback. It never
+// holds the URL, address or keys.
+func pathLabel(t Target, i int) string {
+	if i == 0 {
+		return t.Method
+	}
+	return fmt.Sprintf("fallback %d: %s", i, t.path(i).Method)
+}
+
+// resultMarker finds the fallback a stored wake result names (see
+// pathLabel), as in "ok (fallback 2: email)".
+var resultMarker = regexp.MustCompile(`\(fallback (\d+): [a-z]+\)$`)
+
+// resultStep is the path index a stored wake result was sent on: 0 for the
+// primary, n for "(fallback n: ...)".
+func resultStep(result string) int {
+	m := resultMarker.FindStringSubmatch(result)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
 }
 
 // Config maps agent name to Target.
@@ -135,33 +189,62 @@ func LoadConfig(path string) (Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	for name, t := range c {
-		if t.Format != FormatGeneric && (t.Method != Webhook || t.Format != FormatOpenClaw) {
-			return nil, fmt.Errorf("wake %s: unknown format %q (webhook supports \"openclaw\")", name, t.Format)
+		if err := checkTarget(t); err != nil {
+			return nil, fmt.Errorf("wake %s: %w", name, err)
 		}
-		switch t.Method {
-		case Webhook:
-			if t.URL == "" {
-				return nil, fmt.Errorf("wake %s: webhook needs url", name)
+		if len(t.Fallback) > 0 && t.Method != Webhook && t.Method != Email {
+			return nil, fmt.Errorf("wake %s: fallback needs a webhook or email primary, not %q", name, t.Method)
+		}
+		for i, f := range t.Fallback {
+			if err := checkFallback(f); err != nil {
+				return nil, fmt.Errorf("wake %s: fallback %d: %w", name, i+1, err)
 			}
-			if t.Format == FormatOpenClaw {
-				if err := checkOpenClaw(t); err != nil {
-					return nil, fmt.Errorf("wake %s: %w", name, err)
-				}
-			}
-		case Email:
-			if t.EmailTo == "" || t.AgentMailFrom == "" || t.AgentMailKey == "" {
-				return nil, fmt.Errorf("wake %s: email needs email_to, agentmail_inbox, agentmail_key", name)
-			}
-		case Schedule:
-			if t.Interval() <= 0 {
-				return nil, fmt.Errorf("wake %s: schedule needs every, a positive duration such as \"5m\" (got %q)", name, t.Every)
-			}
-		case Wait, Channel, Command, None:
-		default:
-			return nil, fmt.Errorf("wake %s: unknown method %q", name, t.Method)
 		}
 	}
 	return c, nil
+}
+
+// checkTarget validates one wake path's method and the fields it needs.
+func checkTarget(t Target) error {
+	if t.Format != FormatGeneric && (t.Method != Webhook || t.Format != FormatOpenClaw) {
+		return fmt.Errorf("unknown format %q (webhook supports \"openclaw\")", t.Format)
+	}
+	switch t.Method {
+	case Webhook:
+		if t.URL == "" {
+			return errors.New("webhook needs url")
+		}
+		if t.Format == FormatOpenClaw {
+			return checkOpenClaw(t)
+		}
+	case Email:
+		if t.EmailTo == "" || t.AgentMailFrom == "" || t.AgentMailKey == "" {
+			return errors.New("email needs email_to, agentmail_inbox, agentmail_key")
+		}
+	case Schedule:
+		if t.Interval() <= 0 {
+			return fmt.Errorf("schedule needs every, a positive duration such as \"5m\" (got %q)", t.Every)
+		}
+	case Wait, Channel, Command, None:
+	default:
+		return fmt.Errorf("unknown method %q", t.Method)
+	}
+	return nil
+}
+
+// checkFallback validates one fallback path: a relay-side method with the
+// same fields as a primary, and nothing that belongs to the agent as a whole.
+func checkFallback(f Target) error {
+	if f.Method != Webhook && f.Method != Email {
+		return fmt.Errorf("method must be webhook or email, not %q", f.Method)
+	}
+	if f.Fallback != nil {
+		return errors.New("a fallback cannot have its own fallback list")
+	}
+	if f.MaxPerHour != 0 {
+		return errors.New("max_per_hour belongs on the agent; all its paths share it")
+	}
+	return checkTarget(f)
 }
 
 // checkOpenClaw validates an OpenClaw hook target against what the gateway
@@ -184,7 +267,8 @@ func checkOpenClaw(t Target) error {
 }
 
 // DefaultWakeGrace is how long a relay-side request wake may go without a
-// poll before the waker sends the same path again. It matches
+// poll before the waker sends again, on the next path when there are
+// fallbacks. It matches
 // relay.DefaultWakeGrace.
 const DefaultWakeGrace = 10 * time.Minute
 
@@ -261,6 +345,7 @@ type nudge struct {
 	retry    int         // next step of Options.ReplyRetries to schedule
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 	followUp bool        // --wake-grace request follow-up; poll/queue stop checks apply
+	fresh    int         // requests that arrived while the follow-up was due
 	urgent   bool        // an urgent request was queued since the last nudge
 }
 
@@ -283,6 +368,10 @@ type Waker struct {
 	// store too so a restarted relay can still tell a woken agent that
 	// never checked in. Skipped wakes leave it alone.
 	last map[string]store.Wake
+	// step is the wake path each agent's silent episode last sent on: 0
+	// for the primary, i for Fallback[i-1]. A request follow-up moves it on
+	// and a poll since the last wake puts it back to 0.
+	step map[string]int
 	// removed is when each agent was last removed (Forget). A wake whose
 	// send started before then belonged to the removed agent and is not
 	// remembered when it finishes. Joined leaves this cutoff in place so
@@ -345,9 +434,17 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 		}
 		cancel()
 	}
+	// A restarted relay carries on from the path the last wake used, so a
+	// silent agent is not sent again on paths that already failed it.
+	step := map[string]int{}
+	for agent, wk := range last {
+		if i := resultStep(wk.Result); i > 0 && i <= len(cfg[agent].Fallback) {
+			step[agent] = i
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
+		last: last, step: step, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -371,6 +468,7 @@ func (w *Waker) Forget(agent string) {
 	w.removed[agent] = w.opts.Now()
 	w.unbound[agent] = struct{}{}
 	delete(w.last, agent)
+	delete(w.step, agent)
 	if p := w.pending[agent]; p != nil {
 		if p.timer != nil && p.timer.Stop() {
 			w.wg.Done() // the stopped timer's callback will never run
@@ -518,12 +616,22 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 		}
 		return
 	}
+	silent := w.silent(agent)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	p := w.nudgeFor(agent)
 	p.requests++
-	p.followUp = false
 	p.urgent = p.urgent || urgent
+	if p.followUp && !urgent && silent {
+		// A follow-up is already due for this silent agent and counts what
+		// is queued when it fires, so it carries this request too, on the
+		// next path. Waking now would resend the path that has not started
+		// the agent. If the agent polls before then, the follow-up turns
+		// into a fresh wake for this request (applyFollowUpStops).
+		p.fresh++
+		return
+	}
+	p.followUp = false
 	if urgent {
 		w.arm(agent, 0)
 	} else {
@@ -605,7 +713,7 @@ func (w *Waker) fire(agent string) {
 	}
 	if p.followUp {
 		w.applyFollowUpStops(agent, p)
-		if p.requests > 0 && w.opts.Unanswered != nil {
+		if p.followUp && p.requests > 0 && w.opts.Unanswered != nil {
 			if wk, ok := w.LastWake(agent); ok {
 				w.opts.Unanswered(agent, wk)
 			}
@@ -648,33 +756,68 @@ func (w *Waker) fire(agent string) {
 	}
 	msg := UrgentWaitingMessage(p.requests, urgent, replies)
 	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
+	cfg := w.cfg[agent]
+	step := w.pathStep(agent, p.followUp && p.requests > 0)
+	t := cfg.path(step)
+	marker := "" // names a fallback in the stored result, never its URL
+	if step > 0 {
+		marker = " (" + pathLabel(cfg, step) + ")"
+	}
 	at := w.opts.Now()
-	err := w.send(ctx, agent, msg, key)
+	answer, err := w.send(ctx, t, msg, key)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
 			at = w.opts.Now()
-			err = w.send(ctx, agent, msg, key)
+			answer, err = w.send(ctx, t, msg, key)
 		case <-ctx.Done():
 		}
 	}
 	if err != nil {
 		// The log, the audit row and the last wake (which joined agents can
 		// read) all get the safe reason: the raw error can carry the URL.
-		reason := publicReason(err)
+		reason := publicReason(err) + marker
 		log.Printf("wake %s: %s", agent, reason)
 		w.record(ctx, "wake_failed", agent, reason)
 		w.rememberSend(ctx, agent, store.Wake{At: at, Result: reason}, false)
 		w.followUpLater(agent, p.requests)
 		return
 	}
-	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK}, true)
-	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
+	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK + marker}, true)
+	detail := fmt.Sprintf("%s, %d waiting", pathLabel(cfg, step), p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
 	}
+	if answer != "" {
+		// What the platform said with its 2xx, for the operator: a queued
+		// run and an error answered 2xx look the same otherwise. It stays
+		// in the relay log and audit log, out of the stored result.
+		detail += ", response: " + answer
+	}
+	log.Printf("wake %s: ok, %s", agent, detail)
 	w.record(ctx, "woke", agent, detail)
 	w.followUpLater(agent, p.requests)
+}
+
+// pathStep picks the wake path for agent's nudge about to be sent. An
+// episode the agent has polled since (or that never started) begins again
+// on the primary; a request follow-up in a silent episode moves to the next
+// path, wrapping to the primary after the last; any other nudge reuses the
+// path the episode last sent on. Caller must not hold w.mu.
+func (w *Waker) pathStep(agent string, followUp bool) int {
+	n := len(w.cfg[agent].Fallback) + 1
+	silent := w.silent(agent)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	step := w.step[agent]
+	switch {
+	case !silent || step >= n:
+		step = 0
+	case followUp:
+		step = (step + 1) % n
+	}
+	w.step[agent] = step
+	return step
 }
 
 // applyFollowUpStops drops the request count on a --wake-grace follow-up
@@ -682,7 +825,11 @@ func (w *Waker) fire(agent string) {
 // wake. Reply counts are left alone so a coalesced reply ladder still fires.
 func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
 	if w.answered(agent) {
-		p.requests = 0
+		// The agent checked in, so the follow-up is moot, but requests that
+		// rode it still need their own wake: send that as a fresh nudge,
+		// which starts the next episode on the primary.
+		p.requests = p.fresh
+		p.followUp = false
 		return
 	}
 	if w.opts.Queued == nil {
@@ -764,7 +911,8 @@ func (w *Waker) answered(agent string) bool {
 // the first wake time so unanswered stays dated from the start of the
 // episode. The result is updated: a failed follow-up is stored, and a
 // later 2xx replaces that failure, so a restart does not keep showing the
-// earlier error. A 2xx that is already ok is not written again. A send that
+// earlier error. A 2xx with the same result (same path) is not written
+// again. A send that
 // started before the recorded wake is dropped: a slow failure must not
 // overwrite a newer successful send.
 func (w *Waker) rememberSend(ctx context.Context, agent string, wk store.Wake, okSend bool) {
@@ -774,7 +922,7 @@ func (w *Waker) rememberSend(ctx context.Context, agent string, wk store.Wake, o
 	if w.silent(agent) {
 		if old, ok := w.LastWake(agent); ok {
 			wk.At = old.At
-			if okSend && old.Result == envelope.WakeOK {
+			if okSend && old.Result == wk.Result {
 				return
 			}
 		}
@@ -901,28 +1049,36 @@ func webhookBody(t Target, msg string) []byte {
 	return body
 }
 
-func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
-	t := w.cfg[agent]
+// send posts msg on wake path t. For a webhook it also returns a short,
+// sanitized summary of the 2xx response body (see answerSummary).
+func (w *Waker) send(ctx context.Context, t Target, msg, key string) (string, error) {
 	switch t.Method {
 	case Webhook:
 		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
-			return &sendError{reason: "invalid webhook URL", err: err}
+			return "", &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
 			req.Header.Set("Idempotency-Key", key)
 		}
+		secrets := webhookSecrets(t, req.URL)
 		if t.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+t.BearerToken)
 		}
 		if t.HMACSecret != "" {
 			m := hmac.New(sha256.New, []byte(t.HMACSecret))
 			m.Write(body)
-			req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(m.Sum(nil)))
+			sig := hex.EncodeToString(m.Sum(nil))
+			req.Header.Set("X-Hub-Signature-256", "sha256="+sig)
+			secrets = append(secrets, sig)
 		}
-		return w.do(req)
+		raw, err := w.do(req)
+		if err != nil {
+			return "", err
+		}
+		return answerSummary(raw, secrets), nil
 	case Email:
 		// The subject stays fixed for replies too: standing instructions
 		// match on it.
@@ -930,27 +1086,184 @@ func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {
-			return &sendError{reason: "invalid AgentMail URL", err: err}
+			return "", &sendError{reason: "invalid AgentMail URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
-		return w.do(req)
+		_, err = w.do(req)
+		return "", err
 	}
-	return nil
+	return "", nil
 }
 
-func (w *Waker) do(req *http.Request) error {
+// do sends req and returns up to the first 64 KiB of a 2xx response body.
+func (w *Waker) do(req *http.Request) ([]byte, error) {
 	resp, err := w.opts.HTTP.Do(req)
 	if err != nil {
-		return &sendError{reason: transportReason(req, err), err: err}
+		return nil, &sendError{reason: transportReason(req, err), err: err}
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("%s returned %s", req.URL.Host, resp.Status)
-		return &sendError{reason: msg, err: errors.New(msg)}
+		return nil, &sendError{reason: msg, err: errors.New(msg)}
 	}
-	return nil
+	return raw, nil
+}
+
+// maxAnswer bounds the response summary kept from a webhook's 2xx, in bytes.
+const maxAnswer = 200
+
+// webhookSecrets lists what a webhook response must not echo into the logs:
+// the URL, its path, query, query values and userinfo, and the bearer token
+// and HMAC secret. Strings too short to be a secret are left out, so a "/"
+// path does not blank out the summary.
+func webhookSecrets(t Target, u *url.URL) []string {
+	out := []string{t.URL, t.BearerToken, t.HMACSecret, u.Path, u.EscapedPath(), u.RawQuery}
+	if u.User != nil {
+		out = append(out, u.User.String())
+	}
+	for _, vs := range u.Query() {
+		out = append(out, vs...)
+	}
+	return out
+}
+
+// secretForms is sec as it can appear in a response body: as is, and as
+// a JSON string encoder writes it (quotes and backslashes escaped, with or
+// without HTML escaping), each also with "/" escaped as "\/".
+func secretForms(sec string) []string {
+	forms := []string{sec}
+	for _, html := range []bool{true, false} {
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(html)
+		if enc.Encode(sec) == nil {
+			if q := strings.TrimSuffix(b.String(), "\n"); len(q) >= 2 {
+				forms = append(forms, q[1:len(q)-1])
+			}
+		}
+	}
+	for _, f := range forms[:len(forms):len(forms)] {
+		forms = append(forms, strings.ReplaceAll(f, "/", `\/`))
+	}
+	slices.Sort(forms)
+	return slices.Compact(forms)
+}
+
+// withheldAnswer stands in for a response body that still holds a secret
+// after redaction: one too short to replace, or one in an encoding the
+// replacement does not cover.
+const withheldAnswer = "[withheld: may contain a secret]"
+
+// answerEscape matches an escape sequence in a webhook reply: a backslash
+// escape, a percent-encoded byte or an HTML character reference.
+var answerEscape = regexp.MustCompile(`\\.|%[0-9A-Fa-f]{2}|&#?[0-9A-Za-z]+;`)
+
+// opaqueToken matches a run of 16 or more characters that could be encoded
+// data: base64, hex or an id.
+var opaqueToken = regexp.MustCompile(`[0-9A-Za-z+/=_-]{16,}`)
+
+// leaksSecret reports whether any secret, or its base64 or hex form, can still be
+// read from s: as is, from the strings of s parsed as JSON (every escape
+// decoded), or from either of those percent-decoded or HTML-unescaped.
+func leaksSecret(s string, secrets []string) bool {
+	views := []string{s}
+	if json.Valid([]byte(s)) {
+		var strs []string
+		dec := json.NewDecoder(strings.NewReader(s))
+		for {
+			tok, err := dec.Token()
+			if err != nil {
+				break
+			}
+			if str, ok := tok.(string); ok {
+				strs = append(strs, str)
+			}
+		}
+		views = append(views, strings.Join(strs, "\n"))
+	}
+	for _, v := range views[:len(views):len(views)] {
+		if d, err := url.PathUnescape(v); err == nil && d != v {
+			views = append(views, d)
+		} else if d, err := url.QueryUnescape(v); err == nil && d != v {
+			views = append(views, d)
+		}
+	}
+	for _, v := range views[:len(views):len(views)] {
+		if d := html.UnescapeString(v); d != v {
+			views = append(views, d)
+		}
+	}
+	for _, sec := range secrets {
+		needles := []string{sec}
+		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+			needles = append(needles, enc.EncodeToString([]byte(sec)))
+		}
+		h := hex.EncodeToString([]byte(sec))
+		needles = append(needles, h, strings.ToUpper(h))
+		for _, v := range views {
+			for _, n := range needles {
+				if strings.Contains(v, n) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// answerSummary is a 2xx response body as one short line for the relay log
+// and audit log: each secret (also JSON-escaped) replaced by [redacted],
+// control and format characters turned into spaces, whitespace collapsed,
+// then cut to maxAnswer bytes on a rune boundary. Secrets are replaced
+// before the cut, so no part of one survives at the edge. A body that still
+// holds a secret in any form leaksSecret can read is withheld whole.
+func answerSummary(raw []byte, secrets []string) string {
+	s := strings.ToValidUTF8(string(raw), "?")
+	var redact, check []string
+	for _, sec := range secrets {
+		if strings.Trim(sec, "/") == "" {
+			continue // an empty or bare "/" URL path is not a secret
+		}
+		check = append(check, sec)
+		if len(sec) >= 4 {
+			// A shorter one cannot be replaced without mangling the text
+			// around it; the leak check below withholds a body holding it.
+			redact = append(redact, secretForms(sec)...)
+		}
+	}
+	// Longest first, so a secret inside a longer one (the path inside the
+	// URL) does not break the longer match.
+	sort.Slice(redact, func(i, j int) bool { return len(redact[i]) > len(redact[j]) })
+	for _, sec := range redact {
+		s = strings.ReplaceAll(s, sec, "[redacted]")
+	}
+	// Escapes could spell a secret in a form not replaced above, so a reply
+	// that still has any is withheld; long opaque tokens (encoded data, ids)
+	// are masked. What is left is plain text, checked once more.
+	if answerEscape.MatchString(s) {
+		return withheldAnswer
+	}
+	s = opaqueToken.ReplaceAllString(s, "[token]")
+	if leaksSecret(s, check) {
+		return withheldAnswer
+	}
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= maxAnswer {
+		return s
+	}
+	cut := maxAnswer
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 // sendError is a failed wake send: err in full for the relay's log, and

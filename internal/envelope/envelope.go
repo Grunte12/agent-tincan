@@ -226,7 +226,8 @@ type Target struct {
 	// for a relay-woken recipient it has woken.
 	WokenAt time.Time `json:"woken_at,omitzero"`
 	// WakeResult is that wake's result: "ok", or the error that made the
-	// send and its retry fail.
+	// send and its retry fail, either one followed by " (fallback N:
+	// <method>)" when the wake went out on a fallback path.
 	WakeResult string `json:"wake_result,omitempty"`
 	// Unanswered is set when the recipient has not checked in since that
 	// wake: the send failed, or the wake grace has passed without a poll.
@@ -234,7 +235,14 @@ type Target struct {
 }
 
 // WakeOK is Target.WakeResult for a wake the agent's platform accepted.
+// A wake sent on a fallback path adds a marker: "ok (fallback 1: email)".
 const WakeOK = "ok"
+
+// WakeAccepted reports whether a wake result is a send the platform
+// accepted, on the primary path or a fallback.
+func WakeAccepted(result string) bool {
+	return result == WakeOK || strings.HasPrefix(result, WakeOK+" (fallback ")
+}
 
 // Exchange is one clarification round; At is when the question was asked.
 type Exchange struct {
