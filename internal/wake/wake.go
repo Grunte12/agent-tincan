@@ -21,7 +21,11 @@
 // A reply to an agent's own request also wakes a relay-side agent, after a
 // grace period that lets an inline wait read it first, and only if the reply
 // is still unseen when the grace period ends. A reply still unseen after its
-// nudge is nudged again on the ReplyRetries schedule.
+// nudge is nudged again on the ReplyRetries schedule. A request that stays
+// queued after a relay-side wake, with no poll since that wake, is nudged
+// again after WakeGrace, within MaxPerHour, until the agent polls, the
+// queue is empty, or the agent is removed. A later 2xx does not move the
+// last recorded wake while the agent is still silent.
 //
 // Wake messages carry only counts and an instruction, never request or reply
 // text.
@@ -176,6 +180,11 @@ func checkOpenClaw(t Target) error {
 	return nil
 }
 
+// DefaultWakeGrace is how long a relay-side request wake may go without a
+// poll before the waker sends the same path again. It matches
+// relay.DefaultWakeGrace.
+const DefaultWakeGrace = 10 * time.Minute
+
 // DefaultReplyGrace is how long a reply may sit unread before its asker is
 // woken for it.
 const DefaultReplyGrace = time.Minute
@@ -211,7 +220,16 @@ type Options struct {
 	// ends when the replies are seen or the steps run out. Nil means
 	// DefaultReplyRetries; an empty slice turns follow-ups off.
 	ReplyRetries []time.Duration
-	Now          func() time.Time
+	// WakeGrace is how long after a request wake the waker waits to send
+	// again while work is still queued and the agent has not polled;
+	// default DefaultWakeGrace. A non-positive value after New turns
+	// request follow-up off (tests).
+	WakeGrace time.Duration
+	// LastPoll is the agent's last inbox poll, including peek. A poll at
+	// or after the last recorded wake is proof of life and stops request
+	// follow-up. Nil is treated as never polled.
+	LastPoll func(agent string) time.Time
+	Now      func() time.Time
 }
 
 // nudge is one agent's pending wake.
@@ -222,6 +240,7 @@ type nudge struct {
 	due      time.Time   // when timer fires (wall clock)
 	retry    int         // next step of Options.ReplyRetries to schedule
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
+	followUp bool        // --wake-grace request follow-up; poll/queue stop checks apply
 }
 
 // Waker implements relay.Events, relay.Requeuer, relay.Replier,
@@ -245,8 +264,13 @@ type Waker struct {
 	last map[string]store.Wake
 	// removed is when each agent was last removed (Forget). A wake whose
 	// send started before then belonged to the removed agent and is not
-	// remembered when it finishes.
+	// remembered when it finishes. Joined leaves this cutoff in place so
+	// an in-flight send of the former agent is not recorded for the new
+	// one.
 	removed map[string]time.Time
+	// unbound is set by Forget until Joined or Unforget. followUpLater
+	// does not re-arm while the name is unbound.
+	unbound map[string]struct{}
 	// rememberMu makes keeping a last wake, store write included, atomic
 	// with Forget, so a removal cannot slip between the check and the write.
 	rememberMu sync.Mutex
@@ -275,6 +299,9 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.ReplyRetries == nil {
 		opts.ReplyRetries = DefaultReplyRetries
 	}
+	if opts.WakeGrace == 0 {
+		opts.WakeGrace = DefaultWakeGrace
+	}
 	if opts.AgentMailAPI == "" {
 		opts.AgentMailAPI = "https://api.agentmail.to/v0"
 	}
@@ -296,7 +323,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, removed: map[string]time.Time{}, ctx: ctx, cancel: cancel}
+		last: last, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -318,6 +345,7 @@ func (w *Waker) Forget(agent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.removed[agent] = w.opts.Now()
+	w.unbound[agent] = struct{}{}
 	delete(w.last, agent)
 	if p := w.pending[agent]; p != nil {
 		if p.timer != nil && p.timer.Stop() {
@@ -348,9 +376,22 @@ func (w *Waker) Unforget(agent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.removed, agent)
+	delete(w.unbound, agent)
 	if old, ok := w.last[agent]; found && (!ok || wk.At.After(old.At)) {
 		w.last[agent] = wk
 	}
+}
+
+// Joined implements relay.WakeReporter: the name is bound again, so
+// wake-grace follow-ups can be scheduled. The Forget cutoff stays, so an
+// in-flight send that started before the removal is not recorded for this
+// agent.
+func (w *Waker) Joined(agent string) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.unbound, agent)
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -428,7 +469,9 @@ func (w *Waker) RequestsWaiting(agent string) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.nudgeFor(agent).recheck = true
+	p := w.nudgeFor(agent)
+	p.recheck = true
+	p.followUp = false
 	w.arm(agent, w.opts.Debounce)
 }
 
@@ -444,14 +487,18 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 		if w.opts.Queued != nil {
 			w.mu.Lock()
 			defer w.mu.Unlock()
-			w.nudgeFor(agent).recheck = true
+			p := w.nudgeFor(agent)
+			p.recheck = true
+			p.followUp = false
 			w.arm(agent, w.opts.OnlineRecheck)
 		}
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.nudgeFor(agent).requests++
+	p := w.nudgeFor(agent)
+	p.requests++
+	p.followUp = false
 	if urgent {
 		w.arm(agent, 0)
 	} else {
@@ -531,7 +578,9 @@ func (w *Waker) fire(agent string) {
 	if p == nil {
 		return
 	}
-	if p.recheck && w.opts.Queued != nil {
+	if p.followUp {
+		w.applyFollowUpStops(agent, p)
+	} else if p.recheck && w.opts.Queued != nil {
 		// Count what is still waiting: zero when a poller took it, and
 		// the whole backlog when requests arrived after the recheck was set.
 		if n := w.opts.Queued(agent); p.requests == 0 || n > p.requests {
@@ -545,9 +594,10 @@ func (w *Waker) fire(agent string) {
 	if p.requests == 0 && replies == 0 {
 		return // every reply was already read inline
 	}
-	if replies > 0 {
+	if replies > 0 && (!p.followUp || p.retry > 0 || p.replies > 0) {
 		// Whatever this nudge does, check back later in case the woken
-		// session cannot read the replies.
+		// session cannot read the replies. A request-only follow-up does
+		// not start that ladder just because unseen replies remain.
 		defer w.retryLater(agent, p.retry, gen)
 	}
 	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Minute)
@@ -557,6 +607,7 @@ func (w *Waker) fire(agent string) {
 	w.mu.Unlock()
 	if !allowed {
 		w.record(ctx, "wake_skipped", agent, "hourly wake budget used up; requests and replies stay queued")
+		w.followUpLater(agent, p.requests)
 		return
 	}
 	msg := WaitingMessage(p.requests, replies)
@@ -577,15 +628,108 @@ func (w *Waker) fire(agent string) {
 		reason := publicReason(err)
 		log.Printf("wake %s: %s", agent, reason)
 		w.record(ctx, "wake_failed", agent, reason)
-		w.remember(ctx, agent, store.Wake{At: at, Result: reason})
+		w.rememberSend(ctx, agent, store.Wake{At: at, Result: reason}, false)
+		w.followUpLater(agent, p.requests)
 		return
 	}
-	w.remember(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK})
+	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK}, true)
 	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
 	if replies > 0 {
 		detail += fmt.Sprintf(", %d unseen replies", replies)
 	}
 	w.record(ctx, "woke", agent, detail)
+	w.followUpLater(agent, p.requests)
+}
+
+// applyFollowUpStops drops the request count on a --wake-grace follow-up
+// when the queue is empty or the agent has polled since the last recorded
+// wake. Reply counts are left alone so a coalesced reply ladder still fires.
+func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
+	if w.answered(agent) {
+		p.requests = 0
+		return
+	}
+	if w.opts.Queued == nil {
+		return
+	}
+	n := w.opts.Queued(agent)
+	if n == 0 {
+		p.requests = 0
+		return
+	}
+	p.requests = n
+}
+
+// followUpLater re-arms a request wake at WakeGrace while the episode is
+// still silent and queued. Caller must not hold w.mu.
+func (w *Waker) followUpLater(agent string, requests int) {
+	if requests == 0 || w.opts.WakeGrace <= 0 || !w.relaySide(agent) || w.opts.Queued == nil {
+		return
+	}
+	if w.opts.Queued(agent) == 0 || w.answered(agent) {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	if _, unbound := w.unbound[agent]; unbound {
+		return
+	}
+	p := w.nudgeFor(agent)
+	p.followUp = true
+	w.arm(agent, w.opts.WakeGrace)
+}
+
+// pollTime is agent's last poll, or zero when LastPoll is unset or it has
+// never polled.
+func (w *Waker) pollTime(agent string) time.Time {
+	if w.opts.LastPoll == nil {
+		return time.Time{}
+	}
+	return w.opts.LastPoll(agent)
+}
+
+// silent reports a last recorded wake that the agent has not polled since.
+func (w *Waker) silent(agent string) bool {
+	wk, ok := w.LastWake(agent)
+	if !ok {
+		return false
+	}
+	return w.pollTime(agent).Before(wk.At)
+}
+
+// answered reports a poll at or after the last recorded wake.
+func (w *Waker) answered(agent string) bool {
+	wk, ok := w.LastWake(agent)
+	if !ok {
+		return false
+	}
+	poll := w.pollTime(agent)
+	return !poll.IsZero() && !poll.Before(wk.At)
+}
+
+// rememberSend keeps a send result. A later send while still silent keeps
+// the first wake time so unanswered stays dated from the start of the
+// episode. The result is updated: a failed follow-up is stored, and a
+// later 2xx replaces that failure, so a restart does not keep showing the
+// earlier error. A 2xx that is already ok is not written again. A send that
+// started before the recorded wake is dropped: a slow failure must not
+// overwrite a newer successful send.
+func (w *Waker) rememberSend(ctx context.Context, agent string, wk store.Wake, okSend bool) {
+	if old, ok := w.LastWake(agent); ok && wk.At.Before(old.At) {
+		return
+	}
+	if w.silent(agent) {
+		if old, ok := w.LastWake(agent); ok {
+			wk.At = old.At
+			if okSend && old.Result == envelope.WakeOK {
+				return
+			}
+		}
+	}
+	w.remember(ctx, agent, wk)
 }
 
 // retryLater schedules step of the reply follow-up schedule for agent, which
@@ -793,13 +937,15 @@ func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
 	w.rememberMu.Lock()
 	defer w.rememberMu.Unlock()
 	w.mu.Lock()
-	if old, ok := w.last[agent]; ok && !wk.At.After(old.At) {
-		w.mu.Unlock()
-		return
-	}
 	if gone, ok := w.removed[agent]; ok && !wk.At.After(gone) {
 		w.mu.Unlock()
 		return
+	}
+	if old, ok := w.last[agent]; ok && !wk.At.After(old.At) {
+		if !wk.At.Equal(old.At) || wk.Result == old.Result {
+			w.mu.Unlock()
+			return
+		}
 	}
 	w.last[agent] = wk
 	w.mu.Unlock()

@@ -41,7 +41,8 @@ type Config struct {
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
 	// WakeGrace is how long a relay-woken agent may go without polling
-	// after a wake before it shows as unanswered; default DefaultWakeGrace.
+	// after a wake before it shows as unanswered and the waker sends the
+	// same webhook or email again; default DefaultWakeGrace.
 	WakeGrace time.Duration
 }
 
@@ -650,16 +651,7 @@ func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Targ
 	if a, found, err := s.dir.Agent(ctx, agent); err == nil && found && wk.At.Before(a.JoinedAt) {
 		return nil // sent to an earlier agent of the same name
 	}
-	s.mu.Lock()
-	last := s.lastPoll[agent]
-	s.mu.Unlock()
-	if last.Before(wk.At) {
-		// No poll since the wake in this run of the relay: one persisted
-		// before a restart may still have answered it.
-		if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {
-			last = p
-		}
-	}
+	last := s.lastPollSince(agent, wk.At)
 	t := s.wakeTarget(wk, last, s.cfg.Now())
 	return &t
 }
@@ -1074,11 +1066,14 @@ const ScheduleGrace = 5 * time.Minute
 
 // WakeReporter reports the last wake the relay sent an agent, and whether
 // there was one, and forgets it when the agent is removed. Unforget undoes
-// Forget when the removal fails. Set by package wake through SetWakeNamer.
+// Forget when the removal fails. Joined clears Forget's marker when the
+// name is bound again, so request follow-ups can be scheduled. Set by
+// package wake through SetWakeNamer.
 type WakeReporter interface {
 	LastWake(agent string) (store.Wake, bool)
 	Forget(agent string)
 	Unforget(agent string)
+	Joined(agent string)
 }
 
 // WakeResumer schedules the wakes an agent's waiting work calls for, as a
@@ -1089,7 +1084,7 @@ type WakeResumer interface {
 }
 
 // DefaultWakeGrace is how long a woken agent has to poll before the roster
-// shows it as unanswered.
+// shows it as unanswered and the waker sends the same path again.
 const DefaultWakeGrace = 10 * time.Minute
 
 // relayWoken reports whether the relay itself wakes agents on method.
@@ -1237,6 +1232,9 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
+	}
+	if wr, ok := s.wake.(WakeReporter); ok {
+		wr.Joined(name)
 	}
 	s.record(r.Context(), "joined", "", "", name, "")
 	writeJSON(w, http.StatusOK, map[string]string{"name": name})
@@ -1460,6 +1458,33 @@ func (s *Server) UnseenReplies(agent string) int {
 		return 1
 	}
 	return n
+}
+
+// LastPoll is agent's last inbox poll, including peek: the later of this
+// process's memory and the poll persisted for a restart. The waker uses it
+// as proof of life for request follow-up. The store is read only when this
+// process has not seen a poll.
+func (s *Server) LastPoll(agent string) time.Time {
+	return s.lastPollSince(agent, time.Time{})
+}
+
+// lastPollSince is agent's last poll for judging a wake at since. Memory
+// answers when it already has a poll at or after since (or any poll, when
+// since is zero). The store is read only when memory cannot: this process
+// has never recorded a poll, or its poll is still older than the wake.
+func (s *Server) lastPollSince(agent string, since time.Time) time.Time {
+	s.mu.Lock()
+	last := s.lastPoll[agent]
+	s.mu.Unlock()
+	if !last.IsZero() && (since.IsZero() || !last.Before(since)) {
+		return last
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {
+		return p
+	}
+	return last
 }
 
 // touch records a poll by agent. The store copy tells a restarted relay

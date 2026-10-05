@@ -44,6 +44,8 @@ func (f *fakeWaker) Forget(agent string) {
 
 func (f *fakeWaker) Unforget(string) {}
 
+func (f *fakeWaker) Joined(string) {}
+
 func (f *fakeWaker) set(agent string, w store.Wake) {
 	f.mu.Lock()
 	f.wakes[agent] = w
@@ -379,7 +381,7 @@ func TestFailedRemoveKeepsWakeState(t *testing.T) {
 	now := time.Now()
 	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
 		HTTP: hook.Client(), ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{},
-		UnseenReplies: h.srv.UnseenReplies, Queued: h.srv.QueuedCount, Now: func() time.Time { return now },
+		WakeGrace: -1, UnseenReplies: h.srv.UnseenReplies, Queued: h.srv.QueuedCount, Now: func() time.Time { return now },
 	})
 	defer w.Stop()
 	h.srv.SetWakeNamer(w)
@@ -397,8 +399,8 @@ func TestFailedRemoveKeepsWakeState(t *testing.T) {
 	default:
 		t.Fatal("no wake re-armed for the unseen reply")
 	}
-	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(now) || wk.Result != envelope.WakeOK {
-		t.Fatalf("wake after a failed remove not recorded: %+v, %v", wk, ok)
+	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(stored.At) || wk.Result != stored.Result {
+		t.Fatalf("silent 2xx after a failed remove moved last wake: %+v, %v; want %+v", wk, ok, stored)
 	}
 }
 
@@ -429,5 +431,137 @@ func TestWakeDuringOpenPollSurvivesRestart(t *testing.T) {
 	clk.advance(DefaultWakeGrace + time.Minute)
 	if g := agentInfo(t, h2, macAddr, "grokbot"); g.Unanswered {
 		t.Fatalf("after restart, the poll that outlived the wake is lost: %+v", g)
+	}
+}
+
+// A send whose in-memory last poll is already at or after the wake must not
+// read the store: closing it would panic if LastPoll still queried.
+func TestLastPollSkipsStoreWhenMemoryIsAtOrAfterWake(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
+	clk.advance(time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	st := h.srv.store
+	h.srv.store = nil
+	t.Cleanup(func() { h.srv.store = st })
+	if last := h.srv.LastPoll("grokbot"); last.IsZero() {
+		t.Fatal("LastPoll dropped the in-memory poll")
+	}
+	tgt := h.srv.recipientWake(t.Context(), "grokbot")
+	if tgt == nil || tgt.Unanswered || tgt.WakeResult != envelope.WakeOK {
+		t.Fatalf("send wake from memory: %+v", tgt)
+	}
+}
+
+// When this process's last poll is older than the wake, the store still
+// answers if it has a later poll, as after a restart that left memory stale.
+func TestLastPollUsesStoreWhenMemoryIsOlderThanWake(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
+	clk.advance(time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	h.srv.mu.Lock()
+	h.srv.lastPoll["grokbot"] = woke.Add(-time.Second)
+	h.srv.mu.Unlock()
+	clk.advance(DefaultWakeGrace + time.Minute)
+	var out envelope.SendResponse
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target == nil || out.Target.Unanswered {
+		t.Fatalf("store poll after the wake must win: %+v", out.Target)
+	}
+}
+
+// After remove and join under the same name, a silent request wake still
+// gets a wake-grace follow-up.
+func TestRequestFollowUpAfterRemoveAndRejoin(t *testing.T) {
+	h := newHarness(t, Config{})
+	hits := make(chan struct{}, 8)
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits <- struct{}{}
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP:      hook.Client(),
+		Debounce:  time.Millisecond,
+		WakeGrace: 20 * time.Millisecond,
+		Queued:    h.srv.QueuedCount,
+		LastPoll:  h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	h.joinAt(grokAddr, "grokbot")
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	n := 0
+	for n < 2 && time.Now().Before(deadline) {
+		select {
+		case <-hits:
+			n++
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if n != 2 {
+		t.Fatalf("webhook calls = %d, want 2 (first wake and follow-up after rejoin)", n)
+	}
+}
+
+// An in-flight wake that finishes after remove and join under the same name
+// is the former agent's. The new agent's later unanswered wake is still
+// visible on the roster.
+func TestInFlightWakeAfterRejoinDoesNotHideUnanswered(t *testing.T) {
+	h := newHarness(t, Config{WakeGrace: 30 * time.Millisecond})
+	arrived := make(chan struct{}, 8)
+	release := make(chan struct{})
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		arrived <- struct{}{}
+		<-release
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP:       hook.Client(),
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Second,
+		WakeGrace:  -1,
+		Queued:     h.srv.QueuedCount,
+		LastPoll:   h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	w.Queued(t.Context(), envelope.Request{To: "grokbot", Urgent: true})
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not start")
+	}
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	h.joinAt(grokAddr, "grokbot")
+	joined, found, err := h.srv.dir.Agent(t.Context(), "grokbot")
+	if err != nil || !found {
+		t.Fatalf("rejoined grokbot: found %v, %v", found, err)
+	}
+	close(release)
+	w.Flush()
+	if wk, ok := w.LastWake("grokbot"); ok {
+		t.Fatalf("pre-join send was remembered: %+v", wk)
+	}
+
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, nil)
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake after rejoin did not send")
+	}
+	time.Sleep(80 * time.Millisecond)
+	g := agentInfo(t, h, macAddr, "grokbot")
+	if !g.Unanswered || g.WokenAt.IsZero() || g.WokenAt.Before(joined.JoinedAt) {
+		t.Fatalf("new agent's unanswered wake hidden: %+v, joined %v", g, joined.JoinedAt)
 	}
 }
