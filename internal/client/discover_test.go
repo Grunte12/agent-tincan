@@ -970,3 +970,71 @@ func TestLocalAPINetmapListsEveryUserspaceTailnet(t *testing.T) {
 		t.Fatalf("got %v, %v; want the peers of both tailnets", got, err)
 	}
 }
+
+// A relay found at one of its advertised addresses is followed without
+// listing the tailnet, so a slow listing cannot use up the search.
+func TestFindRelayTriesAdvertisedBeforeListing(t *testing.T) {
+	const key = "k-real"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHello(t, ln, key)
+	live := "http://" + ln.Addr().String()
+	listed := false
+	slow := func(ctx context.Context) ([]string, error) {
+		listed = true
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(SwapNetmapLookups(slow, slow))
+	r, err := NewRelayFor(Config{Relay: "http://127.0.0.1:1", RelayKey: key, RelayURLs: []string{live}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if got := r.FindRelay(t.Context()); got != live {
+		t.Fatalf("FindRelay = %q, want the advertised %q", got, live)
+	}
+	if listed || time.Since(start) > 2*time.Second {
+		t.Fatalf("listed the tailnet %v, took %v; want the advertised address alone, at once", listed, time.Since(start))
+	}
+}
+
+// A userspace socket that never answers does not hold up the others: they
+// are asked at once, and the listing returns within the caller's deadline
+// with the peers of the one that answered.
+func TestLocalAPINetmapDeadSocketDoesNotBlock(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	dead := unixSocket(t, dir, ".tailscale-a/tailscaled.sock")
+	live := unixSocket(t, dir, ".tailscale-b/tailscaled.sock")
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		if lc.Socket == dead {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return &ipnstate.Status{Self: &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.7")}}}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+	_ = live
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	got, err := localAPINetmap(ctx)
+	if err != nil || !slices.Equal(got, []string{"100.64.0.7"}) {
+		t.Fatalf("got %v, %v; want the live socket's peer", got, err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v; want the caller's deadline to bound the dead socket", d)
+	}
+}

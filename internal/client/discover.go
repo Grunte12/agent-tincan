@@ -250,13 +250,17 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		return ""
 	}
 	base := r.Base()
-	// The relay's own advertised addresses come first; they work for
-	// agents that cannot search the tailnet.
+	// The relay's own advertised addresses are tried first, on their own:
+	// they work for agents that cannot search the tailnet, and a relay
+	// found there never waits on a slow tailnet listing.
 	var cands []string
 	for _, u := range known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
+	}
+	if found := r.firstProving(ctx, cands, key); found != "" {
+		return found
 	}
 	var peers []string
 	var source string
@@ -266,14 +270,31 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 			source = "netmap"
 		}
 	} else {
+		lctx, cancel := context.WithTimeout(ctx, netmapFor)
 		var ips []string
-		ips, source = netmapIPv4s(ctx)
+		ips, source = netmapIPv4s(lctx)
+		cancel()
 		peers = peerURLs(base, ips)
 	}
 	r.findMu.Lock()
 	r.lastListed, r.lastSource, r.searched = len(peers), source, true
 	r.findMu.Unlock()
-	cands = append(cands, peers...)
+	var fresh []string
+	for _, p := range peers {
+		if !slices.Contains(cands, p) {
+			fresh = append(fresh, p)
+		}
+	}
+	return r.firstProving(ctx, fresh, key)
+}
+
+// netmapFor bounds one listing of the tailnet, every socket and the CLI
+// fallback together, so a search keeps time to probe what it finds.
+var netmapFor = 5 * time.Second
+
+// firstProving probes cands, probeWorkers at a time, and returns the first
+// that proves key, or "" when none does within 8 seconds.
+func (r *Relay) firstProving(ctx context.Context, cands []string, key string) string {
 	if len(cands) == 0 {
 		return ""
 	}
@@ -424,24 +445,42 @@ func localAPINetmap(ctx context.Context) ([]string, error) {
 		// can run.
 		return nil, err
 	}
+	type result struct {
+		ips []string
+		err error
+	}
+	// Every socket is asked at once, under the caller's deadline and at
+	// most 5 seconds, so a dead one cannot hold up the others.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	results := make([]result, len(socks))
+	var wg sync.WaitGroup
+	for i, sock := range socks {
+		wg.Go(func() {
+			lc := &local.Client{}
+			if sock != "" {
+				lc.Socket = sock
+				lc.UseSocketOnly = true
+			}
+			st, err := localStatus(ctx, lc)
+			if err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			results[i] = result{ips: ipv4sFromLocalStatus(st)}
+		})
+	}
+	wg.Wait()
 	var ips []string
 	var lastErr error
 	ok := false
-	for _, sock := range socks {
-		lc := &local.Client{}
-		if sock != "" {
-			lc.Socket = sock
-			lc.UseSocketOnly = true
-		}
-		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		st, err := localStatus(sctx, lc)
-		cancel()
-		if err != nil {
-			lastErr = err
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = r.err
 			continue
 		}
 		ok = true
-		ips = appendNew(ips, ipv4sFromLocalStatus(st))
+		ips = appendNew(ips, r.ips)
 	}
 	if !ok {
 		return nil, lastErr
@@ -599,26 +638,42 @@ func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	if err != nil {
 		socks = []string{""} // the CLI may still find tailscaled itself
 	}
+	type result struct {
+		ips []string
+		err error
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	results := make([]result, len(socks))
+	var wg sync.WaitGroup
+	for i, sock := range socks {
+		wg.Go(func() {
+			args := []string{"status", "--json"}
+			if sock != "" && sock != paths.DefaultTailscaledSocket() {
+				args = append([]string{"--socket", sock}, args...)
+			}
+			raw, err := exec.CommandContext(ctx, bin, args...).Output()
+			if err == nil {
+				var got []string
+				if got, err = ipv4sFromStatusJSON(raw); err == nil {
+					results[i] = result{ips: got}
+					return
+				}
+			}
+			results[i] = result{err: err}
+		})
+	}
+	wg.Wait()
 	var ips []string
 	var lastErr error
 	ok := false
-	for _, sock := range socks {
-		args := []string{"status", "--json"}
-		if sock != "" && sock != paths.DefaultTailscaledSocket() {
-			args = append([]string{"--socket", sock}, args...)
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = r.err
+			continue
 		}
-		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		raw, err := exec.CommandContext(sctx, bin, args...).Output()
-		cancel()
-		if err == nil {
-			var got []string
-			if got, err = ipv4sFromStatusJSON(raw); err == nil {
-				ok = true
-				ips = appendNew(ips, got)
-				continue
-			}
-		}
-		lastErr = err
+		ok = true
+		ips = appendNew(ips, r.ips)
 	}
 	if !ok {
 		return nil, lastErr
