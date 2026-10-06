@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -370,6 +371,14 @@ func netmapIPv4s(ctx context.Context) (ips []string, source string) {
 	return nil, ""
 }
 
+// TailnetNodes lists the tailnet the way a search for a moved relay does,
+// and reports how many IPv4s it found and from where: "localapi", "cli",
+// or "" when this machine cannot list the tailnet at all.
+func TailnetNodes(ctx context.Context) (n int, source string) {
+	ips, source := netmapIPv4s(ctx)
+	return len(ips), source
+}
+
 // peerURLs builds relay URLs from IPv4s using the scheme and port of base,
 // skipping the host already in base.
 func peerURLs(base string, ips []string) []string {
@@ -407,24 +416,16 @@ var localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status,
 
 func localAPINetmap(ctx context.Context) ([]string, error) {
 	lc := &local.Client{}
-	sock := strings.TrimSpace(os.Getenv("TS_SOCKET"))
-	switch {
-	case sock != "":
+	sock, err := tailscaledSocket()
+	if err != nil {
+		// A missing socket is not a Tailscale node; fail immediately
+		// rather than waiting on LocalAPI's dial timeout, then the CLI
+		// can run.
+		return nil, err
+	}
+	if sock != "" {
 		lc.Socket = sock
 		lc.UseSocketOnly = true
-	case goos == "darwin":
-		// The macOS Tailscale app has no socket file: the local client
-		// finds its LocalAPI port and token itself, and fails fast when
-		// there is neither.
-	default:
-		sock = paths.DefaultTailscaledSocket()
-	}
-	// A missing socket is not a Tailscale node; fail immediately rather
-	// than waiting on LocalAPI's dial timeout, then the CLI can run.
-	if sock != "" && goos != "windows" {
-		if _, err := os.Stat(sock); err != nil {
-			return nil, err
-		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -433,6 +434,98 @@ func localAPINetmap(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return ipv4sFromLocalStatus(st), nil
+}
+
+// procRoot is where a Linux userspace tailscaled is looked for; tests
+// replace it, and userHome.
+var (
+	procRoot = "/proc"
+	userHome = os.UserHomeDir
+)
+
+// tailscaledSocket is the tailscaled LocalAPI socket to ask: TS_SOCKET when
+// set, "" on macOS when it is not (the Tailscale app's LocalAPI is a
+// localhost port the local client finds itself), else the default socket,
+// or, when that is missing, the socket of a tailscaled started in
+// userspace with --socket somewhere else (userspaceSocket). It fails when
+// none of them exists.
+func tailscaledSocket() (string, error) {
+	if sock := strings.TrimSpace(os.Getenv("TS_SOCKET")); sock != "" {
+		if goos != "windows" {
+			if _, err := os.Stat(sock); err != nil {
+				return "", err
+			}
+		}
+		return sock, nil
+	}
+	if goos == "darwin" || goos == "windows" {
+		return "", nil
+	}
+	def := paths.DefaultTailscaledSocket()
+	_, err := os.Stat(def)
+	if err == nil {
+		return def, nil
+	}
+	if sock := userspaceSocket(); sock != "" {
+		return sock, nil
+	}
+	return "", err
+}
+
+// userspaceSocket finds the LocalAPI socket of a tailscaled that is not at
+// the default path, as a sandbox or a rebuilt box runs it: the --socket of
+// a running tailscaled, else a tailscaled.sock where such setups keep it.
+// "" when there is none.
+func userspaceSocket() string {
+	if dirs, err := os.ReadDir(procRoot); err == nil {
+		for _, d := range dirs {
+			raw, err := os.ReadFile(filepath.Join(procRoot, d.Name(), "cmdline"))
+			if err != nil || len(raw) == 0 {
+				continue
+			}
+			if sock := socketFlag(strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")); sock != "" && isSocket(sock) {
+				return sock
+			}
+		}
+	}
+	home, err := userHome()
+	if err != nil || home == "" {
+		return ""
+	}
+	globs := []string{".tailscale*/tailscaled.sock", ".config/tailscale/tailscaled.sock", ".local/share/tailscale/tailscaled.sock", ".local/state/tailscale/tailscaled.sock"}
+	for _, g := range globs {
+		matches, _ := filepath.Glob(filepath.Join(home, g))
+		for _, m := range matches {
+			if isSocket(m) {
+				return m
+			}
+		}
+	}
+	return ""
+}
+
+// socketFlag is the --socket value in a tailscaled command line, "" when
+// args are not tailscaled's or name no socket.
+func socketFlag(args []string) string {
+	if len(args) == 0 || !strings.HasPrefix(filepath.Base(args[0]), "tailscaled") {
+		return ""
+	}
+	for i, a := range args[1:] {
+		for _, f := range []string{"--socket", "-socket"} {
+			if v, ok := strings.CutPrefix(a, f+"="); ok {
+				return v
+			}
+			if a == f && i+2 < len(args) {
+				return args[i+2]
+			}
+		}
+	}
+	return ""
+}
+
+func isSocket(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode()&os.ModeSocket != 0
 }
 
 func ipv4sFromLocalStatus(st *ipnstate.Status) []string {
@@ -466,7 +559,11 @@ func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
+	args := []string{"status", "--json"}
+	if sock, err := tailscaledSocket(); err == nil && sock != "" && sock != paths.DefaultTailscaledSocket() {
+		args = append([]string{"--socket", sock}, args...)
+	}
+	raw, err := exec.CommandContext(ctx, bin, args...).Output()
 	if err != nil {
 		return nil, err
 	}

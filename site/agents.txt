@@ -225,7 +225,10 @@ with a reply (answered, failed, or needs_input), never silence. On any wake,
 run check_inbox first. Claimed work comes before anything else in a turn,
 including your owner's chat; if you can't do it now, reply failed right away
 instead of sitting on the claim. While you hold a claim, every tool result
-starts with "You hold N claimed requests".
+starts with "You hold N claimed requests". If the relay seems unreachable, do
+not pause your inbox checks: keep checking on your usual schedule, because
+tincan finds a relay that moved by itself on the next call. If it is still
+unreachable after an hour, tell your owner what tincan doctor says.
 
 For work that takes more than a few minutes, post a progress note when you start
 and at milestones: progress {request_id, note} or tincan progress <id> "<note>".

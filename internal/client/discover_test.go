@@ -532,13 +532,16 @@ func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
 func swapLocalStatus(t *testing.T, platform string) *bool {
 	t.Helper()
 	asked := new(bool)
-	oldGOOS, oldStatus := goos, localStatus
+	oldGOOS, oldStatus, oldProc, oldHome := goos, localStatus, procRoot, userHome
 	goos = platform
 	localStatus = func(context.Context, *local.Client) (*ipnstate.Status, error) {
 		*asked = true
 		return &ipnstate.Status{}, nil
 	}
-	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	// No userspace tailscaled on this machine counts either.
+	empty := t.TempDir()
+	procRoot, userHome = filepath.Join(empty, "proc"), func() (string, error) { return empty, nil }
+	t.Cleanup(func() { goos, localStatus, procRoot, userHome = oldGOOS, oldStatus, oldProc, oldHome })
 	return asked
 }
 
@@ -826,4 +829,106 @@ func waitJoined(t *testing.T, r *Relay, n int) {
 		defer r.findMu.Unlock()
 		return r.finding != nil && r.finding.live == n
 	})
+}
+
+// unixSocket listens on a short-path unix socket and returns its path.
+func unixSocket(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		t.Skipf("cannot listen on a unix socket: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return p
+}
+
+func shortTemp(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
+func TestSocketFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/usr/sbin/tailscaled", "--tun=userspace-networking", "--socket=/home/sandbox/.tailscale-x/tailscaled.sock"}, "/home/sandbox/.tailscale-x/tailscaled.sock"},
+		{[]string{"tailscaled", "--socket", "/tmp/ts.sock", "--state=/x"}, "/tmp/ts.sock"},
+		{[]string{"tailscaled", "-socket=/tmp/a.sock"}, "/tmp/a.sock"},
+		{[]string{"tailscaled", "--state=/x"}, ""},
+		{[]string{"tailscaled", "--socket"}, ""},
+		{[]string{"/bin/sh", "--socket=/tmp/ts.sock"}, ""},
+		{nil, ""},
+	} {
+		if got := socketFlag(tc.args); got != tc.want {
+			t.Errorf("socketFlag(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// A tailscaled started in userspace with its socket away from the default
+// path is found from its command line, and LocalAPI is asked on it. This
+// is how a sandbox agent finds a moved relay with TS_SOCKET unset.
+func TestLocalAPINetmapFindsUserspaceSocketFromProcess(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	sock := unixSocket(t, dir, "ts/tailscaled.sock")
+	proc := filepath.Join(dir, "proc")
+	for pid, cmd := range map[string]string{
+		"1":    "/sbin/init\x00",
+		"42":   "/usr/sbin/tailscaled\x00--tun=userspace-networking\x00--socks5-server=localhost:1055\x00--socket=" + sock + "\x00",
+		"self": "",
+	} {
+		if err := os.MkdirAll(filepath.Join(proc, pid), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(cmd), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = proc, func() (string, error) { return filepath.Join(dir, "nohome"), nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	var used string
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	localStatus = func(_ context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		used = lc.Socket
+		return &ipnstate.Status{}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+
+	if _, err := localAPINetmap(t.Context()); err != nil || used != sock {
+		t.Fatalf("err %v, asked LocalAPI on %q; want %q", err, used, sock)
+	}
+}
+
+// With no tailscaled process to read, the usual userspace socket places
+// under the home folder are tried.
+func TestUserspaceSocketFromHome(t *testing.T) {
+	dir := shortTemp(t)
+	sock := unixSocket(t, dir, ".tailscale-agentcookie/tailscaled.sock")
+	os.WriteFile(filepath.Join(dir, ".tailscale-notasocket"), []byte("x"), 0o644)
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	if got := userspaceSocket(); got != sock {
+		t.Fatalf("userspaceSocket = %q, want %q", got, sock)
+	}
+	os.Remove(sock)
+	if got := userspaceSocket(); got != "" {
+		t.Fatalf("userspaceSocket with nothing listening = %q, want none", got)
+	}
 }
