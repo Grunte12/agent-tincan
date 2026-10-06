@@ -532,13 +532,16 @@ func TestIPv4sFromLocalStatusIncludesOffline(t *testing.T) {
 func swapLocalStatus(t *testing.T, platform string) *bool {
 	t.Helper()
 	asked := new(bool)
-	oldGOOS, oldStatus := goos, localStatus
+	oldGOOS, oldStatus, oldProc, oldHome := goos, localStatus, procRoot, userHome
 	goos = platform
 	localStatus = func(context.Context, *local.Client) (*ipnstate.Status, error) {
 		*asked = true
 		return &ipnstate.Status{}, nil
 	}
-	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	// No userspace tailscaled on this machine counts either.
+	empty := t.TempDir()
+	procRoot, userHome = filepath.Join(empty, "proc"), func() (string, error) { return empty, nil }
+	t.Cleanup(func() { goos, localStatus, procRoot, userHome = oldGOOS, oldStatus, oldProc, oldHome })
 	return asked
 }
 
@@ -826,4 +829,237 @@ func waitJoined(t *testing.T, r *Relay, n int) {
 		defer r.findMu.Unlock()
 		return r.finding != nil && r.finding.live == n
 	})
+}
+
+// unixSocket listens on a short-path unix socket and returns its path.
+func unixSocket(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		t.Skipf("cannot listen on a unix socket: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return p
+}
+
+func shortTemp(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
+func TestSocketFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/usr/sbin/tailscaled", "--tun=userspace-networking", "--socket=/home/sandbox/.tailscale-x/tailscaled.sock"}, "/home/sandbox/.tailscale-x/tailscaled.sock"},
+		{[]string{"tailscaled", "--socket", "/tmp/ts.sock", "--state=/x"}, "/tmp/ts.sock"},
+		{[]string{"tailscaled", "-socket=/tmp/a.sock"}, "/tmp/a.sock"},
+		{[]string{"tailscaled", "--state=/x"}, ""},
+		{[]string{"tailscaled", "--socket"}, ""},
+		{[]string{"/bin/sh", "--socket=/tmp/ts.sock"}, ""},
+		{nil, ""},
+	} {
+		if got := socketFlag(tc.args); got != tc.want {
+			t.Errorf("socketFlag(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// A tailscaled started in userspace with its socket away from the default
+// path is found from its command line, and LocalAPI is asked on it. This
+// is how a sandbox agent finds a moved relay with TS_SOCKET unset.
+func TestLocalAPINetmapFindsUserspaceSocketFromProcess(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	sock := unixSocket(t, dir, "ts/tailscaled.sock")
+	proc := filepath.Join(dir, "proc")
+	for pid, cmd := range map[string]string{
+		"1":    "/sbin/init\x00",
+		"42":   "/usr/sbin/tailscaled\x00--tun=userspace-networking\x00--socks5-server=localhost:1055\x00--socket=" + sock + "\x00",
+		"self": "",
+	} {
+		if err := os.MkdirAll(filepath.Join(proc, pid), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(cmd), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = proc, func() (string, error) { return filepath.Join(dir, "nohome"), nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	var used []string
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	localStatus = func(_ context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		used = append(used, lc.Socket)
+		return &ipnstate.Status{}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+
+	if _, err := localAPINetmap(t.Context()); err != nil || !slices.Equal(used, []string{sock}) {
+		t.Fatalf("err %v, asked LocalAPI on %q; want %q", err, used, sock)
+	}
+}
+
+// With no tailscaled process to read, the usual userspace socket places
+// under the home folder are tried.
+func TestUserspaceSocketFromHome(t *testing.T) {
+	dir := shortTemp(t)
+	sock := unixSocket(t, dir, ".tailscale-agentcookie/tailscaled.sock")
+	os.WriteFile(filepath.Join(dir, ".tailscale-notasocket"), []byte("x"), 0o644)
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	cache := unixSocket(t, dir, ".cache/tailscale/tailscaled.sock")
+	if got := userspaceSockets(t.Context()); !slices.Equal(got, []string{sock, cache}) {
+		t.Fatalf("userspaceSockets = %q, want %q", got, []string{sock, cache})
+	}
+	os.Remove(sock)
+	os.Remove(cache)
+	if got := userspaceSockets(t.Context()); len(got) != 0 {
+		t.Fatalf("userspaceSockets with nothing listening = %q, want none", got)
+	}
+	// A search whose deadline has passed stops looking.
+	unixSocket(t, dir, ".config/tailscale/tailscaled.sock")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := userspaceSockets(ctx); len(got) != 0 {
+		t.Fatalf("userspaceSockets after its deadline = %q, want none", got)
+	}
+}
+
+// Two userspace tailscaleds, perhaps on different tailnets: both are
+// listed, so the relay's node is among the candidates whichever one it is
+// on; the hello proof picks it.
+func TestLocalAPINetmapListsEveryUserspaceTailnet(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	a := unixSocket(t, dir, ".tailscale-a/tailscaled.sock")
+	b := unixSocket(t, dir, ".tailscale-b/tailscaled.sock")
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	peers := map[string]string{a: "100.64.0.1", b: "100.100.0.9"}
+	localStatus = func(_ context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		ip := netip.MustParseAddr(peers[lc.Socket])
+		return &ipnstate.Status{Peer: map[key.NodePublic]*ipnstate.PeerStatus{key.NewNode().Public(): {TailscaleIPs: []netip.Addr{ip}}}}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+
+	got, err := localAPINetmap(t.Context())
+	if err != nil || !slices.Equal(got, []string{"100.64.0.1", "100.100.0.9"}) {
+		t.Fatalf("got %v, %v; want the peers of both tailnets", got, err)
+	}
+}
+
+// A relay found at one of its advertised addresses is followed at once,
+// without waiting on a slow tailnet listing.
+func TestFindRelayAdvertisedDoesNotWaitOnListing(t *testing.T) {
+	const key = "k-real"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHello(t, ln, key)
+	live := "http://" + ln.Addr().String()
+	slow := func(ctx context.Context) ([]string, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(SwapNetmapLookups(slow, slow))
+	r, err := NewRelayFor(Config{Relay: "http://127.0.0.1:1", RelayKey: key, RelayURLs: []string{live}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if got := r.FindRelay(t.Context()); got != live {
+		t.Fatalf("FindRelay = %q, want the advertised %q", got, live)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v; want the advertised address at once", d)
+	}
+}
+
+// A userspace socket that never answers does not hold up the others: they
+// are asked at once, and the listing returns within the caller's deadline
+// with the peers of the one that answered.
+func TestLocalAPINetmapDeadSocketDoesNotBlock(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	dead := unixSocket(t, dir, ".tailscale-a/tailscaled.sock")
+	live := unixSocket(t, dir, ".tailscale-b/tailscaled.sock")
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		if lc.Socket == dead {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return &ipnstate.Status{Self: &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.7")}}}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+	_ = live
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	got, err := localAPINetmap(ctx)
+	if err != nil || !slices.Equal(got, []string{"100.64.0.7"}) {
+		t.Fatalf("got %v, %v; want the live socket's peer", got, err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v; want the caller's deadline to bound the dead socket", d)
+	}
+}
+
+// Stale advertised addresses that hang do not cost the tailnet search its
+// time: a moved relay the netmap lists is followed while they still wait.
+func TestFindRelayNetmapDoesNotWaitOnStaleAdvertised(t *testing.T) {
+	const key = "k-real"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHello(t, ln, key)
+	live := "http://" + ln.Addr().String()
+	// An advertised address that accepts but never answers.
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(hang.Close)
+	r, err := NewRelayFor(Config{Relay: "http://127.0.0.1:1", RelayKey: key, RelayURLs: []string{hang.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.findRelays = func(context.Context, string) []string { return []string{live} }
+	start := time.Now()
+	if got := r.FindRelay(t.Context()); got != live {
+		t.Fatalf("FindRelay = %q, want the netmap peer %q", got, live)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("took %v; want the netmap peer found without waiting on the stale address", d)
+	}
 }

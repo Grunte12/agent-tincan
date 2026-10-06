@@ -129,7 +129,7 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 			saved, _ := client.LoadConfig()
 			switch {
 			case saved.RelayKey != "":
-				add(check{"relay moves", "ok", "the relay key is saved, so this agent finds the relay by itself if its address changes", ""})
+				add(relayMovesCheck(ctx))
 				if len(saved.RelayURLs) > 0 {
 					add(addressCheck(ctx, r, saved.RelayURLs))
 				}
@@ -589,4 +589,26 @@ func webStatusCheck(ctx context.Context, r *client.Relay) check {
 		return check{"web authentication", "ok", "no reported signed-out browser sessions; missing reports mean unknown", ""}
 	}
 	return check{"web authentication", "warn", strings.Join(notes, " "), "Sign in on each named browser host. Fresh authenticated traffic or a session probe clears the mark."}
+}
+
+// relayMovesCheck reports whether this agent can find its relay by itself
+// after the relay's address changes: the key is saved, and the search
+// needs to list the tailnet, through tailscaled's LocalAPI or the
+// tailscale CLI. A sandbox whose userspace tailscaled keeps its socket
+// where tincan cannot find it, or one that reaches the tailnet only through
+// a proxy, cannot list it and so would never find a moved relay.
+func relayMovesCheck(ctx context.Context) check {
+	n, source := client.TailnetNodes(ctx)
+	if source == "" {
+		return check{"relay moves", "warn",
+			"the relay key is saved, but this machine cannot list its tailnet (no tailscaled socket tincan can find, and no working tailscale CLI), so it cannot find the relay by itself if its address changes",
+			"If tailscaled runs in userspace, set TS_SOCKET to the path it was started with (its --socket flag) wherever tincan runs, then run tincan doctor again. Through a proxy alone, a moved relay has to be set by hand with tincan rejoin --relay."}
+	}
+	via := map[string]string{"localapi": "tailscaled's LocalAPI", "cli": "the tailscale CLI"}[source]
+	if n == 0 {
+		return check{"relay moves", "warn",
+			"the relay key is saved, but " + via + " lists no tailnet addresses, so this agent cannot find the relay by itself if its address changes",
+			"Check that tailscaled is logged in to the tailnet the relay is on (tailscale status), and if more than one tailscaled runs here, set TS_SOCKET to the one on that tailnet. Then run tincan doctor again."}
+	}
+	return check{"relay moves", "ok", fmt.Sprintf("the relay key is saved and this machine lists %d tailnet addresses through %s, so it finds the relay by itself if its address changes", n, via), ""}
 }

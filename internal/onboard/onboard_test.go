@@ -608,6 +608,7 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		"needs_input is for a missing detail, never for permission",
 		"Never ignore a request: every request you receive ends with a reply",
 		"Claimed work comes before anything else in a turn, including Matt's chat.",
+		"If the relay seems unreachable, do not pause your inbox checks",
 	}
 	var sawScheduled bool
 	for _, a := range k.Agents {

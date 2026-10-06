@@ -16,7 +16,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,30 +250,67 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		return ""
 	}
 	base := r.Base()
-	// The relay's own advertised addresses come first; they work for
-	// agents that cannot search the tailnet.
+	// The relay's own advertised addresses and the tailnet are searched at
+	// the same time: the advertised ones work for agents that cannot list
+	// the tailnet, and neither search waits on the other. The first
+	// address to prove the key wins and ends both.
 	var cands []string
 	for _, u := range known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
 	}
-	var peers []string
-	var source string
-	if r.findRelays != nil {
-		peers = r.findRelays(ctx, base)
-		if len(peers) > 0 {
-			source = "netmap"
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	found := make(chan string, 2)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if f := r.firstProving(ctx, cands, key); f != "" {
+			found <- f
+			cancel()
 		}
-	} else {
-		var ips []string
-		ips, source = netmapIPv4s(ctx)
-		peers = peerURLs(base, ips)
-	}
-	r.findMu.Lock()
-	r.lastListed, r.lastSource, r.searched = len(peers), source, true
-	r.findMu.Unlock()
-	cands = append(cands, peers...)
+	})
+	wg.Go(func() {
+		var peers []string
+		var source string
+		if r.findRelays != nil {
+			peers = r.findRelays(ctx, base)
+			if len(peers) > 0 {
+				source = "netmap"
+			}
+		} else {
+			lctx, lcancel := context.WithTimeout(ctx, netmapFor)
+			var ips []string
+			ips, source = netmapIPv4s(lctx)
+			lcancel()
+			peers = peerURLs(base, ips)
+		}
+		r.findMu.Lock()
+		r.lastListed, r.lastSource, r.searched = len(peers), source, true
+		r.findMu.Unlock()
+		var fresh []string
+		for _, p := range peers {
+			if !slices.Contains(cands, p) {
+				fresh = append(fresh, p)
+			}
+		}
+		if f := r.firstProving(ctx, fresh, key); f != "" {
+			found <- f
+			cancel()
+		}
+	})
+	wg.Wait()
+	close(found)
+	return <-found
+}
+
+// netmapFor bounds one listing of the tailnet, every socket and the CLI
+// fallback together, so a search keeps time to probe what it finds.
+var netmapFor = 5 * time.Second
+
+// firstProving probes cands, probeWorkers at a time, and returns the first
+// that proves key, or "" when none does within 8 seconds.
+func (r *Relay) firstProving(ctx context.Context, cands []string, key string) string {
 	if len(cands) == 0 {
 		return ""
 	}
@@ -370,6 +410,14 @@ func netmapIPv4s(ctx context.Context) (ips []string, source string) {
 	return nil, ""
 }
 
+// TailnetNodes lists the tailnet the way a search for a moved relay does,
+// and reports how many IPv4s it found and from where: "localapi", "cli",
+// or "" when this machine cannot list the tailnet at all.
+func TailnetNodes(ctx context.Context) (n int, source string) {
+	ips, source := netmapIPv4s(ctx)
+	return len(ips), source
+}
+
 // peerURLs builds relay URLs from IPv4s using the scheme and port of base,
 // skipping the host already in base.
 func peerURLs(base string, ips []string) []string {
@@ -406,33 +454,171 @@ var localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status,
 }
 
 func localAPINetmap(ctx context.Context) ([]string, error) {
-	lc := &local.Client{}
-	sock := strings.TrimSpace(os.Getenv("TS_SOCKET"))
-	switch {
-	case sock != "":
-		lc.Socket = sock
-		lc.UseSocketOnly = true
-	case goos == "darwin":
-		// The macOS Tailscale app has no socket file: the local client
-		// finds its LocalAPI port and token itself, and fails fast when
-		// there is neither.
-	default:
-		sock = paths.DefaultTailscaledSocket()
-	}
-	// A missing socket is not a Tailscale node; fail immediately rather
-	// than waiting on LocalAPI's dial timeout, then the CLI can run.
-	if sock != "" && goos != "windows" {
-		if _, err := os.Stat(sock); err != nil {
-			return nil, err
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	st, err := localStatus(ctx, lc)
+	socks, err := tailscaledSockets(ctx)
 	if err != nil {
+		// A missing socket is not a Tailscale node; fail immediately
+		// rather than waiting on LocalAPI's dial timeout, then the CLI
+		// can run.
 		return nil, err
 	}
-	return ipv4sFromLocalStatus(st), nil
+	type result struct {
+		ips []string
+		err error
+	}
+	// Every socket is asked at once, under the caller's deadline and at
+	// most 5 seconds, so a dead one cannot hold up the others.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	results := make([]result, len(socks))
+	var wg sync.WaitGroup
+	for i, sock := range socks {
+		wg.Go(func() {
+			lc := &local.Client{}
+			if sock != "" {
+				lc.Socket = sock
+				lc.UseSocketOnly = true
+			}
+			st, err := localStatus(ctx, lc)
+			if err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			results[i] = result{ips: ipv4sFromLocalStatus(st)}
+		})
+	}
+	wg.Wait()
+	var ips []string
+	var lastErr error
+	ok := false
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = r.err
+			continue
+		}
+		ok = true
+		ips = appendNew(ips, r.ips)
+	}
+	if !ok {
+		return nil, lastErr
+	}
+	return ips, nil
+}
+
+// appendNew appends the items of add not already in to.
+func appendNew(to, add []string) []string {
+	for _, a := range add {
+		if !slices.Contains(to, a) {
+			to = append(to, a)
+		}
+	}
+	return to
+}
+
+// procRoot is where a Linux userspace tailscaled is looked for; tests
+// replace it, and userHome.
+var (
+	procRoot = "/proc"
+	userHome = os.UserHomeDir
+)
+
+// tailscaledSockets are the tailscaled LocalAPI sockets to ask: TS_SOCKET
+// when set; "" on macOS and Windows when it is not (the Tailscale app's
+// LocalAPI is a localhost port the local client finds itself); else the
+// default socket; or, when that is missing, every socket a tailscaled
+// started in userspace uses (userspaceSockets). A host can run more than
+// one, on different tailnets: all are listed, and the hello proof picks
+// the relay. It fails when there is none.
+func tailscaledSockets(ctx context.Context) ([]string, error) {
+	if sock := strings.TrimSpace(os.Getenv("TS_SOCKET")); sock != "" {
+		if goos != "windows" {
+			if _, err := os.Stat(sock); err != nil {
+				return nil, err
+			}
+		}
+		return []string{sock}, nil
+	}
+	if goos == "darwin" || goos == "windows" {
+		return []string{""}, nil
+	}
+	def := paths.DefaultTailscaledSocket()
+	_, err := os.Stat(def)
+	if err == nil {
+		return []string{def}, nil
+	}
+	if socks := userspaceSockets(ctx); len(socks) > 0 {
+		return socks, nil
+	}
+	return nil, err
+}
+
+// homeSockets are where userspace tailscaled setups keep their socket,
+// under the home folder.
+var homeSockets = []string{".tailscale*/tailscaled.sock", ".cache/tailscale/tailscaled.sock", ".config/tailscale/tailscaled.sock", ".local/share/tailscale/tailscaled.sock", ".local/state/tailscale/tailscaled.sock"}
+
+// userspaceSockets finds the LocalAPI sockets of tailscaleds that are not
+// at the default path, as a sandbox or a rebuilt box runs them: the
+// --socket of each running tailscaled, then any tailscaled.sock where such
+// setups keep it. It stops early when ctx ends, so a slow host cannot use
+// up a search's deadline.
+func userspaceSockets(ctx context.Context) []string {
+	var out []string
+	if dirs, err := os.ReadDir(procRoot); err == nil {
+		for _, d := range dirs {
+			if ctx.Err() != nil {
+				return out
+			}
+			if _, err := strconv.Atoi(d.Name()); err != nil {
+				continue // not a process
+			}
+			raw, err := os.ReadFile(filepath.Join(procRoot, d.Name(), "cmdline"))
+			if err != nil || len(raw) == 0 {
+				continue
+			}
+			if sock := socketFlag(strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")); sock != "" && isSocket(sock) {
+				out = appendNew(out, []string{sock})
+			}
+		}
+	}
+	home, err := userHome()
+	if err != nil || home == "" {
+		return out
+	}
+	for _, g := range homeSockets {
+		if ctx.Err() != nil {
+			return out
+		}
+		matches, _ := filepath.Glob(filepath.Join(home, g))
+		for _, m := range matches {
+			if isSocket(m) {
+				out = appendNew(out, []string{m})
+			}
+		}
+	}
+	return out
+}
+
+// socketFlag is the --socket value in a tailscaled command line, "" when
+// args are not tailscaled's or name no socket.
+func socketFlag(args []string) string {
+	if len(args) == 0 || !strings.HasPrefix(filepath.Base(args[0]), "tailscaled") {
+		return ""
+	}
+	for i, a := range args[1:] {
+		for _, f := range []string{"--socket", "-socket"} {
+			if v, ok := strings.CutPrefix(a, f+"="); ok {
+				return v
+			}
+			if a == f && i+2 < len(args) {
+				return args[i+2]
+			}
+		}
+	}
+	return ""
+}
+
+func isSocket(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode()&os.ModeSocket != 0
 }
 
 func ipv4sFromLocalStatus(st *ipnstate.Status) []string {
@@ -464,13 +650,51 @@ func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	if bin == "" {
 		return nil, errors.New("tailscale CLI not found")
 	}
+	socks, err := tailscaledSockets(ctx)
+	if err != nil {
+		socks = []string{""} // the CLI may still find tailscaled itself
+	}
+	type result struct {
+		ips []string
+		err error
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
-	if err != nil {
-		return nil, err
+	results := make([]result, len(socks))
+	var wg sync.WaitGroup
+	for i, sock := range socks {
+		wg.Go(func() {
+			args := []string{"status", "--json"}
+			if sock != "" && sock != paths.DefaultTailscaledSocket() {
+				args = append([]string{"--socket", sock}, args...)
+			}
+			raw, err := exec.CommandContext(ctx, bin, args...).Output()
+			if err == nil {
+				var got []string
+				if got, err = ipv4sFromStatusJSON(raw); err == nil {
+					results[i] = result{ips: got}
+					return
+				}
+			}
+			results[i] = result{err: err}
+		})
 	}
-	return ipv4sFromStatusJSON(raw)
+	wg.Wait()
+	var ips []string
+	var lastErr error
+	ok := false
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = r.err
+			continue
+		}
+		ok = true
+		ips = appendNew(ips, r.ips)
+	}
+	if !ok {
+		return nil, lastErr
+	}
+	return ips, nil
 }
 
 // ipv4sFromStatusJSON reads Self and Peer TailscaleIPs from `tailscale
