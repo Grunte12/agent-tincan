@@ -605,5 +605,10 @@ func relayMovesCheck(ctx context.Context) check {
 			"If tailscaled runs in userspace, set TS_SOCKET to the path it was started with (its --socket flag) wherever tincan runs, then run tincan doctor again. Through a proxy alone, a moved relay has to be set by hand with tincan rejoin --relay."}
 	}
 	via := map[string]string{"localapi": "tailscaled's LocalAPI", "cli": "the tailscale CLI"}[source]
+	if n == 0 {
+		return check{"relay moves", "warn",
+			"the relay key is saved, but " + via + " lists no tailnet addresses, so this agent cannot find the relay by itself if its address changes",
+			"Check that tailscaled is logged in to the tailnet the relay is on (tailscale status), and if more than one tailscaled runs here, set TS_SOCKET to the one on that tailnet. Then run tincan doctor again."}
+	}
 	return check{"relay moves", "ok", fmt.Sprintf("the relay key is saved and this machine lists %d tailnet addresses through %s, so it finds the relay by itself if its address changes", n, via), ""}
 }

@@ -900,17 +900,17 @@ func TestLocalAPINetmapFindsUserspaceSocketFromProcess(t *testing.T) {
 	oldProc, oldHome := procRoot, userHome
 	procRoot, userHome = proc, func() (string, error) { return filepath.Join(dir, "nohome"), nil }
 	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
-	var used string
+	var used []string
 	oldGOOS, oldStatus := goos, localStatus
 	goos = "linux"
 	localStatus = func(_ context.Context, lc *local.Client) (*ipnstate.Status, error) {
-		used = lc.Socket
+		used = append(used, lc.Socket)
 		return &ipnstate.Status{}, nil
 	}
 	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
 	t.Setenv("TS_SOCKET", "")
 
-	if _, err := localAPINetmap(t.Context()); err != nil || used != sock {
+	if _, err := localAPINetmap(t.Context()); err != nil || !slices.Equal(used, []string{sock}) {
 		t.Fatalf("err %v, asked LocalAPI on %q; want %q", err, used, sock)
 	}
 }
@@ -924,11 +924,49 @@ func TestUserspaceSocketFromHome(t *testing.T) {
 	oldProc, oldHome := procRoot, userHome
 	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
 	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
-	if got := userspaceSocket(); got != sock {
-		t.Fatalf("userspaceSocket = %q, want %q", got, sock)
+	cache := unixSocket(t, dir, ".cache/tailscale/tailscaled.sock")
+	if got := userspaceSockets(t.Context()); !slices.Equal(got, []string{sock, cache}) {
+		t.Fatalf("userspaceSockets = %q, want %q", got, []string{sock, cache})
 	}
 	os.Remove(sock)
-	if got := userspaceSocket(); got != "" {
-		t.Fatalf("userspaceSocket with nothing listening = %q, want none", got)
+	os.Remove(cache)
+	if got := userspaceSockets(t.Context()); len(got) != 0 {
+		t.Fatalf("userspaceSockets with nothing listening = %q, want none", got)
+	}
+	// A search whose deadline has passed stops looking.
+	unixSocket(t, dir, ".config/tailscale/tailscaled.sock")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := userspaceSockets(ctx); len(got) != 0 {
+		t.Fatalf("userspaceSockets after its deadline = %q, want none", got)
+	}
+}
+
+// Two userspace tailscaleds, perhaps on different tailnets: both are
+// listed, so the relay's node is among the candidates whichever one it is
+// on; the hello proof picks it.
+func TestLocalAPINetmapListsEveryUserspaceTailnet(t *testing.T) {
+	if _, err := os.Stat(paths.DefaultTailscaledSocket()); err == nil {
+		t.Skip("this machine has a tailscaled socket at the default path")
+	}
+	dir := shortTemp(t)
+	a := unixSocket(t, dir, ".tailscale-a/tailscaled.sock")
+	b := unixSocket(t, dir, ".tailscale-b/tailscaled.sock")
+	oldProc, oldHome := procRoot, userHome
+	procRoot, userHome = filepath.Join(dir, "noproc"), func() (string, error) { return dir, nil }
+	t.Cleanup(func() { procRoot, userHome = oldProc, oldHome })
+	oldGOOS, oldStatus := goos, localStatus
+	goos = "linux"
+	peers := map[string]string{a: "100.64.0.1", b: "100.100.0.9"}
+	localStatus = func(_ context.Context, lc *local.Client) (*ipnstate.Status, error) {
+		ip := netip.MustParseAddr(peers[lc.Socket])
+		return &ipnstate.Status{Peer: map[key.NodePublic]*ipnstate.PeerStatus{key.NewNode().Public(): {TailscaleIPs: []netip.Addr{ip}}}}, nil
+	}
+	t.Cleanup(func() { goos, localStatus = oldGOOS, oldStatus })
+	t.Setenv("TS_SOCKET", "")
+
+	got, err := localAPINetmap(t.Context())
+	if err != nil || !slices.Equal(got, []string{"100.64.0.1", "100.100.0.9"}) {
+		t.Fatalf("got %v, %v; want the peers of both tailnets", got, err)
 	}
 }

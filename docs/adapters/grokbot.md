@@ -151,7 +151,7 @@ It writes a launchd agent (a systemd user unit on Linux) and prints the command 
 
 ## Relay rediscovery and the custom socket
 
-When the relay moves, the client first tries the relay's advertised addresses, then every IPv4 address on the local Tailscale netmap (`internal/client/discover.go`). It reads the netmap from tailscaled's LocalAPI, and falls back to `tailscale status --json` only if LocalAPI is unreachable. With a userspace tailscaled on a custom socket, tincan finds the socket from the running tailscaled's `--socket` flag, or under the home folder (`~/.tailscale*/`, `~/.config/tailscale/`, `~/.local/share/tailscale/`, `~/.local/state/tailscale/`). If `tincan doctor` still warns under `relay moves` that it cannot list the tailnet, set `TS_SOCKET` in the environment of every tincan process, including whatever starts `tincan mcp`:
+When the relay moves, the client first tries the relay's advertised addresses, then every IPv4 address on the local Tailscale netmap (`internal/client/discover.go`). It reads the netmap from tailscaled's LocalAPI, and falls back to `tailscale status --json` only if LocalAPI is unreachable. With a userspace tailscaled on a custom socket, tincan finds the socket from the running tailscaled's `--socket` flag, or under the home folder (`~/.tailscale*/`, `~/.cache/tailscale/`, `~/.config/tailscale/`, `~/.local/share/tailscale/`, `~/.local/state/tailscale/`); when more than one tailscaled runs, it lists them all. If `tincan doctor` still warns under `relay moves` that it cannot list the tailnet, set `TS_SOCKET` in the environment of every tincan process, including whatever starts `tincan mcp`:
 
 ```sh
 export TS_SOCKET="$HOME/.cache/tailscale/tailscaled.sock"

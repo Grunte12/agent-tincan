@@ -20,6 +20,14 @@ func TestRelayMovesCheck(t *testing.T) {
 		t.Fatalf("no tailnet listing: %+v", c)
 	}
 
+	empty := func(context.Context) ([]string, error) { return nil, nil }
+	restore = client.SwapNetmapLookups(empty, none)
+	c = relayMovesCheck(t.Context())
+	restore()
+	if c.Status != "warn" || !strings.Contains(c.Detail, "lists no tailnet addresses") {
+		t.Fatalf("empty tailnet listing: %+v", c)
+	}
+
 	some := func(context.Context) ([]string, error) { return []string{"100.64.0.1", "100.64.0.2"}, nil }
 	t.Cleanup(client.SwapNetmapLookups(some, none))
 	c = relayMovesCheck(t.Context())
