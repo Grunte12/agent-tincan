@@ -166,6 +166,10 @@ func TestDoctorRelayMovesUnderTincanRelayOverride(t *testing.T) {
 		t.Fatal("no relay moves check")
 		return check{}
 	}
+	// This machine may have no Tailscale (CI): give the search a tailnet
+	// to list, so the check turns on the saved key alone.
+	peers := func(context.Context) ([]string, error) { return []string{"100.64.0.1"}, nil }
+	t.Cleanup(client.SwapNetmapLookups(peers, peers))
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
 	if c := relayMoves(); c.Status != "ok" {
 		t.Fatalf("with a saved config: %+v", c)
