@@ -971,9 +971,9 @@ func TestLocalAPINetmapListsEveryUserspaceTailnet(t *testing.T) {
 	}
 }
 
-// A relay found at one of its advertised addresses is followed without
-// listing the tailnet, so a slow listing cannot use up the search.
-func TestFindRelayTriesAdvertisedBeforeListing(t *testing.T) {
+// A relay found at one of its advertised addresses is followed at once,
+// without waiting on a slow tailnet listing.
+func TestFindRelayAdvertisedDoesNotWaitOnListing(t *testing.T) {
 	const key = "k-real"
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -981,9 +981,7 @@ func TestFindRelayTriesAdvertisedBeforeListing(t *testing.T) {
 	}
 	serveHello(t, ln, key)
 	live := "http://" + ln.Addr().String()
-	listed := false
 	slow := func(ctx context.Context) ([]string, error) {
-		listed = true
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -996,8 +994,8 @@ func TestFindRelayTriesAdvertisedBeforeListing(t *testing.T) {
 	if got := r.FindRelay(t.Context()); got != live {
 		t.Fatalf("FindRelay = %q, want the advertised %q", got, live)
 	}
-	if listed || time.Since(start) > 2*time.Second {
-		t.Fatalf("listed the tailnet %v, took %v; want the advertised address alone, at once", listed, time.Since(start))
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v; want the advertised address at once", d)
 	}
 }
 
@@ -1036,5 +1034,32 @@ func TestLocalAPINetmapDeadSocketDoesNotBlock(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v; want the caller's deadline to bound the dead socket", d)
+	}
+}
+
+// Stale advertised addresses that hang do not cost the tailnet search its
+// time: a moved relay the netmap lists is followed while they still wait.
+func TestFindRelayNetmapDoesNotWaitOnStaleAdvertised(t *testing.T) {
+	const key = "k-real"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveHello(t, ln, key)
+	live := "http://" + ln.Addr().String()
+	// An advertised address that accepts but never answers.
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(hang.Close)
+	r, err := NewRelayFor(Config{Relay: "http://127.0.0.1:1", RelayKey: key, RelayURLs: []string{hang.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.findRelays = func(context.Context, string) []string { return []string{live} }
+	start := time.Now()
+	if got := r.FindRelay(t.Context()); got != live {
+		t.Fatalf("FindRelay = %q, want the netmap peer %q", got, live)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("took %v; want the netmap peer found without waiting on the stale address", d)
 	}
 }

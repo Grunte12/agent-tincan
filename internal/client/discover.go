@@ -250,42 +250,58 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		return ""
 	}
 	base := r.Base()
-	// The relay's own advertised addresses are tried first, on their own:
-	// they work for agents that cannot search the tailnet, and a relay
-	// found there never waits on a slow tailnet listing.
+	// The relay's own advertised addresses and the tailnet are searched at
+	// the same time: the advertised ones work for agents that cannot list
+	// the tailnet, and neither search waits on the other. The first
+	// address to prove the key wins and ends both.
 	var cands []string
 	for _, u := range known {
 		if u = strings.TrimRight(u, "/"); u != "" && u != base {
 			cands = append(cands, u)
 		}
 	}
-	if found := r.firstProving(ctx, cands, key); found != "" {
-		return found
-	}
-	var peers []string
-	var source string
-	if r.findRelays != nil {
-		peers = r.findRelays(ctx, base)
-		if len(peers) > 0 {
-			source = "netmap"
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	found := make(chan string, 2)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if f := r.firstProving(ctx, cands, key); f != "" {
+			found <- f
+			cancel()
 		}
-	} else {
-		lctx, cancel := context.WithTimeout(ctx, netmapFor)
-		var ips []string
-		ips, source = netmapIPv4s(lctx)
-		cancel()
-		peers = peerURLs(base, ips)
-	}
-	r.findMu.Lock()
-	r.lastListed, r.lastSource, r.searched = len(peers), source, true
-	r.findMu.Unlock()
-	var fresh []string
-	for _, p := range peers {
-		if !slices.Contains(cands, p) {
-			fresh = append(fresh, p)
+	})
+	wg.Go(func() {
+		var peers []string
+		var source string
+		if r.findRelays != nil {
+			peers = r.findRelays(ctx, base)
+			if len(peers) > 0 {
+				source = "netmap"
+			}
+		} else {
+			lctx, lcancel := context.WithTimeout(ctx, netmapFor)
+			var ips []string
+			ips, source = netmapIPv4s(lctx)
+			lcancel()
+			peers = peerURLs(base, ips)
 		}
-	}
-	return r.firstProving(ctx, fresh, key)
+		r.findMu.Lock()
+		r.lastListed, r.lastSource, r.searched = len(peers), source, true
+		r.findMu.Unlock()
+		var fresh []string
+		for _, p := range peers {
+			if !slices.Contains(cands, p) {
+				fresh = append(fresh, p)
+			}
+		}
+		if f := r.firstProving(ctx, fresh, key); f != "" {
+			found <- f
+			cancel()
+		}
+	})
+	wg.Wait()
+	close(found)
+	return <-found
 }
 
 // netmapFor bounds one listing of the tailnet, every socket and the CLI
