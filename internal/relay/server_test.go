@@ -1362,3 +1362,59 @@ func TestSendResponseCarriesScheduleTarget(t *testing.T) {
 		}
 	}
 }
+
+// An admin device reads each agent's Tailscale node (id, name, owning login)
+// on the roster, so it can tell machines apart. A virtual agent has no node,
+// so it carries none of the fields.
+func TestAgentsListShowsNodeToAdminOnly(t *testing.T) {
+	h := newHarness(t, Config{})
+	const dotAddr = "100.0.0.5:1"
+	h.who.Set(dotAddr, identity.Node{ID: "nDOT", Name: "dot-vm", User: "owner@github"})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"dot"}`, http.StatusOK, &inv)
+	h.do(dotAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	if err := h.srv.dir.BindVirtual(t.Context(), "chatgpt"); err != nil {
+		t.Fatal(err)
+	}
+
+	var admin struct{ Agents []client.AgentInfo }
+	h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, &admin)
+	byName := map[string]client.AgentInfo{}
+	for _, a := range admin.Agents {
+		byName[a.Name] = a
+	}
+	if a := byName["dot"]; a.NodeID != "nDOT" || a.NodeName != "dot-vm" || a.NodeUser != "owner@github" {
+		t.Errorf("admin roster dot = %+v, want node nDOT dot-vm owner@github", a)
+	}
+	if a := byName["grokbot"]; a.NodeID != "nGROK" || a.NodeName != "grok-bot" {
+		t.Errorf("admin roster grokbot = %+v, want node nGROK grok-bot", a)
+	}
+	if a, ok := byName["chatgpt"]; !ok || a.NodeID != "" || a.NodeName != "" || a.NodeUser != "" {
+		t.Errorf("admin roster chatgpt = %+v (present %v), want no node fields", a, ok)
+	}
+	rec := h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
+	if strings.Contains(rec.Body.String(), identity.VirtualPrefix) {
+		t.Errorf("admin roster leaks a virtual node: %s", rec.Body.String())
+	}
+
+	// An agent caller sees none of it, not even the owning login.
+	rec = h.do(museAddr, "GET", "/v1/agents", "", http.StatusOK, nil)
+	for _, leak := range []string{"node_id", "node_name", "node_user", "nDOT", "dot-vm", "@"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("agent roster leaks %q: %s", leak, rec.Body.String())
+		}
+	}
+
+	// A client built before the node fields decodes the admin roster.
+	var old struct {
+		Agents []struct {
+			Name   string `json:"name"`
+			Online bool   `json:"online"`
+			Wake   string `json:"wake"`
+		} `json:"agents"`
+	}
+	h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, &old)
+	if len(old.Agents) != len(admin.Agents) {
+		t.Errorf("old client decoded %d agents, want %d", len(old.Agents), len(admin.Agents))
+	}
+}

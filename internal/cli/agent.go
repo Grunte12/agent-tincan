@@ -311,6 +311,7 @@ func relayFor(override string) (*client.Relay, client.Config, error) {
 
 func agentsCmd() *cobra.Command {
 	var relayURL, socket string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "agents",
 		Short: "List agents in the mesh, whether they are online, how they wake, when each last called the relay, and which tincan build each runs",
@@ -323,7 +324,11 @@ can skip it; every other line is one agent.
 Works from any joined agent (saved config). An admin device that never joined
 passes --relay <url> (or sets TINCAN_RELAY). The relay host needs no flags:
 its local admin socket is used, like the other admin commands (--socket
-names one elsewhere).`,
+names one elsewhere).
+
+--json prints the relay's roster document instead. An admin device also
+gets each agent's Tailscale node there (node_id, node_name, node_user);
+agents and virtual agents (ChatGPT, Sesame) never carry them.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if socket == "" && relayURL == "" && localAdminSocket() == "" {
 				if cfg, _ := client.LoadConfig(); cfg.Relay == "" {
@@ -339,10 +344,14 @@ names one elsewhere).`,
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return printJSON(cmd, ro)
+			}
 			cmd.Print(formatRoster(ro, time.Now()))
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the roster as JSON (with node fields on an admin device)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config or TINCAN_RELAY)")
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	return cmd

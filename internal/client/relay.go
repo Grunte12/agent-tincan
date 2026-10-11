@@ -78,6 +78,13 @@ type AgentInfo struct {
 	Queued       int       `json:"queued,omitempty"`
 	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
 	Claimed      int       `json:"claimed,omitempty"`
+	// NodeID, NodeName and NodeUser name the Tailscale node the agent is
+	// bound to: its stable node id, machine name, and owning login. The
+	// relay fills them only for admin callers, and never for a virtual
+	// agent (ChatGPT, Sesame), which has no node. Empty from older relays.
+	NodeID   string `json:"node_id,omitempty"`
+	NodeName string `json:"node_name,omitempty"`
+	NodeUser string `json:"node_user,omitempty"`
 	// Target carries the relay's schedule facts for an agent on wake method
 	// schedule, or its last wake for a webhook or email agent the relay has
 	// woken, and is left out otherwise and by older relays. Its fields sit

@@ -1252,9 +1252,11 @@ func (s *Server) scheduleTarget(every time.Duration, lastPoll, joined, now time.
 }
 
 // handleAgents lists the roster for joined agents and for admin devices,
-// which need not be joined (onboarding runs from an admin laptop).
+// which need not be joined (onboarding runs from an admin laptop). Admin
+// devices also get each agent's node fields.
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
-	if !s.isAdmin(r) && s.agent(w, r) == "" {
+	admin := s.isAdmin(r)
+	if !admin && s.agent(w, r) == "" {
 		return
 	}
 	agents, err := s.dir.Agents(r.Context())
@@ -1305,6 +1307,11 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
+		}
+		// Only an admin device sees which node an agent runs on; a virtual
+		// agent has none to show.
+		if admin && !strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
+			info.NodeID, info.NodeName, info.NodeUser = a.NodeID, a.NodeName, a.NodeUser
 		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
