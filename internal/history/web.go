@@ -386,7 +386,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	if site.oneThread {
 		thread, ok := site.canonical(w.Thread)
 		if !ok {
-			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; run it with --thread <id>, the id in https://%s/dots/<id>.", label, w.Name, site.host), envelope.StatusFailed, nil)
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; reinstall it with tincan web install --site dots, which finds the dot's thread, or run it with --thread <id>.", label, w.Name), envelope.StatusFailed, nil)
 			return
 		}
 		wr = webRequest{mode: threadConversation, convID: thread, message: dropNewChatLine(req.Body)}

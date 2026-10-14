@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Dots reads the owner's OpenAI dot's DM (chatgpt.com/dots/<thread>) for
+// Dots reads the owner's OpenAI dot's DM (one of the dot's threads) for
 // the dot-web agent. It is not a history source (the site entry is
 // webOnly): there is no list, only dots.detail, which the extension
 // answers with the DM room's latest messages, oldest first, and the room's
@@ -62,7 +62,8 @@ func dotsCanonicalID(id string) (string, bool) {
 	return id, dotsThreadPattern.MatchString(id) && validNativeID(id)
 }
 
-// dotsConvPath is a dot's DM path on chatgpt.com, /dots/<thread>.
+// dotsConvPath matches a dot's thread address, /dots/<thread>. The DM page
+// itself is at /dots/<dot id>, which names no thread.
 var dotsConvPath = regexp.MustCompile(`^/dots/([0-9A-Fa-f-]{8,64})/?$`)
 
 // dotsNotLoggedIn is the not_logged_in reason for a dot.
@@ -237,4 +238,32 @@ func ParseWebThread(site Source, id string) (string, bool) {
 func WebSiteTakesThread(site Source) bool {
 	s := siteFor(site)
 	return s != nil && s.oneThread
+}
+
+// DotPrimary is the account's primary dot as dots.primary names it: its
+// current thread (canonical, as --thread takes it) and its name.
+type DotPrimary struct {
+	Thread string
+	Name   string
+}
+
+// DotPrimary asks the extension for the account's primary dot, for web
+// install when no --thread is given.
+func (c *Client) DotPrimary(ctx context.Context) (DotPrimary, error) {
+	raw, err := c.Request(ctx, OpDotsPrimary, OpArgs{})
+	if err != nil {
+		return DotPrimary{}, err
+	}
+	var p struct {
+		Thread string `json:"thread"`
+		Name   string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return DotPrimary{}, unavailable(SourceDots, ErrEndpointChanged, "unexpected primary dot")
+	}
+	thread, ok := ParseWebThread(SourceDots, p.Thread)
+	if !ok {
+		return DotPrimary{}, unavailable(SourceDots, ErrEndpointChanged, "unexpected primary dot thread")
+	}
+	return DotPrimary{Thread: thread, Name: p.Name}, nil
 }

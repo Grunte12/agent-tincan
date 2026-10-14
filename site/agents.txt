@@ -410,12 +410,13 @@ C10. Optional: your owner's OpenAI dot (dot-web). Tell your owner first, and go
     owner's approval by default. Nothing is installed on the dot. Then:
     - Make sure your owner is signed in to chatgpt.com in this same Chrome.
       No extra grant is needed; it uses the extension's ChatGPT access.
-    - Ask your owner to open the dot's DM in ChatGPT and give you the thread
-      id from its address: https://chatgpt.com/dots/<thread-id>.
+    - The dot's address no longer shows its thread id; web install finds it
+      through the extension (the thread of the account's primary dot) and
+      prints it.
     - Get an invite code with kind dot-web and join and install it:
 
         TINCAN_CONFIG=~/.config/tincan/dot-web.json  tincan join <CODE6> --relay http://tincan-relay
-        TINCAN_CONFIG=~/.config/tincan/dot-web.json  tincan web install --site dots --thread <thread-id>
+        TINCAN_CONFIG=~/.config/tincan/dot-web.json  tincan web install --site dots
 
     - On first start it types one setup message into the DM that teaches the
       dot to ask teammates with a message whose first line is

@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.send_images', ...['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => site + '.session')].sort());
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.primary', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.send_images', ...['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => site + '.session')].sort());
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -1221,6 +1221,7 @@ test('perplexity ops need the www.perplexity.ai grant', async () => {
 
 const DOT_THREAD = '0d0d0d0d-1111-7222-8333-000000000001';
 const DOT_ROOM = '0123456789abcdef0123456789abcdef';
+const DOT_ID = '0a0a0a0a-1111-4222-8333-000000000002~0123456789abcdef0123456789abcdef';
 const DOT_OWNER = 'user-owner__acct';
 const DOT_BOT = 'user-dot__acct';
 const DOT_TBO = `https://chatgpt.com/backend-api/tbo/by-thread/${DOT_THREAD}`;
@@ -1234,7 +1235,7 @@ function dotMessage(id, from, text, at, extra = {}) {
 function dotRoutes(over = {}) {
   return {
     [SESSION]: jsonResponse({ accessToken: TOKEN }),
-    [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: DOT_ROOM, is_paused: false, status: 'active', last_check_in_at: '2026-09-29T17:00:00Z' }),
+    [DOT_TBO]: jsonResponse({ id: DOT_ID, messaging_room_id: DOT_ROOM, is_paused: false, status: 'active', last_check_in_at: '2026-09-29T17:00:00Z' }),
     [DOT_ROOM_URL]: jsonResponse({ id: DOT_ROOM, type: 'DM', creator_account_user_id: DOT_OWNER, members: [{ account_user_id: DOT_OWNER, role: 'user' }, { account_user_id: DOT_BOT, role: 'user' }] }),
     [DOT_FEED]: jsonResponse({
       items: [
@@ -1319,7 +1320,7 @@ test('dots.detail caches the dot record and room per thread; not_found clears th
 test('dots.send refuses a paused dot, or a send with no thread, before any tab opens', async () => {
   const sent = [];
   const sender = { send: async (site, a) => (sent.push([site, a]), { conversation_id: DOT_THREAD, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
-  const paused = fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse({ id: 'tbo-1', messaging_room_id: DOT_ROOM, is_paused: true, status: 'paused' }) }));
+  const paused = fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse({ id: DOT_ID, messaging_room_id: DOT_ROOM, is_paused: true, status: 'paused' }) }));
   let caught;
   await assert.rejects(run(createRunner({ fetch: paused, sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => ((caught = e), e.code === 'paused'));
   assert.match(errorFrame(caught).error.message, /paused/);
@@ -1332,6 +1333,71 @@ test('dots.send refuses a paused dot, or a send with no thread, before any tab o
   assert.equal(f.calls.length, 0, 'a send with no thread fetches nothing');
   // Without a sender the send is unsupported.
   await assert.rejects(run(createRunner({ fetch: fakeFetch(dotRoutes()) }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => e.code === 'unsupported');
+});
+
+test('dots.send hands the sender the dot id as the page to open, and refuses a dot record without a well-formed one', async () => {
+  let got;
+  const sender = { send: async (site, a, hooks) => ((got = { site, a, hooks }), { conversation_id: DOT_THREAD, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  await run(createRunner({ fetch: fakeFetch(dotRoutes()), sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD });
+  assert.equal(got.site, 'dots');
+  assert.equal(got.hooks.page, DOT_ID);
+  for (const id of [undefined, '', 'home', 'tbo-1', `${DOT_ID}~extra`, '~0123456789abcdef', '../x~y']) {
+    got = undefined;
+    const rec = { messaging_room_id: DOT_ROOM, is_paused: false, ...(id === undefined ? {} : { id }) };
+    const f = fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse(rec) }));
+    await assert.rejects(run(createRunner({ fetch: f, sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD }), (e) => e.code === 'endpoint_changed', String(id));
+    assert.equal(got, undefined, 'no send reached the sender');
+    // A read of the same record still works: only the send needs the id.
+    assert.equal((await run(createRunner({ fetch: fakeFetch(dotRoutes({ [DOT_TBO]: jsonResponse(rec) })) }), 'dots.detail', { id: DOT_THREAD }))[0].ok, true, String(id));
+  }
+});
+
+test('dots.send fails before the click when the dot record names another dot partway through', async () => {
+  let hooks;
+  const sender = { send: async (_site, _a, h) => ((hooks = h), { conversation_id: DOT_THREAD, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  const routes = dotRoutes();
+  routes[`${DOT_ROOM_URL}/messages?limit=20`] = routes[DOT_FEED];
+  await run(createRunner({ fetch: fakeFetch(routes), sender }), 'dots.send', { message: 'hi', conversation_id: DOT_THREAD });
+  await hooks.ready();
+  await hooks.before();
+  const other = '0a0a0a0a-1111-4222-8333-000000000003~fedcba9876543210fedcba9876543210';
+  routes[DOT_TBO] = jsonResponse({ id: other, messaging_room_id: DOT_ROOM, is_paused: false });
+  await assert.rejects(hooks.ready(), (e) => e.code === 'endpoint_changed' && /another dot/.test(e.message));
+  await assert.rejects(hooks.before(), (e) => e.code === 'endpoint_changed' && /another dot/.test(e.message));
+});
+
+const DOT_PRIMARY = 'https://chatgpt.com/backend-api/tbo/primary';
+const DOT_ROOT_THREAD = '0d0d0d0d-1111-7222-8333-00000000000f';
+
+function dotPrimary(over = {}) {
+  return {
+    selection: { thread_id: DOT_ROOT_THREAD, messaging_room_id: DOT_ROOM, available: true },
+    profile: { id: DOT_ID, display_name: 'Orbit', messaging_room_id: DOT_ROOM, active_root_thread_id: DOT_ROOT_THREAD, is_paused: false, ...over },
+  };
+}
+
+test('dots.primary names the account primary dot: its current thread, id and name', async () => {
+  const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [DOT_PRIMARY]: jsonResponse(dotPrimary()) });
+  const frames = await run(createRunner({ fetch: f }), 'dots.primary', {});
+  assert.deepEqual(frames, [{ ok: true, result: { thread: DOT_ROOT_THREAD, dot: DOT_ID, name: 'Orbit' } }]);
+  assert.equal(f.calls[1].init.headers.Authorization, 'Bearer ' + TOKEN);
+  assert.ok(!JSON.stringify(frames).includes(TOKEN));
+  assert.throws(() => validate({ id: 1, op: 'dots.primary', args: { id: DOT_THREAD } }));
+  const noName = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [DOT_PRIMARY]: jsonResponse(dotPrimary({ display_name: null })) });
+  assert.equal((await run(createRunner({ fetch: noName }), 'dots.primary', {}))[0].result.name, '');
+});
+
+test('dots.primary: no dot, a malformed thread or id, or no sign-in fail', async () => {
+  const broken = [{}, { profile: null }, dotPrimary({ active_root_thread_id: 'not/a/thread' }), dotPrimary({ active_root_thread_id: undefined }), dotPrimary({ id: 'home' }), dotPrimary({ id: undefined })];
+  for (const body of broken) {
+    const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [DOT_PRIMARY]: jsonResponse(body) });
+    await assert.rejects(run(createRunner({ fetch: f }), 'dots.primary', {}), (e) => e.code === 'endpoint_changed', JSON.stringify(body));
+  }
+  await assert.rejects(run(createRunner({ fetch: fakeFetch({ [SESSION]: jsonResponse({}) }) }), 'dots.primary', {}), (e) => e.code === 'not_logged_in');
+  // An account with no dot.
+  await assert.rejects(run(createRunner({ fetch: fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }) }) }), 'dots.primary', {}), (e) => e.code === 'not_found');
+  const perms = fakePermissions(['https://claude.ai/*']);
+  await assert.rejects(run(createRunner({ fetch: fakeFetch({}), permissions: perms }), 'dots.primary', {}), (e) => e.code === 'permission_missing');
 });
 
 test('dots ops need the ChatGPT grant; dots.close goes to the sender for its own site', async () => {

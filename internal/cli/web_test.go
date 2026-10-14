@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -297,12 +298,23 @@ func TestWebDotsNeedsThread(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", t.TempDir())
-	if _, err := run(t, Root(), "web", "install", "--site", "dots", "--binary", "/opt/tincan/tincan"); err == nil || !strings.Contains(err.Error(), "--thread") {
-		t.Fatalf("install without --thread: %v", err)
+	// Without --thread, install asks the extension for the primary dot;
+	// when it cannot answer, install fails naming the reason and --thread.
+	for _, fail := range []error{
+		&history.UnavailableError{Source: history.SourceDots, Kind: history.ErrExtensionNotConnected},
+		&history.UnavailableError{Source: history.SourceDots, Kind: history.ErrRejected, Detail: `unknown operation "dots.primary"`},
+	} {
+		stubDotPrimary(t, history.DotPrimary{}, fail)
+		_, err := run(t, Root(), "web", "install", "--site", "dots", "--binary", "/opt/tincan/tincan")
+		if err == nil || !strings.Contains(err.Error(), "--thread") || !strings.Contains(err.Error(), fail.Error()) || !strings.Contains(err.Error(), "update") {
+			t.Fatalf("install without --thread, %v: %v", fail, err)
+		}
 	}
 	if _, err := run(t, Root(), "web", "install", "--site", "grok", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan"); err == nil {
 		t.Fatal("install --site grok --thread accepted")
 	}
+	// An explicit --thread never asks the extension.
+	stubDotPrimary(t, history.DotPrimary{}, errors.New("asked the extension"))
 	out, err := run(t, Root(), "web", "install", "--site", "dots", "--thread", "0d0d0d0d-1111-7222-8333-000000000001", "--binary", "/opt/tincan/tincan")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -317,6 +329,41 @@ func TestWebDotsNeedsThread(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), want) || !strings.Contains(string(b), "dot-web.json") {
 		t.Fatalf("definition %s (%v):\n%s", def, err, b)
 	}
+}
+
+// Without --thread, install takes the thread of the account's primary
+// dot from the extension and says which dot it used.
+func TestWebInstallDotsFindsThePrimaryDotsThread(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no service definition on " + runtime.GOOS)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	const thread = "0d0d0d0d-1111-7222-8333-00000000000f"
+	stubDotPrimary(t, history.DotPrimary{Thread: thread, Name: "Orbit"}, nil)
+	out, err := run(t, Root(), "web", "install", "--site", "dots", "--binary", "/opt/tincan/tincan")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, `using dot "Orbit" thread `+thread) {
+		t.Fatalf("output does not name the dot:\n%s", out)
+	}
+	def := filepath.Join(home, ".config", "systemd", "user", "tincan-dot-web.service")
+	if runtime.GOOS == "darwin" {
+		def = filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.web.dots.plist")
+	}
+	if b, err := os.ReadFile(def); err != nil || !strings.Contains(string(b), thread) {
+		t.Fatalf("definition %s (%v) lacks the thread:\n%s", def, err, b)
+	}
+}
+
+// stubDotPrimary replaces the extension's primary-dot answer for one test.
+func stubDotPrimary(t *testing.T, p history.DotPrimary, err error) {
+	t.Helper()
+	saved := dotPrimary
+	dotPrimary = func(context.Context) (history.DotPrimary, error) { return p, err }
+	t.Cleanup(func() { dotPrimary = saved })
 }
 
 // --teach is for the dot's web agent only.

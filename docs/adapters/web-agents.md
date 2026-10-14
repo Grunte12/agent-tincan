@@ -253,7 +253,7 @@ A dot acts on its own in the apps you connected to it (Gmail, GitHub, Google Dri
 
 ### Running it
 
-1. Find the dot's thread id. Open the dot's DM in ChatGPT; the address is `https://chatgpt.com/dots/<thread-id>`. The id is the last part (hex and hyphens).
+1. Make sure Chrome is open with the Tincan extension and signed in to chatgpt.com. ChatGPT's address bar no longer shows the dot's thread id (`chatgpt.com/dots/<thread-id>` redirects to `/dots/home`), so `tincan web install --site dots` finds it: it asks the extension for your account's primary dot and prints `using dot "<name>" thread <id>`. Use that id wherever `<thread-id>` appears below.
 2. Invite and join it, like the other web agents:
 
    ```bash
@@ -267,13 +267,13 @@ A dot acts on its own in the apps you connected to it (Gmail, GitHub, Google Dri
    tincan web serve --site dots --name dot-web --thread <thread-id>
    ```
 
-   or install it as a service, which keeps the thread id in the service definition:
+   or install it as a service, which finds the thread id and keeps it in the service definition (pass `--thread <thread-id>` to choose it yourself):
 
    ```bash
-   tincan web install --site dots --thread <thread-id>
+   tincan web install --site dots
    ```
 
-   and start it with the command it prints. `--thread` is required for `--site dots` and refused for every other site. Logs go to `~/Library/Logs/tincan-dot-web.log`.
+   and start it with the command it prints. `web serve --site dots` requires `--thread`, which the installed service passes; `web install --site dots` finds it when you leave it off. Every other site refuses `--thread`. Logs go to `~/Library/Logs/tincan-dot-web.log`.
 
 Sign in to chatgpt.com in the same Chrome first. The extension needs a build with the `dots.*` operations.
 

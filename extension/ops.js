@@ -184,6 +184,13 @@ const DOT_SKEW_MS = 2 * 60 * 1000;
 const DOT_ROOM_TTL_MS = 5 * 60 * 1000;
 // DOT_ROOM_RE is a messaging room id as it goes into a URL path.
 const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+// DOT_ID_RE is a dot's id, the dot record's id: <account>~<dot>, as
+// chatgpt.com/dots/<id> takes it. It is what a send opens and checks
+// the tab's address against (a thread's address redirects to
+// /dots/home).
+const DOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}~[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+// DOT_THREAD_RE is a dot thread id as tincan takes it (hex and hyphens).
+const DOT_THREAD_RE = /^[0-9A-Fa-f-]{8,64}$/;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -220,6 +227,7 @@ const SPEC = Object.freeze({
   'copilot.send': SEND_SPEC,
   'copilot.close': CLOSE_SPEC,
   'dots.detail': Object.freeze({ id: 'id' }),
+  'dots.primary': Object.freeze({}),
   'dots.send': SEND_SPEC,
   'dots.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
@@ -992,10 +1000,12 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   const dotPausedErr = () => new OpError('paused', 'the dot is paused; resume it in ChatGPT, then ask again');
 
   // dotNotPaused reads the dot record again and fails paused if the dot
-  // is paused now, or endpoint_changed if its room is no longer room.
-  async function dotNotPaused(auth, thread, room) {
+  // is paused now, or endpoint_changed if its room is no longer room or
+  // its id is no longer dot.
+  async function dotNotPaused(auth, thread, room, dot) {
     const rec = await dotRecord(auth, thread);
     if (rec.messaging_room_id !== room) throw new OpError('endpoint_changed', 'the dot record names another room');
+    if (rec.id !== dot) throw new OpError('endpoint_changed', 'the dot record names another dot');
     if (rec.is_paused) throw dotPausedErr();
   }
 
@@ -1005,7 +1015,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     if (!isPlainObject(room) || typeof room.creator_account_user_id !== 'string' || room.creator_account_user_id === '') {
       throw new OpError('endpoint_changed', 'unexpected room answer');
     }
-    return { room: rec.messaging_room_id, owner: room.creator_account_user_id.slice(0, 128), paused: rec.is_paused };
+    return { room: rec.messaging_room_id, owner: room.creator_account_user_id.slice(0, 128), paused: rec.is_paused, dot: rec.id };
   }
 
   // dotFeed reads the latest limit messages of room, oldest first.
@@ -1014,10 +1024,12 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   }
 
   // dotHooks are the sender's feed hooks for one send of message into
-  // thread: ready, called in the queued send right before the fill, and
+  // thread: page, the dot id the sender opens and checks the tab's address
+  // against; ready, called in the queued send right before the fill, and
   // before, right before each click, both read the dot record again and
   // fail paused if the dot was paused since dots.send checked it (the send
-  // may have waited in the site's queue meanwhile); before also notes the
+  // may have waited in the site's queue meanwhile), or endpoint_changed if
+  // it names another room or dot; before also notes the
   // feed's message ids; confirm returns
   // the id of the first owner message not among them whose text is the
   // message and whose time is not before the click (less DOT_SKEW_MS),
@@ -1026,11 +1038,12 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     let seen = null;
     let from = 0;
     return {
+      page: d.dot,
       async ready() {
-        await dotNotPaused(auth, thread, d.room);
+        await dotNotPaused(auth, thread, d.room, d.dot);
       },
       async before() {
-        await dotNotPaused(auth, thread, d.room);
+        await dotNotPaused(auth, thread, d.room, d.dot);
         seen = new Set((await dotFeed(auth, d.room, DOT_CONFIRM_LIMIT)).map((m) => m.id));
         from = Date.now() - DOT_SKEW_MS;
       },
@@ -1413,7 +1426,22 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       }
       return { thread: a.id, room: d.room, owner: d.owner, paused: d.paused, items };
     },
+    // dots.primary names the account's primary dot for web install, which
+    // can no longer read a thread from the dot's address: its current
+    // thread (any of a dot's threads finds its record), its id and its
+    // name.
+    async 'dots.primary'() {
+      const auth = await chatgptAuth();
+      const p = (await getJSON(`${CHATGPT}/backend-api/tbo/primary`, auth, true))?.profile;
+      if (!isPlainObject(p)) throw new OpError('endpoint_changed', 'unexpected primary dot');
+      const { active_root_thread_id: thread, id: dot, display_name: name } = p;
+      if (typeof thread !== 'string' || !DOT_THREAD_RE.test(thread) || typeof dot !== 'string' || !DOT_ID_RE.test(dot)) {
+        throw new OpError('endpoint_changed', 'unexpected primary dot');
+      }
+      return { thread, dot, name: typeof name === 'string' ? name.slice(0, 100) : '' };
+    },
     // A dot has one DM, so the send needs its thread and has no new chat.
+    // The tab opens the dot's own id (DOT_ID_RE), which the record gives.
     // A paused dot is refused before any tab opens, and again in the queued
     // send before anything is typed or clicked (dotHooks).
     async 'dots.send'(a) {
@@ -1421,6 +1449,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (a.conversation_id === undefined || a.new_chat === true) throw bad('a dot send needs its thread id as conversation_id');
       const auth = await chatgptAuth();
       const d = await dotRoom(auth, a.conversation_id);
+      if (typeof d.dot !== 'string' || !DOT_ID_RE.test(d.dot)) throw new OpError('endpoint_changed', 'unexpected dot id');
       if (d.paused) throw dotPausedErr();
       return sender.send('dots', a, dotHooks(auth, a.conversation_id, d, a.message));
     },

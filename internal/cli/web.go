@@ -52,9 +52,9 @@ func webThreadFlag(src history.Source, thread string) (string, error) {
 	id, ok := history.ParseWebThread(src, thread)
 	if !ok {
 		if thread == "" {
-			return "", fmt.Errorf("--site %s needs --thread <id>, the id in https://chatgpt.com/dots/<id> when you open the dot's DM", src)
+			return "", fmt.Errorf("--site %s needs --thread <id>, the dot's thread id (tincan web install --site %s finds it and keeps it in the service)", src, src)
 		}
-		return "", fmt.Errorf("--thread %q is not a dot thread id (hex and hyphens, the id in https://chatgpt.com/dots/<id>)", thread)
+		return "", fmt.Errorf("--thread %q is not a dot thread id (hex and hyphens)", thread)
 	}
 	return id, nil
 }
@@ -213,7 +213,7 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "the agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
-	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only (required there): the dot's thread id, the <id> in https://chatgpt.com/dots/<id>")
+	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only (required there): the dot's thread id, which tincan web install --site dots finds and keeps in the service")
 	cmd.Flags().BoolVar(&teach, "teach", false, "--site dots only: type the setup message that teaches the dot to ask teammates into its DM again (it is sent once per thread on its own)")
 	return cmd
 }
@@ -269,6 +269,14 @@ func wrongServeAgent(command, name, who, agent string) error {
 		"(join it with TINCAN_CONFIG=~/.config/tincan/%s.json tincan join <code> --relay <relay url>)", command, who, agent, name, name, name, name)
 }
 
+// dotPrimary names the account's primary dot through the extension
+// (tests replace it).
+var dotPrimary = func(ctx context.Context) (history.DotPrimary, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return history.NewClient().DotPrimary(ctx)
+}
+
 func webInstallCmd() *cobra.Command {
 	var site, binary, thread string
 	cmd := &cobra.Command{
@@ -282,6 +290,16 @@ func webInstallCmd() *cobra.Command {
 			src, err := webSiteFlag(site)
 			if err != nil {
 				return err
+			}
+			if thread == "" && history.WebSiteTakesThread(src) {
+				// The dot's address no longer shows a thread, so the
+				// extension names the account's primary dot.
+				p, err := dotPrimary(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("web install: could not find your dot's thread through the Tincan Chrome extension (%w); update the extension and restart Chrome, then try again, or pass --thread <id>", err)
+				}
+				cmd.Printf("using dot %q thread %s\n", p.Name, p.Thread)
+				thread = p.Thread
 			}
 			thread, err := webThreadFlag(src, thread)
 			if err != nil {
@@ -300,6 +318,6 @@ func webInstallCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&site, "site", "", history.WebSiteNames())
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
-	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only (required there): the dot's thread id, kept in the service definition")
+	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only: the dot's thread id, kept in the service definition (default: the thread of the account's primary dot, from the Chrome extension)")
 	return cmd
 }

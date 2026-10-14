@@ -31,14 +31,17 @@
 // finishing the reply. A tab nobody closes is closed after keepMs anyway.
 // A send that fails closes its tab at once.
 //
-// An OpenAI dot's DM (https://chatgpt.com/dots/<thread>) is the one
-// exception to step 3: its address never changes, so the send is
-// confirmed by the room feed instead. ops.js hands the sender two hooks:
+// An OpenAI dot's DM is the one exception to step 3: its address never
+// changes, so the send is confirmed by the room feed instead. The DM lives
+// at https://chatgpt.com/dots/<dot id> (a thread's address redirects to
+// /dots/home), so ops.js hands the sender the page to open, page (the dot
+// id, which the tab's address is checked against), and the hooks:
 // ready (optional), called right before the fill, before, called right
 // before the click (it notes the feed as it is), and
 // confirm, polled after it every feedPollMs for at most feedWaitMs until
-// it names the new owner message. A dots send needs its thread id, and
-// never types over text already in the composer (keepDraft).
+// it names the new owner message. A dots send needs its thread id, which
+// stays its conversation id, and never types over text already in the
+// composer (keepDraft).
 //
 // While that tab is still open, capture fetches one of Gemini's images
 // from inside it (the isolated world's fetch, with the page's cookies), so
@@ -247,12 +250,14 @@ export const SITES = Object.freeze({
   }),
   // A dot has one DM, its thread: there is no new chat, so a send needs
   // the thread id (needsConversation), and newURL only names the host.
+  // The page is the dot's own id, <account>~<dot> (ops.js DOT_ID_RE); a
+  // thread or unknown dot redirects to /dots/home, which never matches.
   // The address never changes after a send, so the room feed confirms it
   // (confirmByFeed).
   dots: Object.freeze({
     newURL: 'https://chatgpt.com/',
     convURL: (id) => `https://chatgpt.com/dots/${encodeURIComponent(id)}`,
-    idFrom: /^https:\/\/chatgpt\.com\/dots\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(?:[/?#]|$)/,
+    idFrom: /^https:\/\/chatgpt\.com\/dots\/([A-Za-z0-9][A-Za-z0-9_-]{0,63}~[A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:[/?#]|$)/,
     needsConversation: true,
     confirmByFeed: true,
   }),
@@ -824,10 +829,13 @@ export function createSender({
     const existing = args.conversation_id && !args.new_chat ? args.conversation_id : '';
     if (cfg.needsConversation && !existing) throw new OpError('bad_request', 'this site has no new chat; the send needs its conversation id');
     const feed = cfg.confirmByFeed === true;
-    if (feed && !(hooks && typeof hooks.before === 'function' && typeof hooks.confirm === 'function')) {
-      throw new OpError('internal', 'a feed-confirmed send needs its feed hooks');
+    if (feed && !(hooks && typeof hooks.page === 'string' && hooks.page !== '' && typeof hooks.before === 'function' && typeof hooks.confirm === 'function')) {
+      throw new OpError('internal', 'a feed-confirmed send needs its page and feed hooks');
     }
-    const target = existing ? cfg.convURL(existing) : cfg.newURL;
+    // pageId is the id the tab's address must carry: the conversation's
+    // own, or for a feed-confirmed site the page its hooks name.
+    const pageId = feed ? hooks.page : existing;
+    const target = existing ? cfg.convURL(pageId) : cfg.newURL;
 
     const tab = await tabs.create({ url: target, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('send_failed', 'could not open a tab');
@@ -856,7 +864,7 @@ export function createSender({
       });
       if (existing) {
         const m = cfg.idFrom.exec(page.href);
-        if (!m || m[1] !== existing) throw new OpError('not_found', 'conversation not found');
+        if (!m || m[1] !== pageId) throw new OpError('not_found', 'conversation not found');
       }
       // A conversation still answering an earlier message will not take
       // another (the site trades its send button for a stop button), and
@@ -882,7 +890,12 @@ export function createSender({
       }
       // A feed-confirmed site's ready hook runs its last checks (a dot
       // paused while this send waited) before anything is typed.
-      if (feed && typeof hooks.ready === 'function') await hooks.ready();
+      if (feed && typeof hooks.ready === 'function') {
+        await hooks.ready();
+        // ready reads the backend, so the page may have moved meanwhile:
+        // check its address again before anything is typed.
+        if ((await urlId()) !== pageId) throw new OpError('not_found', 'conversation not found');
+      }
       if (images) {
         inputActive();
         // Mark possible exposure before injection, since a lost injection
@@ -923,12 +936,17 @@ export function createSender({
       let base;
       for (;;) {
         const cur = await urlId();
-        if (existing && cur !== existing) throw new OpError('not_found', 'conversation not found');
+        if (existing && cur !== pageId) throw new OpError('not_found', 'conversation not found');
         base = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (base.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (base.blocked) throw blockedErr();
         if (base.generating) throw answering();
-        if (feed) await hooks.before();
+        if (feed) {
+          await hooks.before();
+          // before reads the backend, so the page may have moved meanwhile:
+          // check its address again right before the click.
+          if ((await urlId()) !== pageId) throw new OpError('not_found', 'conversation not found');
+        }
         if (images) {
           inputActive();
           const state = await inject(tab.id, pageInputImages, [images, false]);
@@ -963,7 +981,7 @@ export function createSender({
           if (typeof messageId === 'string' && messageId !== '') {
             done = true;
             keep(tab.id, site, existing);
-            return { conversation_id: existing, url: cfg.convURL(existing), submitted_at: submittedAt, message_id: messageId };
+            return { conversation_id: existing, url: cfg.convURL(pageId), submitted_at: submittedAt, message_id: messageId };
           }
           if (now() >= feedBy) throw new OpError('timeout', 'the message was sent but did not show in the feed in time');
         }

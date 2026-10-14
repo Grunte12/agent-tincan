@@ -46,7 +46,7 @@ func TestDotWebBlock(t *testing.T) {
 	for _, want := range []string{
 		"tincan web install --site dots",
 		"tincan web serve --site dots --name dot-web",
-		"--thread <id>", "tincan web install --site dots --thread <id>",
+		"--thread <id>", "tincan web install --site dots asks the extension for the account's primary dot",
 		"logged in to chatgpt.com",
 		"as Matt",
 		"tincan history install",
@@ -60,9 +60,9 @@ func TestDotWebBlock(t *testing.T) {
 			t.Errorf("dot-web setup missing %q:\n%s", want, setup)
 		}
 	}
-	// install and serve refuse --site dots without --thread, so no command the
-	// block prints may leave it off.
-	for _, cmd := range []string{"web install --site dots", "web serve --site dots"} {
+	// serve refuses --site dots without --thread, so no serve command the
+	// block prints may leave it off (install finds the thread itself).
+	for _, cmd := range []string{"web serve --site dots"} {
 		for rest := setup; ; {
 			i := strings.Index(rest, cmd)
 			if i < 0 {

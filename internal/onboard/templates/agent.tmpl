@@ -389,9 +389,9 @@ Tell {{.Owner}} first: xAI's terms prohibit automated access to Grok. This agent
 A step for {{.Owner}} (Chrome takes the grant only from a click in the browser): open chrome://extensions > Agent Tincan History > Details > Extension options and click Grant for Grok (grok.com and its image host assets.grok.com). Until then every request is answered with a grant reminder; while the extension is connected, tincan web serve --site grok waits for the grant, checks again every minute, and starts serving once it appears.
 {{- end}}
 {{- if eq .Kind "dot-web"}}
-Find the dot's thread id: {{.Owner}} opens the dot's DM in Chrome, and the id is the <id> in chatgpt.com/dots/<id>. A dot has one DM, so every request goes into that thread; tincan web install and tincan web serve refuse --site dots without --thread <id>.
+Find the dot's thread id: with Chrome open and signed in to chatgpt.com, tincan web install --site dots asks the extension for the account's primary dot and prints the thread it uses (the dot's address no longer shows it). A dot has one DM, so every request goes into that thread; tincan web serve refuses --site dots without --thread <id>, which the installed service passes.
 {{- end}}
-Write the service definition: tincan web install --site {{template "websiteflag" .}}{{if eq .Kind "dot-web"}} --thread <id>{{end}}. It writes a launchd agent on macOS (a systemd user unit on Linux) and prints the command that starts it. It starts nothing itself.
+Write the service definition: tincan web install --site {{template "websiteflag" .}}. It writes a launchd agent on macOS (a systemd user unit on Linux) and prints the command that starts it. It starts nothing itself.
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.{{template "websiteflag" .}}.plist).
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
 Without an allowlist file, every agent joined to the relay may ask. To restrict it, list the agents that may ask in ~/.config/tincan/{{.Kind}}-allow.txt, one agent name per line (a * entry means every joined agent); then every agent in a request's chain must be on it (docs/adapters/web-agents.md). The file is reread on every request.

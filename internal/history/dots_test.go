@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -178,6 +179,49 @@ func TestDotsSiteIsWebOnlyUnderChatGPTsGrant(t *testing.T) {
 		if _, ok := ParseWebThread(SourceDots, bad); ok {
 			t.Fatalf("thread %q accepted", bad)
 		}
+	}
+}
+
+// dots.primary is the dots site's own: argument-free, and no other site
+// has it.
+func TestDotsPrimaryIsDotsOnlyAndTakesNoArguments(t *testing.T) {
+	if err := ValidateOp(OpDotsPrimary, OpArgs{}); err != nil {
+		t.Fatal(err)
+	}
+	if ValidateOp(OpDotsPrimary, OpArgs{ID: dotThread}) == nil {
+		t.Fatal("dots.primary with an argument accepted")
+	}
+	for _, op := range []Op{"chatgpt.primary", "claudeai.primary", "copilot.primary"} {
+		if err := ValidateOp(op, OpArgs{}); err == nil || !strings.Contains(err.Error(), "unknown operation") {
+			t.Fatalf("%s: %v", op, err)
+		}
+	}
+}
+
+// DotPrimary asks the extension for the account's primary dot and
+// canonicalizes its thread; a malformed answer is an error.
+func TestDotPrimaryReadsTheThreadAndName(t *testing.T) {
+	answer := func(result string) Channel {
+		return channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+			if req.Op != OpDotsPrimary || req.Args != (OpArgs{}) {
+				t.Fatalf("request %+v", req)
+			}
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: json.RawMessage(result)})
+			return err
+		})
+	}
+	upper := strings.ToUpper(dotThread)
+	p, err := (&Client{Channel: answer(`{"thread":"` + upper + `","dot":"a~b","name":"Orbit"}`)}).DotPrimary(context.Background())
+	if err != nil || p.Thread != dotThread || p.Name != "Orbit" {
+		t.Fatalf("%+v, %v", p, err)
+	}
+	for _, bad := range []string{`{"name":"Orbit"}`, `{"thread":"not/a/thread"}`, `[]`} {
+		if _, err := (&Client{Channel: answer(bad)}).DotPrimary(context.Background()); err == nil {
+			t.Fatalf("%s accepted", bad)
+		}
+	}
+	if _, err := (&Client{}).DotPrimary(context.Background()); !errors.Is(err, ErrExtensionNotConnected) {
+		t.Fatalf("no channel: %v", err)
 	}
 }
 

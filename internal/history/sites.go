@@ -321,11 +321,14 @@ const (
 	opFile    opKind = "file"
 	opSend    opKind = "send"
 	opClose   opKind = "close"
+	// opPrimary names the account's primary dot (dots.primary), for web
+	// install; only a one-thread site has it.
+	opPrimary opKind = "primary"
 )
 
 func (k opKind) valid() bool {
 	switch k {
-	case opSession, opList, opDetail, opFile, opSend, opClose:
+	case opSession, opList, opDetail, opFile, opSend, opClose, opPrimary:
 		return true
 	}
 	return false
@@ -335,8 +338,12 @@ func (k opKind) valid() bool {
 func (s *webSite) op(k opKind) Op { return Op(s.opPrefix + "." + string(k)) }
 
 // hasOp reports whether the site has operations of kind k: a web-only
-// site has no list or file operation.
+// site has no list or file operation, and only a one-thread site (dots)
+// has a primary operation.
 func (s *webSite) hasOp(k opKind) bool {
+	if k == opPrimary {
+		return s.oneThread
+	}
 	return !s.webOnly || (k != opList && k != opFile)
 }
 

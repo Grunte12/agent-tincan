@@ -467,7 +467,7 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	case WebSiteTakesThread(site):
 		id, ok := ParseWebThread(site, o.Thread)
 		if !ok {
-			return ServiceResult{}, fmt.Errorf("--site %s needs --thread <id>, the id in https://chatgpt.com/dots/<id> (got %q)", site, o.Thread)
+			return ServiceResult{}, fmt.Errorf("--site %s needs --thread <id>, the dot's thread id (got %q)", site, o.Thread)
 		}
 		thread = id
 		launchdThread = "\n    <string>--thread</string>\n    <string>__THREAD__</string>"

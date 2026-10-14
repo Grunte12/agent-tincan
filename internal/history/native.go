@@ -195,6 +195,9 @@ const (
 	OpDotsDetail Op = "dots.detail"
 	OpDotsSend   Op = "dots.send"
 	OpDotsClose  Op = "dots.close"
+	// OpDotsPrimary names the account's primary dot and its current
+	// thread, for web install (the dot's address no longer shows one).
+	OpDotsPrimary Op = "dots.primary"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -237,7 +240,7 @@ func ValidateOp(op Op, a OpArgs) error {
 		return fmt.Errorf("unknown operation %q", op)
 	}
 	switch kind {
-	case opSession:
+	case opSession, opPrimary:
 		if a != (OpArgs{}) {
 			return fmt.Errorf("%s: takes no arguments", op)
 		}
