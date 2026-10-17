@@ -84,6 +84,41 @@ class DesktopWakeTests(unittest.TestCase):
             self.assertIn('no work has been claimed', err)
             self.assertEqual(self.run_hook('wake', item)[0], 0)
 
+    def test_dispatch_targets_only_exact_session_and_deduplicates(self):
+        self.run_hook('prepare')
+        other = dict(self.item, session_id=OTHER,
+                     transcript_path='/transcripts/' + OTHER + '.jsonl')
+        self.run_hook('prepare', other)
+        own_signal = self.state / (SID + '.signal.json')
+        other_signal = self.state / (OTHER + '.signal.json')
+        before_other = other_signal.read_bytes()
+        notice = {'id': 'abc12345', 'session_id': SID, 'kind': 'request'}
+        self.assertEqual(wake.dispatch_notifications([notice]), 0)
+        first = json.loads(own_signal.read_text())
+        self.assertEqual(first['session_id'], SID)
+        self.assertEqual(first['count'], 1)
+        self.assertEqual(other_signal.read_bytes(), before_other)
+        self.assertEqual(wake.dispatch_notifications([notice]), 0)
+        self.assertEqual(json.loads(own_signal.read_text()), first)
+
+    def test_prepare_rearms_only_reopened_session_notifications(self):
+        self.run_hook('prepare')
+        notice = {'id': 'abc12345', 'session_id': SID, 'kind': 'request'}
+        wake.dispatch_notifications([notice])
+        first = json.loads((self.state / (SID + '.signal.json')).read_text())
+        self.run_hook('prepare')
+        wake.dispatch_notifications([notice])
+        second = json.loads((self.state / (SID + '.signal.json')).read_text())
+        self.assertGreater(second['sequence'], first['sequence'])
+
+    def test_dispatch_rejects_invalid_metadata_without_signal_write(self):
+        self.run_hook('prepare')
+        path = self.state / (SID + '.signal.json')
+        before = path.read_bytes()
+        with self.assertRaises(ValueError):
+            wake.dispatch_notifications([{'id': 'bad', 'session_id': SID, 'kind': 'request'}])
+        self.assertEqual(path.read_bytes(), before)
+
     def test_wrong_notice_owner_cannot_wake(self):
         self.run_hook('prepare')
         path = self.state / (SID + '.signal.json')

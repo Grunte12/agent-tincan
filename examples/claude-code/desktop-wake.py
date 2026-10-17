@@ -12,11 +12,13 @@ import subprocess
 import sys
 import time
 import uuid
+import re
 
 REGISTRY = Path.home() / '.config/tincan/claude-session-routes.json'
 STATE = Path.home() / '.config/tincan/desktop-wake'
 TINCAN = Path.home() / '.local/bin/tincan'
 RECEIVE_LEASE_SECONDS = 23 * 60 * 60
+NOTIFICATION_ID = re.compile(r'^[0-9a-f-]{8,64}$', re.I)
 _discovery_path = Path(__file__).with_name('desktop-sessions.py')
 if not _discovery_path.exists():
     _discovery_path = Path.home() / '.local/share/tincan/adapters/claude-code/desktop-sessions.py'
@@ -94,6 +96,65 @@ def write_json(path, item):
     with os.fdopen(private_file(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 'w') as stream:
         json.dump(item, stream)
         stream.write('\n')
+
+def _notification_key(item):
+    if (not isinstance(item, dict) or not NOTIFICATION_ID.fullmatch(item.get('id', ''))
+            or discovery.route._session_uuid(item.get('session_id', '')) != item.get('session_id')
+            or item.get('kind') not in ('request', 'reply')):
+        raise ValueError('invalid_notification')
+    generation = item.get('generation', 0)
+    if item['kind'] == 'reply' and (type(generation) is not int or generation < 0):
+        raise ValueError('invalid_notification')
+    return ':'.join((item['session_id'], item['kind'], item['id'], str(generation)))
+
+def _notification_state():
+    path = STATE / 'notification-keys.json'
+    if not path.exists():
+        return []
+    with os.fdopen(private_file(path, os.O_RDONLY)) as stream:
+        value = json.load(stream)
+    if not isinstance(value, list) or any(not isinstance(key, str) for key in value):
+        raise ValueError('invalid_notification_state')
+    return value
+
+def reset_notification_state(sid):
+    """Let an existing queued item wake a session again after native reopen."""
+    with os.fdopen(private_file(STATE / 'notification.lock', os.O_RDWR | os.O_CREAT), 'r+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        keys = [key for key in _notification_state() if not key.startswith(sid + ':')]
+        write_json(STATE / 'notification-keys.json', keys)
+
+def dispatch_notifications(items):
+    """Fan aggregate body-free metadata out to exact existing Desktop sessions."""
+    if not isinstance(items, list) or len(items) > 200:
+        raise ValueError('invalid_notifications')
+    grouped = {}
+    for item in items:
+        key = _notification_key(item)
+        grouped.setdefault(item['session_id'], []).append(key)
+    with os.fdopen(private_file(STATE / 'notification.lock', os.O_RDWR | os.O_CREAT), 'r+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        seen = _notification_state()
+        seen_set = set(seen)
+        for sid, keys in grouped.items():
+            new = [key for key in keys if key not in seen_set]
+            if not new:
+                continue
+            try:
+                project = route_for(sid)
+            except (ValueError, KeyError, OSError, json.JSONDecodeError, discovery.route.RouteError):
+                continue
+            if discovery.session_deleted(sid, STATE):
+                continue
+            signal_path = STATE / (sid + '.signal.json')
+            if not signal_path.exists():
+                continue
+            write_json(signal_path, {'session_id': sid, 'count': len(keys), 'sequence': time.time_ns()})
+            record(sid, 'notification_dispatched', count=len(keys))
+            seen.extend(new)
+            seen_set.update(new)
+        write_json(STATE / 'notification-keys.json', seen[-4096:])
+    return 0
 
 def record(sid, event, **fields):
     with os.fdopen(private_file(STATE / (sid + '.events.jsonl'), os.O_WRONLY | os.O_APPEND | os.O_CREAT), 'w') as stream:
@@ -386,6 +447,12 @@ def main(mode):
         write_json(STATE / (sid + '.signal.json'), {'session_id': sid, 'count': count, 'sequence': time.time_ns()})
         record(sid, 'notice', count=count)
         return 0
+    if mode == 'dispatch':
+        state_directory()
+        raw = os.environ.get('TINCAN_SESSION_NOTIFICATIONS', '[]')
+        if len(raw) > 131072:
+            raise ValueError('notification_metadata_too_large')
+        return dispatch_notifications(json.loads(raw))
     if mode == 'recover':
         item = json.load(sys.stdin)
         if not recovery_allowed(item):
@@ -404,6 +471,7 @@ def main(mode):
         if not signal_path.exists():
             write_json(signal_path, {'session_id': sid, 'count': 0, 'sequence': 0})
         record(sid, 'watch_registered', host_parent_pid=os.getppid(), hook_event=item['hook_event_name'])
+        reset_notification_state(sid)
         if not Path(item['cwd']).resolve(strict=True).is_relative_to(project):
             record(sid, 'cwd_changed_owner_preserved', host_parent_pid=os.getppid())
         if item['hook_event_name'] == 'SessionStart':

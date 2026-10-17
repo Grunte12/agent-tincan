@@ -447,6 +447,18 @@ type Waiting struct {
 	// Pending names the oldest queued requests (id and sender, no body).
 	// A relay that predates it leaves it empty.
 	Pending []envelope.Pending `json:"pending,omitempty"`
+	// Notifications contains body-free native session wake targets for the
+	// aggregate observer endpoint.
+	Notifications []Notification `json:"notifications,omitempty"`
+}
+
+// Notification identifies the existing native conversation that owns one
+// waiting request or reply. It never includes message content.
+type Notification struct {
+	ID         string `json:"id"`
+	SessionID  string `json:"session_id"`
+	Kind       string `json:"kind"`
+	Generation int    `json:"generation,omitempty"`
 }
 
 // Poll waits up to hold for requests addressed to this agent or unseen
@@ -498,6 +510,15 @@ func (r *Relay) AckReplies(ctx context.Context, ids []string, acks ...envelope.R
 func (r *Relay) Peek(ctx context.Context, hold time.Duration) (Waiting, error) {
 	var out Waiting
 	path := fmt.Sprintf("/v1/poll?peek=1&hold=%d&replies=%s", int(hold.Seconds()), RepliesKeep)
+	err := r.call(ctx, r.polls, "GET", path, nil, &out)
+	return out, err
+}
+
+// Notifications waits for metadata about work addressed to any native
+// session belonging to this agent. The call deliberately omits session scope.
+func (r *Relay) Notifications(ctx context.Context, hold time.Duration) (Waiting, error) {
+	var out Waiting
+	path := fmt.Sprintf("/v1/notifications?hold=%d", int(hold.Seconds()))
 	err := r.call(ctx, r.polls, "GET", path, nil, &out)
 	return out, err
 }
@@ -752,7 +773,7 @@ func (r *Relay) headers(req *http.Request) {
 		req.Header.Set(VersionHeader, r.version)
 	}
 	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
-	if session := r.sessionScope(req.Context()); session != "" {
+	if session := r.sessionScope(req.Context()); session != "" && req.URL.Path != "/v1/notifications" {
 		req.Header.Set(SessionHeader, session)
 	}
 }

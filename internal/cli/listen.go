@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 func listenCmd() *cobra.Command {
 	var execCmd string
 	var once bool
+	var sessionNotifications bool
 	cmd := &cobra.Command{
 		Use:   "listen --exec <command>",
 		Short: "Stay connected and run a command whenever teammates' requests or replies are waiting",
@@ -40,12 +42,74 @@ turn when a background command exits (Muse), use "tincan wait" instead.`,
 			if err != nil {
 				return err
 			}
-			return listen(cmd.Context(), r, execCmd, once)
+			return listenWithNotifications(cmd.Context(), r, execCmd, once, sessionNotifications)
 		},
 	}
 	cmd.Flags().StringVar(&execCmd, "exec", "", "command to run when requests or replies are waiting")
 	cmd.Flags().BoolVar(&once, "once", false, "exit after the first nudge")
+	cmd.Flags().BoolVar(&sessionNotifications, "session-notifications", false, "wait for body-free native session request and reply notifications")
 	return cmd
+}
+
+func listenWithNotifications(ctx context.Context, r *client.Relay, execCmd string, once, enabled bool) error {
+	if !enabled {
+		return listen(ctx, r, execCmd, once)
+	}
+	backoff := time.Second
+	for {
+		w, err := r.Notifications(ctx, client.DefaultPollHold)
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case client.IsStatus(err, 403), client.IsProxyAuth(err):
+			return err
+		case err != nil:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(jitter(backoff)):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
+		}
+		backoff = time.Second
+		if len(w.Notifications) == 0 {
+			continue
+		}
+		if err := nudgeNotifications(ctx, r, execCmd, w, once); err != nil {
+			if once || ctx.Err() != nil {
+				return err
+			}
+			continue
+		}
+		if once {
+			return nil
+		}
+	}
+}
+
+func nudgeNotifications(ctx context.Context, r *client.Relay, execCmd string, w client.Waiting, once bool) error {
+	defer r.KeepPresence(ctx, client.Presence{Every: listenPresenceEvery, Cap: listenPresenceCap, Logf: listenLogf})()
+	raw, err := json.Marshal(w.Notifications)
+	if err != nil {
+		return err
+	}
+	c := exec.CommandContext(ctx, "sh", "-c", execCmd)
+	c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(w.Total), "TINCAN_SESSION_NOTIFICATIONS="+string(raw))
+	c.Stdout, c.Stderr = os.Stdout, os.Stderr
+	err = c.Run()
+	if err != nil {
+		listenLogf("command failed: %v", err)
+	}
+	if once {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(listenCooldown):
+		return err
+	}
 }
 
 // listen's timing and log. Tests override them.

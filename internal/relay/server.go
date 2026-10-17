@@ -342,6 +342,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/session-retirement", s.handleRetireSession)
 	mux.HandleFunc("GET /v1/project-session", s.handleResolveProjectSession)
 	mux.HandleFunc("GET /v1/poll", s.handlePoll)
+	mux.HandleFunc("GET /v1/notifications", s.handleNotifications)
 	mux.HandleFunc("POST /v1/replies/ack", s.handleAckReplies)
 	mux.HandleFunc("POST /v1/requests/{id}/claim", s.handleClaim)
 	mux.HandleFunc("POST /v1/requests/{id}/progress", s.handleProgress)
