@@ -114,6 +114,8 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.Progress = true
 	caps.Search = true
 	caps.NeedsInput = true
+	caps.SessionRouting = true
+	caps.SessionCatalog = true
 	writeJSON(w, http.StatusOK, caps)
 }
 

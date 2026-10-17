@@ -34,23 +34,25 @@ import (
 )
 
 type relayFlags struct {
-	urgentPerHour int
-	listen        string
-	hostname      string
-	stateDir      string
-	port          int
-	admins        []string
-	adminLogins   []string
-	noRebind      bool
-	replyGrace    time.Duration
-	notesTTL      time.Duration
-	wakeGrace     time.Duration
-	urgentGrace   time.Duration
-	urgentLease   time.Duration
-	ownerNotice   int
-	dist          string
-	upgradeExit   bool
-	releaseURL    string
+	defaultSessionRoutes  map[string]string
+	requireSessionRouting []string
+	urgentPerHour         int
+	listen                string
+	hostname              string
+	stateDir              string
+	port                  int
+	admins                []string
+	adminLogins           []string
+	noRebind              bool
+	replyGrace            time.Duration
+	notesTTL              time.Duration
+	wakeGrace             time.Duration
+	urgentGrace           time.Duration
+	urgentLease           time.Duration
+	ownerNotice           int
+	dist                  string
+	upgradeExit           bool
+	releaseURL            string
 
 	gateway         bool
 	gatewayHostname string
@@ -136,6 +138,8 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	}
 	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
 	cmd.Flags().StringVar(&f.hostname, "hostname", "tincan-relay", "tsnet node name")
+	cmd.Flags().StringSliceVar(&f.requireSessionRouting, "require-session-route", nil, "recipients that require a verified target session on new work")
+	cmd.Flags().StringToStringVar(&f.defaultSessionRoutes, "default-session-route", nil, "operator-approved shared receivers, agent=native-session-ID")
 	cmd.Flags().StringVar(&f.stateDir, "state-dir", defaultStateDir(), "relay state: database, tsnet state, admin socket")
 	cmd.Flags().IntVar(&f.port, "port", 80, "port to serve the agent API on")
 	cmd.Flags().StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
@@ -160,7 +164,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice}
+	return relay.Config{DefaultSessionRoutes: f.defaultSessionRoutes, RequireSessionRoutingTo: f.requireSessionRouting, Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice}
 }
 
 // directoryConfig maps the relay flags onto the identity directory.

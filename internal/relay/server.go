@@ -29,11 +29,17 @@ import (
 
 // Config tunes the relay.
 type Config struct {
-	RequestTTL      time.Duration // how long an unanswered request lives
-	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
-	PollHold        time.Duration // max time a long-poll is held
-	DeliveryLease   time.Duration // how long a delivered request waits for a claim
-	ClaimLease      time.Duration // how long a claim lasts before the request is requeued
+	// DefaultSessionRoutes are operator-selected shared receivers used only
+	// when no exact or project owner route exists.
+	DefaultSessionRoutes map[string]string
+	// RequireSessionRoutingTo lists recipients that refuse non-ping work
+	// unless the sender supplies a verified exact native session route.
+	RequireSessionRoutingTo []string
+	RequestTTL              time.Duration // how long an unanswered request lives
+	NotesRequestTTL         time.Duration // RequestTTL for requests to a notes-kind agent
+	PollHold                time.Duration // max time a long-poll is held
+	DeliveryLease           time.Duration // how long a delivered request waits for a claim
+	ClaimLease              time.Duration // how long a claim lasts before the request is requeued
 	// UrgentClaimLease replaces ClaimLease for an urgent request, when
 	// shorter, at claim and at each progress note; default
 	// DefaultUrgentClaimLease.
@@ -332,6 +338,9 @@ const localAdminKey ctxKey = 1
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/send", s.handleSend)
+	mux.HandleFunc("POST /v1/session-discovery", s.handleDiscoverSession)
+	mux.HandleFunc("POST /v1/session-retirement", s.handleRetireSession)
+	mux.HandleFunc("GET /v1/project-session", s.handleResolveProjectSession)
 	mux.HandleFunc("GET /v1/poll", s.handlePoll)
 	mux.HandleFunc("POST /v1/replies/ack", s.handleAckReplies)
 	mux.HandleFunc("POST /v1/requests/{id}/claim", s.handleClaim)
@@ -371,6 +380,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
 	mux.HandleFunc("GET /v1/admin/wakes/{agent}", s.handleWakes)
 	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
+	mux.HandleFunc("POST /v1/admin/session-owners/preserve", s.handlePreserveSessionOwner)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
 }
@@ -501,6 +511,12 @@ func (s *Server) remote(r *http.Request) string {
 // agents and is refused for a name bound elsewhere. A rebuilt machine that the
 // directory re-admits on the way is audited as a "rebind".
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return ""
+	}
+	*r = *r.WithContext(envelope.WithSession(r.Context(), sess))
 	res, err := s.dir.ResolveAgent(r.Context(), r.RemoteAddr, r.Header.Get(client.AgentHeader))
 	if err != nil {
 		code := http.StatusForbidden
@@ -637,6 +653,38 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	if len(req.Project) > 4096 {
+		writeErr(w, http.StatusBadRequest, errors.New("project key too long"))
+		return
+	}
+	if req.ToSession != "" {
+		if !envelope.ValidSessionID(req.ToSession) {
+			writeErr(w, http.StatusBadRequest, errors.New("invalid target session ID"))
+			return
+		}
+		binding, routeErr := s.store.RegisteredSession(r.Context(), req.To, req.ToSession)
+		if routeErr != nil || (req.Project != "" && binding.Project != req.Project) {
+			if routeErr == nil {
+				routeErr = errors.New("target session belongs to a different project")
+			}
+			writeSessionCatalogError(w, routeErr)
+			return
+		}
+	}
+	if req.ToSession == "" && req.Kind != envelope.KindPing && s.cfg.DefaultSessionRoutes[req.To] != "" {
+		binding, routeErr := s.mainReceiver(r.Context(), req.To, req.Project)
+		if routeErr != nil {
+			writeSessionCatalogError(w, routeErr)
+			return
+		}
+		req.ToSession = binding.SessionID
+	}
+	for _, recipient := range s.cfg.RequireSessionRoutingTo {
+		if req.To == recipient && req.Kind != envelope.KindPing && req.ToSession == "" {
+			writeErr(w, http.StatusBadRequest, errors.New("recipient requires a target session ID; resolve by project or use an exact session ID"))
+			return
+		}
 	}
 	if len(req.Attachments) > 0 && s.blobs == "" {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)

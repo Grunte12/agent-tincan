@@ -89,13 +89,18 @@ type Request struct {
 	Urgent    bool       `json:"urgent,omitempty"`
 	ID        string     `json:"id,omitempty"`
 	From      string     `json:"from,omitempty"`
-	To        string     `json:"to"`
-	ParentID  string     `json:"parent_id,omitempty"`
-	TraceID   string     `json:"trace_id,omitempty"`
-	Hop       int        `json:"hop,omitempty"`
-	Chain     []string   `json:"chain,omitempty"`
-	Kind      Kind       `json:"kind,omitempty"`
-	Body      string     `json:"body"`
+	// ToSession is an exact conversation route inside To. FromSession and
+	// ClaimedSession remain relay-owned upstream labels and are never accepted
+	// from request JSON.
+	ToSession string   `json:"to_session,omitempty"`
+	Project   string   `json:"project,omitempty"`
+	To        string   `json:"to"`
+	ParentID  string   `json:"parent_id,omitempty"`
+	TraceID   string   `json:"trace_id,omitempty"`
+	Hop       int      `json:"hop,omitempty"`
+	Chain     []string `json:"chain,omitempty"`
+	Kind      Kind     `json:"kind,omitempty"`
+	Body      string   `json:"body"`
 	// Attachments are files stored on the relay. A relay that predates
 	// attachments ignores the field, so clients send it only when the relay
 	// advertises support.
@@ -115,6 +120,9 @@ type Request struct {
 	// FromSession is the sender's session label (SessionHeader), a
 	// relay-only routing label inside one agent, never an identity.
 	FromSession string `json:"-"`
+	// ClaimedSession is the upstream claim_session value. It is used only for
+	// authorization inside the recipient agent and never changes reply routing.
+	ClaimedSession string `json:"-"`
 }
 
 // RedactFor hides content that the owner has never released to other agents.
@@ -293,6 +301,8 @@ func (r Result) Done() bool {
 
 // sendInput is the only part of a send the relay accepts from a client.
 type sendInput struct {
+	ToSession   string       `json:"session_id,omitempty"`
+	Project     string       `json:"project,omitempty"`
 	Group       string       `json:"group"`
 	Urgent      bool         `json:"urgent"`
 	To          string       `json:"to"`
@@ -340,7 +350,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
+	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ToSession: in.ToSession, Project: in.Project, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts}, nil
 }
 
 // attachmentIDs keeps only the ids a client names, checking the count and

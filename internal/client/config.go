@@ -12,9 +12,10 @@ import (
 
 // Config is an agent's saved connection to its relay.
 type Config struct {
-	Relay string `json:"relay"`           // relay base URL, e.g. http://tincan-relay
-	Proxy string `json:"proxy,omitempty"` // proxy for relay traffic (Muse: its tailnet tunnel proxy)
-	Agent string `json:"agent,omitempty"` // the agent name this config joined as; sent on every relay call
+	Relay     string `json:"relay"`           // relay base URL, e.g. http://tincan-relay
+	Proxy     string `json:"proxy,omitempty"` // proxy for relay traffic (Muse: its tailnet tunnel proxy)
+	SessionID string `json:"session_id,omitempty"`
+	Agent     string `json:"agent,omitempty"` // the agent name this config joined as; sent on every relay call
 	// RelayKey is the relay's secret, learned from whoami. With it the
 	// client can find its relay again after the relay's address changes,
 	// by proving IPv4 tailnet peers rather than walking a host-name list.
@@ -118,6 +119,16 @@ func LoadConfigFrom(path string) (Config, error) {
 			return c, err
 		}
 	}
+	if v, set := os.LookupEnv("TINCAN_SESSION_ID"); set {
+		c.SessionID = v
+	} else if c.SessionID == "" {
+		// Claude injects its native conversation UUID into MCP children.
+		// Prefer it over an inherited Codex owner-thread ID.
+		c.SessionID = os.Getenv("CLAUDE_CODE_SESSION_ID")
+		if c.SessionID == "" {
+			c.SessionID = os.Getenv("CODEX_THREAD_ID")
+		}
+	}
 	if v := os.Getenv("TINCAN_RELAY"); v != "" {
 		c.Relay = v
 	}
@@ -141,4 +152,16 @@ func SaveConfigTo(path string, c Config) error {
 		return err
 	}
 	return writePrivate(path, raw)
+}
+
+// RuntimeSessionID returns only host-owned runtime metadata. Peer message
+// text never participates in session routing.
+func RuntimeSessionID() string {
+	if v, set := os.LookupEnv("TINCAN_SESSION_ID"); set {
+		return v
+	}
+	if v := os.Getenv("CLAUDE_CODE_SESSION_ID"); v != "" {
+		return v
+	}
+	return os.Getenv("CODEX_THREAD_ID")
 }

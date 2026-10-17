@@ -45,7 +45,7 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 	if err != nil {
 		return envelope.Reply{}, err
 	}
-	if req.To != agent {
+	if req.To != agent || !recipientSessionMatches(req, envelope.Session(ctx)) {
 		return envelope.Reply{}, ErrForbidden
 	}
 	if status != envelope.StatusClaimed || req.Kind != envelope.KindAsk || len(req.Exchanges) >= envelope.MaxExchanges {
@@ -84,7 +84,7 @@ func (s *Store) Answer(ctx context.Context, id, agent, body string) (envelope.Re
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	if req.From != agent {
+	if req.From != agent || !sessionMatches(ctx, req.FromSession) {
 		return envelope.Request{}, ErrForbidden
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

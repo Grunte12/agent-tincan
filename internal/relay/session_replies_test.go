@@ -128,13 +128,17 @@ func TestSessionPeekCountsOnlyItsOwnReplies(t *testing.T) {
 	}
 }
 
-// A reply stays readable by id from any session: a session only narrows
-// what a poll hands out.
-func TestSessionGetByIDIsUnscoped(t *testing.T) {
+// A reply by ID remains scoped to the conversation that sent it. Knowing an
+// ID must not let another conversation sharing the same agent read it.
+func TestSessionGetByIDIsScoped(t *testing.T) {
 	h, a, _ := twoAnsweredSessions(t)
 	rec := h.raw(grokAddr, "GET", "/v1/requests/"+a.ID, nil, 0, sessionHeader("session-b"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get A's reply from session B: %d, want 404: %s", rec.Code, rec.Body)
+	}
+	rec = h.raw(grokAddr, "GET", "/v1/requests/"+a.ID, nil, 0, sessionHeader("session-a"))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"done"`) {
-		t.Fatalf("get A's reply from session B: %d %s", rec.Code, rec.Body)
+		t.Fatalf("get A's reply from session A: %d %s", rec.Code, rec.Body)
 	}
 }
 

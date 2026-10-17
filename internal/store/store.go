@@ -30,7 +30,11 @@ var (
 	// ErrGroupFull means a sender has filled this group.
 	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
-	ErrWrongState = errors.New("request is not in a state that allows this")
+	ErrWrongState            = errors.New("request is not in a state that allows this")
+	ErrSessionOwnerMissing   = errors.New("native session owner not found")
+	ErrSessionOwnerAmbiguous = errors.New("native session owner is ambiguous")
+	ErrSessionOwnerPreserved = errors.New("native session owner is preserved but unresolved")
+	ErrSessionHasActiveWork  = errors.New("native session has active requests")
 )
 
 const schema = `
@@ -81,6 +85,22 @@ CREATE TABLE IF NOT EXISTS replies (
   body       TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   attachments TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS native_session_discoveries (
+  agent TEXT NOT NULL, host TEXT NOT NULL, session_id TEXT NOT NULL,
+  project TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY(agent, host, session_id)
+);
+CREATE INDEX IF NOT EXISTS native_session_discoveries_project ON native_session_discoveries(agent, host, project);
+CREATE TABLE IF NOT EXISTS native_session_owners (
+  agent TEXT NOT NULL, host TEXT NOT NULL, project TEXT NOT NULL,
+  session_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY(agent, host, project)
+);
+CREATE TABLE IF NOT EXISTS native_session_pins (
+  agent TEXT NOT NULL, host TEXT NOT NULL, project TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY(agent, host)
 );
 `
 
@@ -175,7 +195,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate urgent: %w", err)
 	}
-	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}, {"from_session", "TEXT NOT NULL DEFAULT ''"}, {"claim_session", "TEXT NOT NULL DEFAULT ''"}} {
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}, {"from_session", "TEXT NOT NULL DEFAULT ''"}, {"claim_session", "TEXT NOT NULL DEFAULT ''"}, {"to_session", "TEXT NOT NULL DEFAULT ''"}, {"project", "TEXT NOT NULL DEFAULT ''"}} {
 		var exists bool
 		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
 			db.Close()
@@ -721,10 +741,10 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, to_session, project)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, req.ToSession, req.Project)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -747,7 +767,7 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 		WHERE id IN (SELECT id FROM (
 			SELECT id, SUM(length(body) + length(exchanges)) OVER (ORDER BY urgent DESC, created_at, rowid) AS running,
 				ROW_NUMBER() OVER (ORDER BY urgent DESC, created_at, rowid) AS n
-			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?
+			FROM requests WHERE to_agent = ? AND `+sessionClause(ctx, "to_session")+` AND status = ? AND expires_at > ?
 			ORDER BY urgent DESC, created_at, rowid LIMIT ?
 		) WHERE n = 1 OR running <= ?)
 		RETURNING `+requestCols,
@@ -769,7 +789,7 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 // delivering them.
 func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ?`,
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND `+sessionClause(ctx, "to_session")+` AND status = ? AND expires_at > ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
 	return n, err
 }
@@ -822,7 +842,7 @@ func (s *Store) AgentsWithQueuedRequests(ctx context.Context) ([]string, error) 
 // CountUrgentQueued returns how many of agent's queued requests are urgent.
 func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ?`,
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND `+sessionClause(ctx, "to_session")+` AND status = ? AND urgent = 1 AND expires_at > ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&n)
 	return n, err
 }
@@ -912,7 +932,7 @@ func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([
 
 func (s *Store) pendingRequests(ctx context.Context, agent, kindCond string, limit int) ([]envelope.Pending, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
-		WHERE to_agent = ? AND status = ? AND expires_at > ? AND `+kindCond+` ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
+		WHERE to_agent = ? AND `+sessionClause(ctx, "to_session")+` AND status = ? AND expires_at > ? AND `+kindCond+` ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusQueued), s.now().UnixMilli(), string(envelope.KindPing), limit)
 	if err != nil {
 		return nil, err
@@ -952,7 +972,7 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	if req.To != agent {
+	if req.To != agent || !targetSessionMatches(req, session) {
 		return envelope.Request{}, ErrForbidden
 	}
 	now := s.now()
@@ -987,7 +1007,7 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?,
 		lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END
-		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
+		WHERE id = ? AND to_agent = ? AND `+sessionClause(ctx, "to_session")+` AND `+sessionClause(ctx, "claim_session")+` AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
 		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
 		id, claimer, string(envelope.StatusClaimed), now.UnixMilli())
 	if err != nil {
@@ -1010,7 +1030,7 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 	if err != nil {
 		return envelope.Reply{}, err
 	}
-	if req.To != agent {
+	if req.To != agent || !recipientSessionMatches(req, envelope.Session(ctx)) {
 		return envelope.Reply{}, ErrForbidden
 	}
 	if rep.Status == envelope.StatusNeedsInput {
@@ -1074,7 +1094,8 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if req.From != agent && req.To != agent {
+	if (req.From != agent || !sessionMatches(ctx, req.FromSession)) &&
+		(req.To != agent || !targetSessionMatches(req, envelope.Session(ctx))) {
 		return Result{}, ErrNotFound
 	}
 	rep, err := s.replyFor(ctx, id)
@@ -1123,7 +1144,7 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 	if err != nil {
 		return err
 	}
-	if req.From != agent {
+	if req.From != agent || !sessionMatches(ctx, req.FromSession) {
 		return ErrForbidden
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`,
@@ -1271,7 +1292,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, from_session, claim_session, to_session, project`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1280,7 +1301,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var chain, kind, status, atts, exchanges string
 	var created, progressAt int64
 	var note string
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &r.FromSession, &r.ClaimedSession, &r.ToSession, &r.Project); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {

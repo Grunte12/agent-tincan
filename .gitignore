@@ -6,3 +6,5 @@
 .env
 coverage.out
 /internal/macapp/embedded/
+__pycache__/
+*.pyc

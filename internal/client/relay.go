@@ -296,6 +296,7 @@ func NewRelayForFile(c Config, path string) (*Relay, error) {
 	}
 	r.proxyFile = path
 	r.agent = c.Agent
+	r.session = c.SessionID
 	r.key = c.RelayKey
 	r.known = c.RelayURLs
 	if os.Getenv("TINCAN_RELAY") == "" {
@@ -338,6 +339,15 @@ func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, p
 type sent = envelope.SendResponse
 
 func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
+	if target := envelope.TargetSession(ctx); target != "" {
+		if !envelope.ValidSessionID(target) {
+			return sent{}, errors.New("invalid target session ID")
+		}
+		in["session_id"] = target
+	}
+	if project := envelope.Project(ctx); project != "" {
+		in["project"] = project
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	return out, err
@@ -742,8 +752,8 @@ func (r *Relay) headers(req *http.Request) {
 		req.Header.Set(VersionHeader, r.version)
 	}
 	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
-	if r.session != "" {
-		req.Header.Set(SessionHeader, r.session)
+	if session := r.sessionScope(req.Context()); session != "" {
+		req.Header.Set(SessionHeader, session)
 	}
 }
 
@@ -753,6 +763,18 @@ func (r *Relay) SetSession(session string) { r.session = session }
 
 // Session is the session set by SetSession.
 func (r *Relay) Session() string { return r.session }
+
+// sessionScope prefers host-owned per-call context. This keeps one shared MCP
+// connection safe when concurrent tool calls belong to different chats.
+func (r *Relay) sessionScope(ctx context.Context) string {
+	if session := envelope.Session(ctx); session != "" {
+		return session
+	}
+	return r.session
+}
+
+// AgentName is the configured roster identity, never model input.
+func (r *Relay) AgentName() string { return r.agent }
 
 // ProxyAuthError is a relay call the proxy refused with HTTP 407: the proxy
 // credentials have expired or are wrong, and the config offered nothing

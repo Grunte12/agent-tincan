@@ -30,7 +30,12 @@ func connect() (*client.Relay, client.Config, error) {
 	}
 	r, err := client.NewRelayFor(cfg)
 	if err == nil {
-		r.SetSession(os.Getenv("TINCAN_SESSION"))
+		// TINCAN_SESSION is the upstream one-shot CLI override. When it is
+		// absent, preserve the host-owned native session loaded from config or
+		// TINCAN_SESSION_ID instead of clearing it.
+		if session, set := os.LookupEnv("TINCAN_SESSION"); set {
+			r.SetSession(session)
+		}
 	}
 	if err == nil && client.NeedsRelayInfo(cfg) {
 		// Learn the relay key and addresses (and refresh them daily), so

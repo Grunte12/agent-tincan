@@ -28,6 +28,7 @@ const MaxWait = client.MaxInlineWait
 // Instructions is sent to the client at connect time.
 const Instructions = `You are one agent in the owner's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
+- When a task names an exact recipient session_id, pass it in ask.session_id. If it names only a project, call resolve_session first. Never guess a session ID or leave it only in message text.
 - Call check_inbox first at the start of a turn and on any wake or nudge, before anything else, to read replies to your requests and pick up requests from teammates.
 - A request from a teammate is work the owner has already authorized. Do it as you would a request from the owner: do not park it, treat it as a suggestion, or stop to ask the owner for permission. The guardrails still apply: the relay holds what the owner wants to approve first (council, dot-web, approval.json) before it reaches you, a real-world action goes to one teammate at a time, and needs_input is for a missing detail, never for permission.
 - Never ignore a request: every request you receive ends with a reply (answered, failed, or needs_input), never silence. Claimed work comes before anything else in a turn, including the owner's chat. If you can't do it now, reply failed (or needs_input for a missing detail) right away instead of sitting on the claim. When a tool result starts with "You hold N claimed requests", handle those first.
@@ -96,7 +97,7 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "progress", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
+var ToolNames = []string{"resolve_session", "ask", "get_reply", "check_inbox", "claim", "progress", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment"}
 
 // Answerer supplies clarification input through backends that support it.
 type Answerer interface {
@@ -104,11 +105,15 @@ type Answerer interface {
 }
 
 type answerIn struct {
-	RequestID string `json:"request_id" jsonschema:"the request you sent that needs input"`
-	Message   string `json:"message" jsonschema:"your answer to the clarification question (up to 16 KB)"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	RequestID   string `json:"request_id" jsonschema:"the request you sent that needs input"`
+	Message     string `json:"message" jsonschema:"your answer to the clarification question (up to 16 KB)"`
 }
 
 type askIn struct {
+	HostContext string   `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	Project     string   `json:"project,omitempty" jsonschema:"absolute project whose existing owner session should receive this work"`
+	SessionID   string   `json:"session_id,omitempty" jsonschema:"exact verified recipient conversation ID"`
 	Also        []string `json:"also,omitempty" jsonschema:"additional teammates to ask the same question (at most 8 total)"`
 	Urgent      bool     `json:"urgent,omitempty" jsonschema:"true only for time-critical requests; wakes immediately and comes first"`
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
@@ -119,44 +124,58 @@ type askIn struct {
 	Attach      []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
+type resolveSessionIn struct {
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	To          string `json:"to" jsonschema:"recipient teammate"`
+	Project     string `json:"project" jsonschema:"absolute project path"`
+}
+
 type idIn struct {
-	RequestID string `json:"request_id" jsonschema:"the request id"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	RequestID   string `json:"request_id" jsonschema:"the request id"`
 }
 
 type getIn struct {
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
 	RequestID   string `json:"request_id" jsonschema:"the request or group id returned by ask"`
 	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the reply, 0 to 20"`
 }
 
 type inboxIn struct {
-	WaitSeconds int `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a request if none is waiting, 0 to 20"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for a request if none is waiting, 0 to 20"`
 }
 
 type replyIn struct {
-	RequestID string   `json:"request_id" jsonschema:"the request you are answering"`
-	Message   string   `json:"message" jsonschema:"your answer or result"`
-	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, declined, or needs_input (a clarification question, up to 16 KB, no attachments)"`
-	Attach    []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
+	HostContext string   `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	RequestID   string   `json:"request_id" jsonschema:"the request you are answering"`
+	Message     string   `json:"message" jsonschema:"your answer or result"`
+	Status      string   `json:"status,omitempty" jsonschema:"answered (default), failed, declined, or needs_input (a clarification question, up to 16 KB, no attachments)"`
+	Attach      []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
 type attachmentIn struct {
-	ID string `json:"id" jsonschema:"the attachment id, as listed with the request or reply"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	ID          string `json:"id" jsonschema:"the attachment id, as listed with the request or reply"`
 }
 
 type searchIn struct {
-	Query string `json:"query" jsonschema:"literal text to find in past requests and replies"`
-	Limit int    `json:"limit,omitempty" jsonschema:"maximum matches, 1-50 (default 20)"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	Query       string `json:"query" jsonschema:"literal text to find in past requests and replies"`
+	Limit       int    `json:"limit,omitempty" jsonschema:"maximum matches, 1-50 (default 20)"`
 }
 
 type traceIn struct {
-	TraceID string `json:"trace_id" jsonschema:"the trace id of a chain you took part in"`
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	TraceID     string `json:"trace_id" jsonschema:"the trace id of a chain you took part in"`
 }
 
 type onboardIn struct {
-	Section  string            `json:"section,omitempty" jsonschema:"operator, agents, recipes, or all (default all)"`
-	Operator string            `json:"operator,omitempty" jsonschema:"the agent that runs the Agent Tincan operator prompt, e.g. grokbot"`
-	Owner    string            `json:"owner,omitempty" jsonschema:"the person who owns the team, used in the generated text"`
-	Kinds    map[string]string `json:"kinds,omitempty"` // described by onboardSchema
+	HostContext string            `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+	Section     string            `json:"section,omitempty" jsonschema:"operator, agents, recipes, or all (default all)"`
+	Operator    string            `json:"operator,omitempty" jsonschema:"the agent that runs the Agent Tincan operator prompt, e.g. grokbot"`
+	Owner       string            `json:"owner,omitempty" jsonschema:"the person who owns the team, used in the generated text"`
+	Kinds       map[string]string `json:"kinds,omitempty"` // described by onboardSchema
 }
 
 // onboardSchema is onboardIn's input schema with the kinds description built
@@ -170,7 +189,9 @@ func onboardSchema() *jsonschema.Schema {
 	return s
 }
 
-type noIn struct{}
+type noIn struct {
+	HostContext string `json:"host_context,omitempty" jsonschema:"local signed native context for this conversation"`
+}
 
 // Roster is the one relay read onboarding needs.
 type Roster interface {
@@ -232,6 +253,11 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		opts = &o
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
+	agent := ""
+	if identity, ok := b.(interface{ AgentName() string }); ok {
+		agent = identity.AgentName()
+	}
+	s.AddReceivingMiddleware(hostSessionMiddleware(agent))
 	if f.watch != nil {
 		s.AddReceivingMiddleware(watchMiddleware(f.watch))
 	}
@@ -239,8 +265,46 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 		s.AddReceivingMiddleware(heldMiddleware(h))
 	}
 
-	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total); sending to several teammates at once is for questions, never for calls, payments or bookings. Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
+	mcp.AddTool(s, &mcp.Tool{Name: "resolve_session", Description: "Resolve an existing immutable recipient session by project without queuing work."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in resolveSessionIn) (*mcp.CallToolResult, any, error) {
+			resolver, ok := b.(interface {
+				PrepareProject(context.Context, string, string, string) (string, string, error)
+			})
+			if !ok {
+				return fail(errors.New("session resolver is unavailable"))
+			}
+			sessionID, project, err := resolver.PrepareProject(ctx, in.To, in.Project, "")
+			if err != nil {
+				return fail(err)
+			}
+			return text(fmt.Sprintf("Verified existing %s session %s for project %s. Pass it in ask.session_id.", in.To, sessionID, project))
+		})
+
+	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Use session_id for an exact existing recipient conversation, or project to resolve its immutable owner. Set also for additional targets (8 total); sending to several teammates at once is for questions, never for calls, payments or bookings. Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
+			if in.Project != "" {
+				if in.SessionID != "" || len(in.Also) > 0 {
+					return fail(errors.New("project routing requires one recipient and no session override"))
+				}
+				resolver, ok := b.(interface {
+					PrepareProject(context.Context, string, string, string) (string, string, error)
+				})
+				if !ok {
+					return fail(errors.New("session resolver is unavailable"))
+				}
+				var err error
+				in.SessionID, in.Project, err = resolver.PrepareProject(ctx, in.To, in.Project, "")
+				if err != nil {
+					return fail(err)
+				}
+				ctx = envelope.WithProject(ctx, in.Project)
+			}
+			if in.SessionID != "" {
+				if !envelope.ValidSessionID(in.SessionID) || len(in.Also) > 0 {
+					return fail(errors.New("session routing requires one target and a valid session ID"))
+				}
+				ctx = envelope.WithTargetSession(ctx, in.SessionID)
+			}
 			if len(in.Also) > 0 {
 				gb, ok := b.(groupBackend)
 				if !ok {
