@@ -5,8 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"path/filepath"
-	"strings"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
@@ -40,10 +38,8 @@ func decodeSessionCatalogBody(w http.ResponseWriter, r *http.Request, dst any) b
 }
 
 func validCatalogScope(host, project string) bool {
-	return envelope.ValidSessionHost(host) && project != "" && len(project) <= 4096 && filepath.IsAbs(project) && filepath.Clean(project) == project && !containsNUL(project)
+	return envelope.ValidSessionHost(host) && envelope.ValidSessionProject(project)
 }
-
-func containsNUL(value string) bool { return strings.IndexByte(value, 0) >= 0 }
 
 func (s *Server) handleDiscoverSession(w http.ResponseWriter, r *http.Request) {
 	agent := s.agent(w, r)

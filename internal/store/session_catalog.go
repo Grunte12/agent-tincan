@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 )
 
 // DiscoverSession records a locally observed native conversation. The first
@@ -173,7 +172,7 @@ func (s *Store) ResolveProjectSession(ctx context.Context, agent, host, project 
 // RegisteredSession resolves an exact recipient-owned native ID. It fails
 // closed for unknown, cross-agent, or multiply registered routes.
 func (s *Store) RegisteredSession(ctx context.Context, agent, sessionID string) (envelope.SessionBinding, error) {
-	if !validCatalogAgent(agent) || !envelope.ValidSessionID(sessionID) || sessionID == "" {
+	if !identity.ValidName(agent) || !envelope.ValidSessionID(sessionID) || sessionID == "" {
 		return envelope.SessionBinding{}, fmt.Errorf("invalid native session lookup")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT host, project FROM native_session_discoveries WHERE agent=? AND session_id=? ORDER BY host, project`, agent, sessionID)
@@ -205,7 +204,7 @@ func (s *Store) RegisteredSession(ctx context.Context, agent, sessionID string) 
 // conversation from discovery and ownership. Active work prevents retirement
 // so a lifecycle event can never orphan an in-flight request.
 func (s *Store) RetireSession(ctx context.Context, binding envelope.SessionBinding) (bool, error) {
-	if !validCatalogAgent(binding.Agent) || !envelope.ValidSessionHost(binding.Host) ||
+	if !identity.ValidName(binding.Agent) || !envelope.ValidSessionHost(binding.Host) ||
 		binding.SessionID == "" || !envelope.ValidSessionID(binding.SessionID) {
 		return false, fmt.Errorf("invalid native session retirement")
 	}
@@ -335,26 +334,14 @@ func putSessionOwner(ctx context.Context, tx *sql.Tx, binding envelope.SessionBi
 }
 
 func validateSessionBinding(binding envelope.SessionBinding, allowEmptyProject bool) error {
-	if !validCatalogAgent(binding.Agent) || !envelope.ValidSessionHost(binding.Host) || binding.SessionID == "" || !envelope.ValidSessionID(binding.SessionID) {
+	if !identity.ValidName(binding.Agent) || !envelope.ValidSessionHost(binding.Host) || binding.SessionID == "" || !envelope.ValidSessionID(binding.SessionID) {
 		return fmt.Errorf("invalid native session binding")
 	}
 	if binding.Project == "" && allowEmptyProject {
 		return nil
 	}
-	if binding.Project == "" || len(binding.Project) > 4096 || strings.IndexByte(binding.Project, 0) >= 0 || !filepath.IsAbs(binding.Project) || filepath.Clean(binding.Project) != binding.Project {
+	if !envelope.ValidSessionProject(binding.Project) {
 		return fmt.Errorf("invalid native session project")
 	}
 	return nil
-}
-
-func validCatalogAgent(s string) bool {
-	if len(s) == 0 || len(s) > 32 || !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9')) {
-		return false
-	}
-	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
-			return false
-		}
-	}
-	return true
 }

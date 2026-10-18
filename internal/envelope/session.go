@@ -5,7 +5,6 @@ import "context"
 type sessionKey struct{}
 type targetSessionKey struct{}
 type projectKey struct{}
-type modelKey struct{}
 
 // Session IDs scope delivery within an authenticated agent. They do not
 // replace node/agent authentication or grant additional permissions.
@@ -40,8 +39,3 @@ func Project(ctx context.Context) string {
 	project, _ := ctx.Value(projectKey{}).(string)
 	return project
 }
-
-func WithModel(ctx context.Context, model string) context.Context {
-	return context.WithValue(ctx, modelKey{}, model)
-}
-func Model(ctx context.Context) string { model, _ := ctx.Value(modelKey{}).(string); return model }
