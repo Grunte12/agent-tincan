@@ -345,3 +345,24 @@ func validateSessionBinding(binding envelope.SessionBinding, allowEmptyProject b
 	}
 	return nil
 }
+
+// NativeSessionHosts advertises a host only when authenticated discoveries
+// agree. An ambiguous or undiscovered agent gets no inferred native adapter.
+func (s *Store) NativeSessionHosts(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT agent,MIN(host) FROM native_session_discoveries GROUP BY agent HAVING COUNT(DISTINCT host)=1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var agent, host string
+		if err := rows.Scan(&agent, &host); err != nil {
+			return nil, err
+		}
+		if envelope.ValidSessionHost(host) {
+			out[agent] = host
+		}
+	}
+	return out, rows.Err()
+}

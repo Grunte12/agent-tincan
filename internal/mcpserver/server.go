@@ -283,8 +283,8 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Use session_id for an exact existing recipient conversation, or project to resolve its immutable owner. Set also for additional targets (8 total); sending to several teammates at once is for questions, never for calls, payments or bookings. Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
 			if in.Project != "" {
-				if in.SessionID != "" || len(in.Also) > 0 {
-					return fail(errors.New("project routing requires one recipient and no session override"))
+				if len(in.Also) > 0 {
+					return fail(errors.New("project routing requires one recipient"))
 				}
 				resolver, ok := b.(interface {
 					PrepareProject(context.Context, string, string, string) (string, string, error)
@@ -292,10 +292,20 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if !ok {
 					return fail(errors.New("session resolver is unavailable"))
 				}
+				requestedSession := in.SessionID
 				var err error
-				in.SessionID, in.Project, err = resolver.PrepareProject(ctx, in.To, in.Project, "")
+				if creator, ok := b.(interface {
+					EnsureProject(context.Context, string, string, string) (string, string, error)
+				}); ok && requestedSession == "" {
+					in.SessionID, in.Project, err = creator.EnsureProject(ctx, in.To, in.Project, "")
+				} else {
+					in.SessionID, in.Project, err = resolver.PrepareProject(ctx, in.To, in.Project, "")
+				}
 				if err != nil {
 					return fail(err)
+				}
+				if requestedSession != "" && requestedSession != in.SessionID {
+					return fail(errors.New("target session does not match project owner; no task sent"))
 				}
 				ctx = envelope.WithProject(ctx, in.Project)
 			}

@@ -62,6 +62,9 @@ func ClampWait(d time.Duration) time.Duration { return min(max(d, 0), MaxInlineW
 
 // AgentInfo is one joined agent as the relay reports it.
 type AgentInfo struct {
+	// NativeHost is the relay's unique authenticated native discovery host.
+	NativeHost string `json:"native_host,omitempty"`
+
 	UpgradeAvailable string    `json:"upgrade_available,omitempty"`
 	Name             string    `json:"name"`
 	Online           bool      `json:"online"`

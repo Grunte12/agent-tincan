@@ -16,7 +16,7 @@ type SessionBinding struct {
 
 func ValidSessionHost(host string) bool {
 	switch host {
-	case "codex", "cursor", "antigravity", "muse", "claude-code":
+	case "codex", "cursor", "antigravity", "muse", "claude-code", "opencode", "hermes":
 		return true
 	}
 	return false

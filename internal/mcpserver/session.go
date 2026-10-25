@@ -60,7 +60,7 @@ func hostSessionMiddleware(agent string) mcp.Middleware {
 			if host == "" {
 				return next(ctx, method, req)
 			}
-			if host != "cursor" && host != "antigravity" && host != "muse" {
+			if host != "cursor" && host != "antigravity" && host != "muse" && host != "opencode" && host != "hermes" {
 				return failScope(errors.New("unsupported configured native host"))
 			}
 			params, ok := req.GetParams().(*mcp.CallToolParamsRaw)

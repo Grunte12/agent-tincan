@@ -12,6 +12,15 @@ import (
 // PrepareProject invokes only the operator-configured local adapter. No peer
 // can select an executable, credential directory, registry, or fallback model.
 func (r *Relay) PrepareProject(ctx context.Context, to, project, model string) (string, string, error) {
+	return r.prepareProject(ctx, to, project, model, false)
+}
+
+// EnsureProject uses the recipient host's operator provisioner only when no owner exists.
+func (r *Relay) EnsureProject(ctx context.Context, to, project, model string) (string, string, error) {
+	return r.prepareProject(ctx, to, project, model, true)
+}
+
+func (r *Relay) prepareProject(ctx context.Context, to, project, model string, create bool) (string, string, error) {
 	if r.sessionScope(ctx) == "" {
 		return "", "", errors.New("project communication requires the originating host session ID")
 	}
@@ -31,6 +40,12 @@ func (r *Relay) PrepareProject(ctx context.Context, to, project, model string) (
 	for _, agent := range agents {
 		if agent.Name == to {
 			kind = agent.Kind
+			if envelope.ValidSessionHost(agent.Name) && (kind == "" || kind == "generic") {
+				kind = agent.Name
+			}
+			if caps.SessionCatalog && envelope.ValidSessionHost(agent.NativeHost) {
+				kind = agent.NativeHost
+			}
 			if kind == "proxy-sandbox" {
 				kind = "muse"
 			}
@@ -57,6 +72,9 @@ func (r *Relay) PrepareProject(ctx context.Context, to, project, model string) (
 		}
 		if caps.SessionCatalog && os.Getenv("TINCAN_SESSION_CATALOG") != "local" && envelope.ValidSessionHost(kind) {
 			binding, err := r.ResolveProjectSession(ctx, to, kind, project)
+			if create && IsStatus(err, 404) {
+				binding, err = r.EnsureProjectSession(ctx, to, kind, project)
+			}
 			if err != nil {
 				return "", "", err
 			}

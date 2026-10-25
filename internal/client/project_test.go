@@ -263,3 +263,55 @@ func TestPrepareProjectUsesSharedNativeCatalogForAllHosts(t *testing.T) {
 }
 
 func strconvQuote(value string) string { b, _ := json.Marshal(value); return string(b) }
+
+func TestProjectRoutingUsesRelayNativeHostWithoutClientEnvironment(t *testing.T) {
+	t.Setenv("TINCAN_SESSION_HOSTS", "")
+	os.Unsetenv("TINCAN_SESSION_HOSTS")
+	t.Setenv("TINCAN_SESSION_CATALOG", "")
+	t.Setenv("TINCAN_SESSION_ROUTER", "")
+	m := testrelay.New(t, relay.Config{})
+	origin := scopedProjectClient(t, m, "grokbot")
+	for i, host := range []string{"antigravity", "codex"} {
+		agent := "generic-" + host
+		m.JoinOnMachineOf(t, "muse", agent)
+		m.Store.SetAgentKind(t.Context(), agent, "generic")
+		session := fmt.Sprintf("native-%d", i)
+		native, err := client.NewRelayForFile(client.Config{Relay: m.URL(agent), Agent: agent, SessionID: session}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		project := "/synthetic/project-" + host
+		if _, err = native.DiscoverSession(t.Context(), host, project); err != nil {
+			t.Fatal(err)
+		}
+		id, path, err := origin.PrepareProject(t.Context(), agent, project, "")
+		if err != nil || id != session || path != project {
+			t.Fatalf("%s resolved %q %q: %v", host, id, path, err)
+		}
+		agents, err := origin.Agents(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range agents {
+			if a.Name == agent && (a.Kind != "generic" || a.NativeHost != host) {
+				t.Fatalf("wrong advertised facts: %+v", a)
+			}
+		}
+	}
+	// A recipient with conflicting discovered hosts must never infer one.
+	ambiguous := m.Client(t, "generic-antigravity")
+	ambiguous.SetSession("other-host-session")
+	if _, err := ambiguous.DiscoverSession(t.Context(), "cursor", "/synthetic/other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := origin.PrepareProject(t.Context(), "generic-antigravity", "/synthetic/project-antigravity", ""); err == nil {
+		t.Fatal("ambiguous native host unexpectedly selected")
+	}
+	// Metadata lookup and failed resolution must not queue any work.
+	for _, agent := range []string{"generic-antigravity", "generic-codex"} {
+		in, err := m.Client(t, agent).Poll(t.Context(), 0)
+		if err != nil || len(in.Requests) != 0 {
+			t.Fatalf("unexpected work for %s: %+v %v", agent, in, err)
+		}
+	}
+}

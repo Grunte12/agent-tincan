@@ -30,7 +30,7 @@ func sessionDiscoverCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config or TINCAN_RELAY)")
-	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, or claude-code")
+	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, claude-code, opencode, or hermes")
 	cmd.Flags().StringVar(&project, "project", "", "absolute native project path")
 	_ = cmd.MarkFlagRequired("host")
 	_ = cmd.MarkFlagRequired("project")
@@ -59,7 +59,7 @@ func projectSessionCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config or TINCAN_RELAY)")
-	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, or claude-code")
+	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, claude-code, opencode, or hermes")
 	cmd.Flags().StringVar(&project, "project", "", "absolute native project path")
 	_ = cmd.MarkFlagRequired("host")
 	_ = cmd.MarkFlagRequired("project")
@@ -88,7 +88,7 @@ func sessionRetireCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config or TINCAN_RELAY)")
-	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, or claude-code")
+	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, claude-code, opencode, or hermes")
 	cmd.Flags().StringVar(&sessionID, "session-id", "", "deleted native session ID owned by this agent")
 	_ = cmd.MarkFlagRequired("host")
 	_ = cmd.MarkFlagRequired("session-id")
@@ -120,7 +120,7 @@ func sessionPreserveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: local admin socket)")
 	cmd.Flags().StringVar(&agent, "agent", "", "joined recipient agent name")
-	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, or claude-code")
+	cmd.Flags().StringVar(&host, "host", "", "native host: codex, cursor, antigravity, muse, claude-code, opencode, or hermes")
 	cmd.Flags().StringVar(&sessionID, "session-id", "", "verified existing native session UUID")
 	cmd.Flags().StringVar(&project, "project", "", "absolute project path, when verified")
 	for _, flag := range []string{"agent", "host", "session-id"} {

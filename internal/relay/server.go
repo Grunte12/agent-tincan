@@ -29,6 +29,11 @@ import (
 
 // Config tunes the relay.
 type Config struct {
+	// CreateProjectSession is an idempotent, operator-owned native provisioner.
+	// It must journal before native creation and refuse uncertain retries.
+	// Nil keeps missing projects closed; peers cannot select an executable.
+	CreateProjectSession func(context.Context, string, string, string) (envelope.SessionBinding, error)
+
 	// DefaultSessionRoutes are operator-selected shared receivers used only
 	// when no exact or project owner route exists.
 	DefaultSessionRoutes map[string]string
@@ -155,8 +160,9 @@ type Replier interface {
 
 // Server is the relay.
 type Server struct {
-	cfg Config
-	dir *identity.Directory
+	projectCreationLocks sync.Map
+	cfg                  Config
+	dir                  *identity.Directory
 	// lookupAgent is how requestTTL reads the recipient's kind; it is
 	// dir.Agent, replaced in tests to simulate a failed lookup.
 	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
@@ -341,6 +347,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/session-discovery", s.handleDiscoverSession)
 	mux.HandleFunc("POST /v1/session-retirement", s.handleRetireSession)
 	mux.HandleFunc("GET /v1/project-session", s.handleResolveProjectSession)
+	mux.HandleFunc("POST /v1/project-session", s.handleEnsureProjectSession)
 	mux.HandleFunc("GET /v1/poll", s.handlePoll)
 	mux.HandleFunc("GET /v1/notifications", s.handleNotifications)
 	mux.HandleFunc("POST /v1/replies/ack", s.handleAckReplies)
@@ -1444,6 +1451,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("agents web status: %v", err)
 	}
+	nativeHosts, err := s.store.NativeSessionHosts(r.Context())
+	if err != nil {
+		log.Printf("agents native hosts unavailable")
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -1452,7 +1463,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
+		info := client.AgentInfo{NativeHost: nativeHosts[a.Name], Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}

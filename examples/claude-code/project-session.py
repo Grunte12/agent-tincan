@@ -20,6 +20,8 @@ def environment():
     allowed = {'HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'LANG', 'TERM'}
     env = {k: v for k, v in os.environ.items() if k in allowed}
     env.setdefault('HOME', str(Path.home()))
+    bins = [Path.home() / '.local/bin', Path.home() / '.local/share/mise/installs/node/lts/bin', Path('/opt/homebrew/bin')]
+    env['PATH'] = os.pathsep.join([str(p) for p in bins if p.is_dir()] + [env.get('PATH', '/usr/bin:/bin')])
     env['NO_COLOR'] = '1'
     return env
 
@@ -102,6 +104,7 @@ def resolve_or_create(registry, project, model, claude='claude', timeout=90, *, 
                 try:
                     invocation = [
                         claude, '--print', '--output-format', 'json', '--session-id', actual_id,
+                        '--name', project.name,
                         '--tools', '', '--strict-mcp-config', '--mcp-config',
                         '{"mcpServers":{}}', '--disable-slash-commands', '--max-turns', '1',
                         'Initialize this persistent project conversation only. Do not use tools, '

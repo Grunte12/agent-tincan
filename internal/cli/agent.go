@@ -411,7 +411,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent string
+	var parent, project, sessionID string
 	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
@@ -428,6 +428,32 @@ func askCmd() *cobra.Command {
 			targets, err := client.NormalizeTargets(strings.Split(args[0], ","), "")
 			if err != nil {
 				return err
+			}
+			if (project != "" || sessionID != "") && len(targets) != 1 {
+				return errors.New("session routing requires one recipient")
+			}
+			ctx := cmd.Context()
+			if project != "" {
+				requestedSession := sessionID
+				var resolvedProject string
+				if requestedSession == "" {
+					sessionID, resolvedProject, err = r.EnsureProject(ctx, targets[0], project, "")
+				} else {
+					sessionID, resolvedProject, err = r.PrepareProject(ctx, targets[0], project, "")
+				}
+				if err != nil {
+					return err
+				}
+				if requestedSession != "" && requestedSession != sessionID {
+					return errors.New("target session does not match project owner; no task sent")
+				}
+				ctx = envelope.WithProject(ctx, resolvedProject)
+			}
+			if sessionID != "" {
+				if !envelope.ValidSessionID(sessionID) {
+					return errors.New("invalid target session ID")
+				}
+				ctx = envelope.WithTargetSession(ctx, sessionID)
 			}
 			if len(targets) > 1 {
 				kind := envelope.KindAsk
@@ -454,7 +480,7 @@ func askCmd() *cobra.Command {
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				sent, err := r.SendAttachedResult(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
+				sent, err := r.SendAttachedResult(ctx, args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
@@ -470,7 +496,7 @@ func askCmd() *cobra.Command {
 				}
 				return nil
 			}
-			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait), urgent)
+			res, err := r.AskAttached(ctx, args[0], body, parent, ids, client.ClampWait(wait), urgent)
 			if err != nil {
 				return err
 			}
@@ -486,6 +512,8 @@ func askCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
+	cmd.Flags().StringVar(&project, "project", "", "absolute recipient project path; resolve its existing owner")
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "exact existing recipient session ID (not the sender ID)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")

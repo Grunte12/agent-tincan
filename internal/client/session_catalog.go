@@ -66,3 +66,18 @@ func (r *Relay) RetireSession(ctx context.Context, host, sessionID string) (bool
 	err := r.call(ctx, r.api, "POST", "/v1/session-retirement", map[string]string{"host": host, "session_id": sessionID}, &out)
 	return out.Changed, err
 }
+
+// EnsureProjectSession explicitly provisions a missing native project owner on the relay host.
+func (r *Relay) EnsureProjectSession(ctx context.Context, agent, host, project string) (envelope.SessionBinding, error) {
+	var out struct {
+		Binding envelope.SessionBinding `json:"binding"`
+	}
+	if err := r.catalogReady(ctx); err != nil {
+		return out.Binding, err
+	}
+	err := r.call(ctx, r.api, "POST", "/v1/project-session", map[string]string{"agent": agent, "host": host, "project": project}, &out)
+	if err == nil && (out.Binding.Agent != agent || out.Binding.Host != host || out.Binding.Project != project || out.Binding.SessionID == "" || !envelope.ValidSessionID(out.Binding.SessionID)) {
+		return envelope.SessionBinding{}, errors.New("created project owner identity mismatch")
+	}
+	return out.Binding, err
+}

@@ -164,7 +164,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{DefaultSessionRoutes: f.defaultSessionRoutes, RequireSessionRoutingTo: f.requireSessionRouting, Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice}
+	return relay.Config{CreateProjectSession: relay.CommandSessionCreator(os.Getenv("TINCAN_SESSION_CREATOR")), DefaultSessionRoutes: f.defaultSessionRoutes, RequireSessionRoutingTo: f.requireSessionRouting, Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice}
 }
 
 // directoryConfig maps the relay flags onto the identity directory.

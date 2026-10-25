@@ -21,7 +21,7 @@ spec = importlib.util.spec_from_file_location('private_files', private_source)
 private = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(private)
 Error = private.RouteError
-HOSTS = {'codex', 'cursor', 'antigravity', 'muse'}
+HOSTS = {'codex', 'cursor', 'antigravity', 'muse', 'claude-code', 'opencode', 'hermes'}
 DEFAULT_REGISTRY = Path.home() / '.config/tincan/host-session-routes.json'
 DEFAULT_KEY = Path.home() / '.config/tincan/host-session-key'
 
@@ -257,6 +257,7 @@ def publish(row, tincan, config, roots=None):
     env = os.environ.copy()
     env['TINCAN_SESSION_ID'] = row['session_id']
     env['TINCAN_CONFIG'] = str(config)
+    env.pop('TINCAN_SESSION', None)
     env.pop('CODEX_THREAD_ID', None)
     env.pop('CLAUDE_CODE_SESSION_ID', None)
     result = subprocess.run([str(tincan), 'session-discover', '--host', row['host'], '--project', common],
